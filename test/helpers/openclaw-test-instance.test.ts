@@ -241,10 +241,15 @@ async function createGatewayControl(): Promise<FakeGatewayControl> {
 
 async function createFakeGateway(
   sequence: string,
-  startTimeoutMs = 1_000,
-  stopTimeoutMs = 1_500,
-  control?: { url: string; holdPreparation?: boolean },
-  ownerOptions: {
+  {
+    startTimeoutMs = 1_000,
+    stopTimeoutMs = 1_500,
+    control,
+    ...ownerOptions
+  }: {
+    startTimeoutMs?: number;
+    stopTimeoutMs?: number;
+    control?: { url: string; holdPreparation?: boolean };
     signal?: AbortSignal;
     verifyCleanup?: (cleanup: () => Promise<void>) => Promise<void>;
   } = {},
@@ -499,21 +504,29 @@ async function isPortReserved(port: number): Promise<boolean> {
   }
 }
 
+// Freeze policy time without replacing real HTTP, child events, or teardown.
+function freezePolicyClock(signal: AbortSignal) {
+  signal.throwIfAborted();
+  const now = Date.now.bind(Date);
+  const fixtureTime = now();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureTime);
+  const restoreClock = () => {
+    clock.mockRestore();
+    signal.removeEventListener("abort", restoreClock);
+  };
+  signal.addEventListener("abort", restoreClock, { once: true });
+  return { clock, now, fixtureTime, restoreClock };
+}
+
 async function startGatewayForPortLifecycle(
   instance: OpenClawTestInstance,
   signal: AbortSignal,
 ): Promise<void> {
-  // Port custody is ordered by real child exit/readiness, not native bootstrap speed.
-  // Freeze only startup policy time; HTTP, child events, and teardown stay real.
-  signal.throwIfAborted();
-  const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
-  const restoreClock = () => clock.mockRestore();
-  signal.addEventListener("abort", restoreClock, { once: true });
+  const { restoreClock } = freezePolicyClock(signal);
   try {
     await trackOperation(instance.startGateway());
   } finally {
     restoreClock();
-    signal.removeEventListener("abort", restoreClock);
   }
 }
 
@@ -529,6 +542,31 @@ function createGatewayProcessState(
     signalCode: null as NodeJS.Signals | null,
     ...overrides,
   });
+}
+
+function waitForReady(
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  {
+    processState = createGatewayProcessState(),
+    signal,
+    record,
+  }: {
+    processState?: ReturnType<typeof createGatewayProcessState>;
+    signal?: AbortSignal;
+    record?: (diagnostic: GatewayReadinessDiagnostic) => void;
+  } = {},
+) {
+  return testing.waitForGatewayReady(
+    processState,
+    [],
+    [],
+    12345,
+    timeoutMs,
+    fetchImpl,
+    signal,
+    record,
+  );
 }
 
 function readReadinessReceipt(error: unknown) {
@@ -654,7 +692,7 @@ describe("openclaw test instance", () => {
     "preserves the refusal when reacquiring the same port fails (%s)",
     async (action, { signal }) => {
       const control = await createGatewayControl();
-      const { instance } = await createFakeGateway(action, 1_000, 1_500, control, { signal });
+      const { instance } = await createFakeGateway(action, { control, signal });
       const exited = createDeferred();
       control.observers.onLaunch = () => {
         instance.child?.once("exit", () => exited.resolve());
@@ -737,12 +775,9 @@ describe("openclaw test instance", () => {
     async (mode, { signal }) => {
       await withEnvAsync({ OPENAI_API_KEY: "ambient-provider-fixture" }, async () => {
         const control = mode === "overflow-close" ? await createGatewayControl() : undefined;
-        const { instance, tracePath, readAttempts } = await createFakeGateway(
-          "cli-json",
-          1_000,
-          1_500,
+        const { instance, tracePath, readAttempts } = await createFakeGateway("cli-json", {
           control,
-        );
+        });
         // The command must not merge a removed credential back from its parent.
         delete instance.env.OPENAI_API_KEY;
         const characters =
@@ -837,12 +872,9 @@ describe("openclaw test instance", () => {
             : mode === "signal"
               ? "signal"
               : "cli";
-      const { instance, tracePath, readAttempts } = await createFakeGateway(
-        sequence,
-        1_000,
-        1_500,
-        fixtureControl,
-      );
+      const { instance, tracePath, readAttempts } = await createFakeGateway(sequence, {
+        control: fixtureControl,
+      });
       const scope = new AsyncLocalStorage<boolean>();
       const timers = new Map<number, NodeJS.Timeout>();
       const hook = createHook({
@@ -943,7 +975,9 @@ describe("openclaw test instance", () => {
     "keeps claimed port offset %i unavailable while its child starts",
     async (offset, { signal }) => {
       const control = await createGatewayControl();
-      const { instance } = await createFakeGateway("held-unrelated", 10_000, 1_500, control, {
+      const { instance } = await createFakeGateway("held-unrelated", {
+        startTimeoutMs: 10_000,
+        control,
         signal,
       });
       const starting = startGatewayForPortLifecycle(instance, signal);
@@ -1087,15 +1121,10 @@ describe("openclaw test instance", () => {
       const control = await createGatewayControl();
       const { instance } = await createFakeGateway(
         interveningStop ? "held-ready,ready" : "held-ready",
-        1_000,
-        1_500,
-        control,
+        { control },
       );
       // Startup ordering must not depend on native bootstrap consuming the readiness budget.
-      signal.throwIfAborted();
-      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
-      const restoreClock = () => clock.mockRestore();
-      signal.addEventListener("abort", restoreClock, { once: true });
+      const { restoreClock } = freezePolicyClock(signal);
       let firstStart: Promise<void> | undefined;
       let stopped: Promise<void> | undefined;
       let secondStart: Promise<void> | undefined;
@@ -1141,7 +1170,6 @@ describe("openclaw test instance", () => {
         expect(await response.json()).toEqual({ ready: true });
       } finally {
         restoreClock();
-        signal.removeEventListener("abort", restoreClock);
         control.unblock();
         await Promise.allSettled([firstStart, stopped, secondStart]);
       }
@@ -1152,16 +1180,10 @@ describe("openclaw test instance", () => {
     const controller = new AbortController();
     const cancelled = new Error("instance owner cancelled during preparation");
     const control = await createGatewayControl();
-    const { instance, tracePath, readAttempts } = await createFakeGateway(
-      "ready",
-      1_000,
-      1_500,
-      {
-        url: control.url,
-        holdPreparation: true,
-      },
-      { signal: controller.signal },
-    );
+    const { instance, tracePath, readAttempts } = await createFakeGateway("ready", {
+      control: { url: control.url, holdPreparation: true },
+      signal: controller.signal,
+    });
     const first = trackOperation(instance.startGateway());
     const firstOutcome = first.catch((error: unknown) => error);
     await Promise.race([control.reached, first]);
@@ -1198,15 +1220,10 @@ describe("openclaw test instance", () => {
       const cancelled = new Error(`instance owner cancelled during ${phase}`);
       const pending = phase === "pending probe";
       const control = pending ? await createGatewayControl() : undefined;
-      const { instance } = await createFakeGateway(
-        pending ? "held-ready" : "ready",
-        1_000,
-        1_500,
+      const { instance } = await createFakeGateway(pending ? "held-ready" : "ready", {
         control,
-        {
-          signal: controller.signal,
-        },
-      );
+        signal: controller.signal,
+      });
       const nativeFetch = globalThis.fetch;
       let child: typeof instance.child;
       const fetchSpy = pending
@@ -1252,15 +1269,10 @@ describe("openclaw test instance", () => {
   it("joins a cancelled CLI command before releasing instance state", async ({ signal }) => {
     const controller = new AbortController();
     const control = await createGatewayControl();
-    const { instance, tracePath, readAttempts } = await createFakeGateway(
-      "cli",
-      1_000,
-      1_500,
+    const { instance, tracePath, readAttempts } = await createFakeGateway("cli", {
       control,
-      {
-        signal: controller.signal,
-      },
-    );
+      signal: controller.signal,
+    });
     const command = trackOperation(instance.cli(["wait"], { timeoutMs: 1_000 }));
     const outcome = command.catch((error: unknown) => error);
     try {
@@ -1290,18 +1302,13 @@ describe("openclaw test instance", () => {
 
   it("starts a ready replacement after a real readiness deadline expires", async ({ signal }) => {
     const control = await createGatewayControl();
-    const { instance } = await createFakeGateway("never-ready,ready", 1_000, 1_500, control);
+    const { instance } = await createFakeGateway("never-ready,ready", { control });
     let firstOwnerPid: number | undefined;
     control.observers.onLaunch = () => {
       firstOwnerPid = instance.child?.pid;
     };
     // Charge the unchanged real deadline only after the child proves it is running but unready.
-    signal.throwIfAborted();
-    const now = Date.now.bind(Date);
-    const fixtureTime = now();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureTime);
-    const restoreClock = () => clock.mockRestore();
-    signal.addEventListener("abort", restoreClock, { once: true });
+    const { clock, now, fixtureTime, restoreClock } = freezePolicyClock(signal);
     let readinessStartedAt: number | undefined;
     const nativeFetch = globalThis.fetch;
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (...args) => {
@@ -1328,7 +1335,6 @@ describe("openclaw test instance", () => {
       error = await trackOperation(instance.startGateway()).catch((failure: unknown) => failure);
     } finally {
       restoreClock();
-      signal.removeEventListener("abort", restoreClock);
       fetchSpy.mockRestore();
     }
     expect(error).toBeInstanceOf(Error);
@@ -1412,9 +1418,8 @@ describe("openclaw test instance", () => {
     "does not launch after %s settles during entrypoint preparation",
     async (method) => {
       const control = await createGatewayControl();
-      const { instance } = await createFakeGateway("ready", 1_000, 1_500, {
-        url: control.url,
-        holdPreparation: true,
+      const { instance } = await createFakeGateway("ready", {
+        control: { url: control.url, holdPreparation: true },
       });
       const firstStart = trackOperation(instance.startGateway());
       await Promise.race([control.reached, firstStart]);
@@ -1458,12 +1463,10 @@ describe("openclaw test instance", () => {
         ? PROFILED_LEGACY_MIGRATION_REFUSAL
         : LEGACY_MIGRATION_REFUSAL;
     const control = action.includes("late-") ? await createGatewayControl() : undefined;
-    const { instance, readAttempts } = await createFakeGateway(
-      `${action},config-refuse`,
-      10_000,
-      1_500,
+    const { instance, readAttempts } = await createFakeGateway(`${action},config-refuse`, {
+      startTimeoutMs: 10_000,
       control,
-    );
+    });
     if (action === "profile-legacy-refuse" || action.startsWith("startup-")) {
       instance.env.OPENCLAW_PROFILE = "qa-fixture";
     }
@@ -1522,15 +1525,11 @@ describe("openclaw test instance", () => {
   it("does not retry a drained migration refusal after owner cancellation", async () => {
     const controller = new AbortController();
     const control = await createGatewayControl();
-    const { instance, readAttempts } = await createFakeGateway(
-      "late-refuse,ready",
-      10_000,
-      1_500,
+    const { instance, readAttempts } = await createFakeGateway("late-refuse,ready", {
+      startTimeoutMs: 10_000,
       control,
-      {
-        signal: controller.signal,
-      },
-    );
+      signal: controller.signal,
+    });
     const exited = createDeferred();
     control.observers.onLaunch = () => {
       instance.child?.once("exit", () => exited.resolve());
@@ -1555,19 +1554,12 @@ describe("openclaw test instance", () => {
     "restarts one %s refusal with identical launch state and owns the ready child",
     async (refusalAction, { signal: testSignal }) => {
       const control = refusalAction === "late-refuse" ? await createGatewayControl() : undefined;
-      const { instance, readAttempts } = await createFakeGateway(
-        `${refusalAction},ready`,
-        1_000,
-        1_500,
+      const { instance, readAttempts } = await createFakeGateway(`${refusalAction},ready`, {
         control,
-      );
+      });
       // This case owns refusal/retry ordering, not deadline expiry. Keep native
       // bootstrap and HTTP gates real without charging them to the policy clock.
-      testSignal.throwIfAborted();
-      const fixtureTime = Date.now();
-      const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureTime);
-      const restoreClock = () => clock.mockRestore();
-      testSignal.addEventListener("abort", restoreClock, { once: true });
+      const { restoreClock } = freezePolicyClock(testSignal);
       const exited = createDeferred<{ code: number | null; signal: NodeJS.Signals | null }>();
       if (control) {
         control.observers.onLaunch = () => {
@@ -1596,7 +1588,6 @@ describe("openclaw test instance", () => {
         await startup;
       } finally {
         restoreClock();
-        testSignal.removeEventListener("abort", restoreClock);
         control?.unblock();
         await Promise.allSettled([startup]);
       }
@@ -1623,10 +1614,7 @@ describe("openclaw test instance", () => {
       }
       const { instance, readAttempts } = await createFakeGateway(`${action},ready`);
       // Classification owns native exit and drained output, not startup deadline expiry.
-      context.signal.throwIfAborted();
-      const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
-      const restoreClock = () => clock.mockRestore();
-      context.signal.addEventListener("abort", restoreClock, { once: true });
+      const { restoreClock } = freezePolicyClock(context.signal);
       const startup = trackOperation(instance.startGateway());
       try {
         await expect(startup).rejects.toThrow("gateway exited before readiness");
@@ -1639,7 +1627,6 @@ describe("openclaw test instance", () => {
         throw error;
       } finally {
         restoreClock();
-        context.signal.removeEventListener("abort", restoreClock);
         await Promise.allSettled([startup]);
       }
       expect(await readAttempts()).toHaveLength(1);
@@ -1655,12 +1642,7 @@ describe("openclaw test instance", () => {
 
   it("preserves both refusals and never spawns a third gateway", async ({ signal }) => {
     const control = await createGatewayControl();
-    const { instance, readAttempts } = await createFakeGateway(
-      "refuse,refuse,ready",
-      1_000,
-      1_500,
-      control,
-    );
+    const { instance, readAttempts } = await createFakeGateway("refuse,refuse,ready", { control });
     const children: NonNullable<typeof instance.child>[] = [];
     const previousOutputClosed: boolean[] = [];
     control.observers.onLaunch = () => {
@@ -1674,10 +1656,7 @@ describe("openclaw test instance", () => {
     };
     // Retry admission is the contract here; native process startup/exit must not
     // spend the policy budget before both refusal facts reach the parent.
-    signal.throwIfAborted();
-    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
-    const restoreClock = () => clock.mockRestore();
-    signal.addEventListener("abort", restoreClock, { once: true });
+    const { restoreClock } = freezePolicyClock(signal);
     const servers = vi.spyOn(net, "createServer");
     let reservation: net.Server | undefined;
     const startup = trackOperation(instance.startGateway());
@@ -1689,7 +1668,6 @@ describe("openclaw test instance", () => {
       expect(reservation).toBeDefined();
     } finally {
       restoreClock();
-      signal.removeEventListener("abort", restoreClock);
       await Promise.allSettled([startup]);
       servers.mockRestore();
     }
@@ -1724,19 +1702,13 @@ describe("openclaw test instance", () => {
     async ({ signal: testSignal }) => {
       const startupBudgetMs = 500;
       const control = await createGatewayControl();
-      const { instance, tracePath, readAttempts } = await createFakeGateway(
-        "refusal-drain,ready",
-        startupBudgetMs,
-        1_500,
+      const { instance, tracePath, readAttempts } = await createFakeGateway("refusal-drain,ready", {
+        startTimeoutMs: startupBudgetMs,
         control,
-      );
+      });
       // Start policy time only after the native leader has exited with stdio held.
       // OS/module bootstrap must not turn this drain case into a readiness timeout.
-      const now = Date.now.bind(Date);
-      const fixtureTime = now();
-      const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureTime);
-      const restoreClock = () => clock.mockRestore();
-      testSignal.addEventListener("abort", restoreClock, { once: true });
+      const { clock, now, fixtureTime, restoreClock } = freezePolicyClock(testSignal);
       const exited = createDeferred<{
         code: number | null;
         signal: NodeJS.Signals | null;
@@ -1789,7 +1761,6 @@ describe("openclaw test instance", () => {
         expect(isProcessAlive(drainingPid)).toBe(false);
       } finally {
         restoreClock();
-        testSignal.removeEventListener("abort", restoreClock);
         await fs.writeFile(`${tracePath}.draining-release`, "");
         await Promise.allSettled([startup]);
       }
@@ -1803,18 +1774,15 @@ describe("openclaw test instance", () => {
       const control = await createGatewayControl();
       const { instance, readAttempts, tracePath } = await createFakeGateway(
         "terminal-drain,ready",
-        300,
-        stopTimeoutMs,
-        control,
+        {
+          startTimeoutMs: 300,
+          stopTimeoutMs,
+          control,
+        },
       );
       // Bootstrap is not the teardown deadline. Start policy time at native exit,
       // keeping the real inherited-pipe drain and cleanup budgets intact.
-      testSignal.throwIfAborted();
-      const now = Date.now.bind(Date);
-      const fixtureTime = now();
-      const clock = vi.spyOn(Date, "now").mockReturnValue(fixtureTime);
-      const restoreClock = () => clock.mockRestore();
-      testSignal.addEventListener("abort", restoreClock, { once: true });
+      const { clock, now, fixtureTime, restoreClock } = freezePolicyClock(testSignal);
       const exited = createDeferred<{ code: number | null; signal: NodeJS.Signals | null }>();
       control.observers.onLaunch = () => {
         if (control.launches.length !== 1) {
@@ -1861,7 +1829,6 @@ describe("openclaw test instance", () => {
         expect(isProcessAlive(drainingPid)).toBe(false);
       } finally {
         restoreClock();
-        testSignal.removeEventListener("abort", restoreClock);
         await fs.writeFile(`${tracePath}.draining-release`, "");
         await Promise.allSettled([startup]);
       }
@@ -2186,16 +2153,7 @@ describe("openclaw test instance", () => {
         );
       });
       const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-      const completion = testing.waitForGatewayReady(
-        createGatewayProcessState(),
-        [],
-        [],
-        12345,
-        8_000,
-        fetchImpl,
-        undefined,
-        record,
-      );
+      const completion = waitForReady(fetchImpl, 8_000, { record });
       try {
         await vi.advanceTimersByTimeAsync(4_000);
         expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(16);
@@ -2221,18 +2179,9 @@ describe("openclaw test instance", () => {
     const reason = new Error("synthetic readiness cancellation");
     const fetchImpl = vi.fn<typeof fetch>(async () => new Response("refusal", { status: 502 }));
     const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-    const completion = testing
-      .waitForGatewayReady(
-        createGatewayProcessState(),
-        [],
-        [],
-        12345,
-        8_000,
-        fetchImpl,
-        abort.signal,
-        record,
-      )
-      .catch((error: unknown) => error);
+    const completion = waitForReady(fetchImpl, 8_000, { signal: abort.signal, record }).catch(
+      (error: unknown) => error,
+    );
     try {
       await vi.advanceTimersByTimeAsync(0);
       abort.abort(reason);
@@ -2266,18 +2215,7 @@ describe("openclaw test instance", () => {
       .mockResolvedValueOnce(new Response('{"ok":true,"status":"started"}', { status: 200 }));
 
     const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-    await expect(
-      testing.waitForGatewayReady(
-        createGatewayProcessState(),
-        [],
-        [],
-        12345,
-        1_000,
-        fetchImpl,
-        undefined,
-        record,
-      ),
-    ).resolves.toBeUndefined();
+    await expect(waitForReady(fetchImpl, 1_000, { record })).resolves.toBeUndefined();
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "ready",
@@ -2324,18 +2262,9 @@ describe("openclaw test instance", () => {
         new Response(JSON.stringify({ ready: false, agentDatabases: [refusal] }), { status: 503 }),
       );
     const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-    const error = await testing
-      .waitForGatewayReady(
-        createGatewayProcessState(),
-        [],
-        [],
-        12345,
-        1_000,
-        fetchImpl,
-        undefined,
-        record,
-      )
-      .catch((failure: unknown) => failure);
+    const error = await waitForReady(fetchImpl, 1_000, { record }).catch(
+      (failure: unknown) => failure,
+    );
     expect(error).toMatchObject({ name: "GatewayAgentAdmissionError", refusals: [refusal] });
     expect(String(error)).toContain(refusal.reason);
     expect(String(error)).toContain(refusal.repairHint);
@@ -2369,9 +2298,7 @@ describe("openclaw test instance", () => {
         { status: 503, headers: { "x-private-detail": privateDetail } },
       );
     });
-    const error = await testing
-      .waitForGatewayReady(createGatewayProcessState(), [], [], 12345, 100, fetchImpl)
-      .catch((failure: unknown) => failure);
+    const error = await waitForReady(fetchImpl, 100).catch((failure: unknown) => failure);
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain("timeout waiting for gateway readiness");
@@ -2430,9 +2357,9 @@ describe("openclaw test instance", () => {
       )
       .mockRejectedValueOnce(new Error(privateDetail));
     const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-    const completion = testing
-      .waitForGatewayReady(processState, [], [], 12345, 79, fetchImpl, undefined, record)
-      .catch((failure: unknown) => failure);
+    const completion = waitForReady(fetchImpl, 79, { processState, record }).catch(
+      (failure: unknown) => failure,
+    );
     try {
       await vi.advanceTimersByTimeAsync(79);
       const failure = await completion;
@@ -2486,9 +2413,11 @@ describe("openclaw test instance", () => {
         .mockResolvedValueOnce(response);
       const abort = new AbortController();
       const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
-      const completion = testing
-        .waitForGatewayReady(processState, [], [], 12345, 25, fetchImpl, abort.signal, record)
-        .catch((failure: unknown) => failure);
+      const completion = waitForReady(fetchImpl, 25, {
+        processState,
+        signal: abort.signal,
+        record,
+      }).catch((failure: unknown) => failure);
       try {
         await vi.advanceTimersByTimeAsync(10);
         if (outcome === "child-exit") {
@@ -2572,9 +2501,7 @@ describe("openclaw test instance", () => {
         response.json = () => Promise.reject(new Error(privateDetail));
         return response;
       });
-      const error = await testing
-        .waitForGatewayReady(createGatewayProcessState(), [], [], 12345, 25, fetchImpl)
-        .catch((failure: unknown) => failure);
+      const error = await waitForReady(fetchImpl, 25).catch((failure: unknown) => failure);
 
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("timeout waiting for gateway readiness");
@@ -2601,16 +2528,10 @@ describe("openclaw test instance", () => {
     const fetchImpl = createStalledReadinessFetch(phase);
     const cleanup = new AbortController();
     let settled = false;
-    const completion = testing
-      .waitForGatewayReady(
-        processState,
-        [],
-        [],
-        12345,
-        exits ? 5_000 : 25,
-        fetchImpl,
-        cleanup.signal,
-      )
+    const completion = waitForReady(fetchImpl, exits ? 5_000 : 25, {
+      processState,
+      signal: cleanup.signal,
+    })
       .catch((failure: unknown) => failure)
       .then((result) => {
         settled = true;
@@ -2674,9 +2595,9 @@ describe("openclaw test instance", () => {
     // then completes in microtasks before the existing poll delay can resume.
     processState.on("removeListener", releaseLateHeaders);
     try {
-      const error = await testing
-        .waitForGatewayReady(processState, [], [], 12345, 5_000, fetchImpl)
-        .catch((failure: unknown) => failure);
+      const error = await waitForReady(fetchImpl, 5_000, { processState }).catch(
+        (failure: unknown) => failure,
+      );
 
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain("gateway exited before readiness");
