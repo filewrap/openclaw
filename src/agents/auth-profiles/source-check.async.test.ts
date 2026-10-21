@@ -102,12 +102,6 @@ it("retains read failure classification when cleanup fails", () =>
     });
   }));
 
-it("detects an existing auth source without caller-thread SQLite", () =>
-  withState(async (_state, database) => {
-    const agentDir = database("source", sourceRow("store", '{"version":1,"profiles":{}}'));
-    await expectSource(agentDir, true, undefined, true);
-  }));
-
 it("refreshes absent and malformed rows through the cohort", () =>
   withState(async (state) => {
     noteCommittedSharedAuthStoreOwnership({ location: "legacy-main" }, state.env);
@@ -162,6 +156,7 @@ it("routes absent, missing-table, state-only, and unreadable sources", () =>
   withState(async (state, database) => {
     noteCommittedSharedAuthStoreOwnership({ location: "legacy-main" }, state.env);
     const cases = [
+      ["existing", true, sourceRow("store", '{"version":1,"profiles":{}}')],
       ["absent", false, ""],
       ["tables-missing", false, "CREATE TABLE unrelated (value TEXT)"],
       [
@@ -180,7 +175,7 @@ it("routes absent, missing-table, state-only, and unreadable sources", () =>
       if (name === "unreadable-database") {
         fs.writeFileSync(resolveAuthProfileDatabasePath(agentDir), "not a SQLite database");
       }
-      await expectSource(agentDir, expected);
+      await expectSource(agentDir, expected, undefined, name === "existing");
     }
     expect(fs.existsSync(resolveAuthProfileDatabasePath(state.agentDir("absent")))).toBe(false);
   }));

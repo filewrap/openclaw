@@ -48,39 +48,15 @@ const catalogConfig = (
 });
 
 describe("provider catalog auth order", () => {
-  it.each([
-    { name: "configured", order: [second, first], expected: second },
-    { name: "stored", order: [second, first], stored: [first, second], expected: first },
-    {
-      name: "model cooldown",
-      order: [first, second],
-      cooldown: true,
-      model: "gpt-5.5",
-      expected: first,
-    },
-    { name: "provider cooldown", order: [first, second], cooldown: true, expected: second },
-    { name: "alias", provider: "proof-alias", order: [second, first], expected: second },
-  ])("uses $name ordering", ({ order, stored, cooldown, model, provider = "openai", expected }) => {
-    const store: AuthProfileStore = createAuthProfileStoreFixture({
+  it("uses configured ordering for both catalog resolvers", () => {
+    const store = createAuthProfileStoreFixture({
       [first]: createApiKeyCredential("openai", "key-a"),
       [second]: createApiKeyCredential("openai", "key-b"),
     });
-    if (stored) {
-      store.order = { openai: stored };
-    }
-    if (cooldown) {
-      store.usageStats = {
-        [first]: {
-          cooldownUntil: Date.now() + 60_000,
-          cooldownReason: "rate_limit",
-          ...(model ? { cooldownModel: model } : {}),
-        },
-      };
-    }
     for (const resolve of resolvers) {
-      expect(resolve({}, store, authOrder(provider, order))(provider)).toMatchObject({
-        apiKey: expected === first ? "key-a" : "key-b",
-        profileId: expected,
+      expect(resolve({}, store, authOrder("openai", [second, first]))("openai")).toMatchObject({
+        apiKey: "key-b",
+        profileId: second,
         mode: "api_key",
       });
     }

@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { openNodeSqliteDatabase } from "../../infra/node-sqlite.js";
 import { openSqliteReadOnlyDatabase } from "../../infra/sqlite-snapshot-source.js";
+import { readDatabasePathIdentitySync as pathIdentity } from "../../infra/sqlite-worker-identity.js";
 import * as authProfileClone from "./clone.js";
 import { createApiKeyCredential } from "./credential-fixtures.test-support.js";
 import { prepareSharedAuthStoreOwnershipForNative } from "./path-resolve.native.js";
@@ -30,6 +32,7 @@ import {
   setRuntimeAuthProfileStoreSnapshot as setSnapshot,
 } from "./runtime-snapshots.js";
 import { createSnapshotStore as createStore, testing } from "./runtime-snapshots.test-support.js";
+import { readAuthProfileRowsReadOnly as readRows } from "./sqlite-json.js";
 import { acquireAuthProfileReadDatabase } from "./sqlite-read-pool.js";
 import { resolveAuthProfileDatabasePath } from "./sqlite.js";
 import type { AuthProfileStore } from "./types.js";
@@ -369,34 +372,6 @@ describe("runtime auth profile snapshots", () => {
     expect(read(worker).usageStats?.["acme:primary"]).toBeUndefined();
   });
 
-  it("merges inherited and agent prepared stores without persisted fallback", () => {
-    const inheritedAuthDir = "/tmp/openclaw-auth-runtime-inherited";
-    setSnapshot(
-      {
-        ...createStore("inherited"),
-        profiles: {
-          ...createStore("inherited").profiles,
-          "anthropic:default": createApiKeyCredential("anthropic", "inherited-key"),
-        },
-      },
-      inheritedAuthDir,
-    );
-    setSnapshot(createStore("agent"), agentDir);
-
-    const prepared = getPreparedSnapshot(agentDir, inheritedAuthDir);
-
-    expect(prepared?.profiles).toMatchObject({
-      "openai:default": { type: "oauth", provider: "openai", access: "agent" },
-      "anthropic:default": { type: "api_key", provider: "anthropic", key: "inherited-key" },
-    });
-    expect(
-      getPreparedSnapshot(
-        "/tmp/openclaw-auth-runtime-missing",
-        "/tmp/openclaw-auth-runtime-also-missing",
-      ),
-    ).toBeUndefined();
-  });
-
   it("does not attribute shared order to an agent without its own snapshot", () => {
     const inheritedAuthDir = "/tmp/openclaw-auth-order-inherited";
     const inherited = {
@@ -411,6 +386,8 @@ describe("runtime auth profile snapshots", () => {
     expect(getSnapshot(inheritedAuthDir)).toMatchObject({
       runtimeLocalOrderProviderIds: ["openai"],
     });
+    clearSnapshots();
+    expect(getPreparedSnapshot(agentDir, inheritedAuthDir)).toBeUndefined();
   });
 
   it("copies a prepared same-owner snapshot only once and keeps the result isolated", () => {
@@ -444,5 +421,27 @@ describe("runtime auth profile snapshots", () => {
     expect(counts.owners).toBeLessThanOrEqual(testing.MAX_PERSISTED_MUTATION_OWNERS);
     expect(counts.profiles).toBeLessThanOrEqual(testing.MAX_PERSISTED_MUTATION_PROFILES_PER_OWNER);
     testing.resetPersistedMutationLineage();
+  });
+  it.skipIf(process.platform === "win32")("does not reuse credentials from a replaced file", () => {
+    const databasePath = path.join(tempDirs.make("auth-reader-replacement-"), "agent.sqlite");
+    const credentials = (key: string) => ({ profiles: { fixture: { key } } });
+    const createDatabase = (file: string, key: string) => {
+      using writer = openNodeSqliteDatabase(file);
+      writer.exec(`
+      CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT);
+      CREATE TABLE auth_profile_state (state_key TEXT PRIMARY KEY, state_json TEXT);
+    `);
+      writer
+        .prepare("INSERT INTO auth_profile_store VALUES ('primary', ?)")
+        .run(JSON.stringify(credentials(key)));
+    };
+    const read = () =>
+      readRows(databasePath, openSqliteReadOnlyDatabase, undefined, pathIdentity(databasePath).key);
+    createDatabase(databasePath, "old-synthetic-key");
+    expect(read().store).toMatchObject({ raw: credentials("old-synthetic-key") });
+    createDatabase(`${databasePath}.replacement`, "new-synthetic-key");
+    fs.renameSync(databasePath, `${databasePath}.old`);
+    fs.renameSync(`${databasePath}.replacement`, databasePath);
+    expect(read().store).toMatchObject({ raw: credentials("new-synthetic-key") });
   });
 });

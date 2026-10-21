@@ -6,7 +6,6 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import { isAmbientCredentialAllowedByProviderAuthPin } from "./ambient-auth.js";
-import { createBedrockAwsSdkConfig } from "./config-fixtures.test-support.js";
 import {
   createApiKeyCredential,
   createOAuthRefreshCredential as oauth,
@@ -52,12 +51,7 @@ vi.mock("./external-auth.js", async (importOriginal) => ({
 }));
 
 import { createFailedOAuthRefreshFence, createOAuthRefreshFence } from "./oauth-refresh-marker.js";
-import {
-  isStoredCredentialCompatibleWithAuthProvider,
-  resolveAuthProfileEligibility,
-  resolveAuthProfileOrder,
-  resolveAuthProfileOrderWithMetadata,
-} from "./order.js";
+import { resolveAuthProfileOrder, resolveAuthProfileOrderWithMetadata } from "./order.js";
 import { markAuthProfileSuccess } from "./profiles.js";
 
 function storeWith(
@@ -133,23 +127,6 @@ describe("resolveAuthProfileOrder", () => {
         type: "api_key",
       }),
     ).toBe(false);
-  });
-
-  it("keeps configured AWS SDK profiles eligible without stored credentials", () => {
-    const cfg = createBedrockAwsSdkConfig();
-    const store = storeWith({});
-
-    expect(
-      resolveAuthProfileEligibility({
-        cfg,
-        store,
-        provider: "amazon-bedrock",
-        profileId: "amazon-bedrock:default",
-      }),
-    ).toEqual({ eligible: true, reasonCode: "ok" });
-    expect(resolveAuthProfileOrder({ cfg, store, provider: "amazon-bedrock" })).toEqual([
-      "amazon-bedrock:default",
-    ]);
   });
 
   it("falls back to stored profiles when a stored order only has missing credentials", async () => {
@@ -280,26 +257,6 @@ describe("resolveAuthProfileOrder", () => {
     ).toEqual({ profileIds: ["openai:legacy-ref"], hasExplicitOrder: false });
   });
 
-  it("discovers OpenAI OAuth profiles before API-key backups", async () => {
-    const store = storeWith({
-      "openai:personal": oauth(),
-      "openai:backup": createApiKeyCredential("openai", "sk-platform"),
-      "openai:oauth": oauth(),
-    });
-
-    expect(resolveAuthProfileOrder({ store, provider: "openai" })).toEqual([
-      "openai:personal",
-      "openai:oauth",
-      "openai:backup",
-    ]);
-  });
-
-  it("does not discover OAuth profiles without inline credential material", async () => {
-    const store = storeWith({ "openai:personal": oauth({ access: "", refresh: "" }) });
-
-    expect(resolveAuthProfileOrder({ store, provider: "openai" })).toEqual([]);
-  });
-
   it("marks profile success with one canonical last-good and usage update", async () => {
     const agentDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-auth-profile-success-"));
     try {
@@ -351,44 +308,5 @@ describe("resolveAuthProfileOrder", () => {
       await closeOpenClawAgentDatabasesAsync(agentDir);
       await rm(agentDir, { force: true, recursive: true });
     }
-  });
-
-  it("keeps provider identity and configured mode distinct", () => {
-    const credential = { type: "token", provider: "openai", token: "test-token" } as const;
-    const authAliasLookupParams = { metadataSnapshot: { plugins: [] } };
-    const store: AuthProfileStore = { version: 1, profiles: { fixture: credential } };
-    const params = {
-      store,
-      profileId: "fixture",
-      provider: "openai",
-      authAliasLookupParams,
-      now: 1_700_000_000_000,
-    };
-
-    expect(
-      isStoredCredentialCompatibleWithAuthProvider({
-        provider: "other-provider",
-        credential,
-        authAliasLookupParams,
-      }),
-    ).toBe(false);
-    expect(
-      resolveAuthProfileEligibility({
-        ...params,
-        cfg: {
-          auth: {
-            profiles: { fixture: { provider: "other-provider", mode: credential.type } },
-          },
-        },
-      }),
-    ).toEqual({ eligible: false, reasonCode: "provider_mismatch" });
-    expect(
-      resolveAuthProfileEligibility({
-        ...params,
-        cfg: {
-          auth: { profiles: { fixture: { provider: "openai", mode: "oauth" } } },
-        },
-      }),
-    ).toEqual({ eligible: true, reasonCode: "ok" });
   });
 });

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { authProfileFileChanges } from "./file-state.js";
 import { runtimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots as clearSnapshots,
@@ -9,14 +10,7 @@ import {
 } from "./runtime-snapshots.js";
 import type { AuthProfileStore } from "./types.js";
 
-const observation = vi.hoisted<{
-  onChange?: (change: {
-    directory: string;
-    identityChanged: boolean;
-    sourcesChanged: boolean;
-    createdPaths: readonly string[];
-  }) => void | Promise<void>;
-}>(() => ({}));
+const observation = vi.hoisted<typeof authProfileFileChanges>(() => ({}));
 
 // mock-isolation: Supply file events without native watches to prove snapshot retirement and refresh settlement.
 vi.mock("./file-state.js", () => ({

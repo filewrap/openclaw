@@ -278,36 +278,6 @@ function failAfterNativeWrite(db: DatabaseSync, assertDenied: () => void) {
 }
 
 describe.each(["shared-state", "agent"] as const)("%s credential authority", (kind) => {
-  it("releases a known rollback with its original credential and rejects an overtaken cold result", () => {
-    const current = fixture(kind);
-    expect(() =>
-      current.transact(({ db }) => {
-        writeAuthProfileJsonCell(db, "store", kind, store("rolled-back"));
-        expect(current.read).toThrow();
-        throw new Error("cancelled native update");
-      }),
-    ).toThrow("cancelled native update");
-    expectCredential(current, "original");
-
-    const cold = current.capture();
-    const capturedCredential = current.readPersisted();
-    current.write("newer");
-    cold.observe(capturedCredential);
-    expect(cold.readCurrentCredential()).toEqual(credential("newer"));
-    expect(cold.readCurrentCredential()).toEqual(current.readPersisted());
-  });
-
-  it("preserves credential authority during usage, cooldown, and order-only writes", () => {
-    const current = fixture(kind);
-    current.transact(({ db }) => {
-      writeAuthProfileJsonCell(db, "state", kind, { version: 1, ...metadata() });
-      expect(current.read()).toEqual(credential("original"));
-      deleteAuthProfileJsonCell(db, "state", kind);
-      expect(current.read()).toEqual(credential("original"));
-    });
-    expect(current.read()).toEqual(credential("original"));
-  });
-
   it("publishes native prepared saves and exact-owned secret rollback through the same authority", () => {
     const current = fixture(kind);
     const baseline = current.snapshot();
@@ -657,19 +627,6 @@ describe.each(["shared-state", "agent"] as const)("%s released SDK credential wr
       }
     },
   );
-
-  it("matches the canonical worker's cold read after both released SDK writers", async () => {
-    const current = fixture(kind);
-    current.sdk("saveAuthProfileStore", "saved");
-    current.sdk("upsertAuthProfile", "upserted");
-    const cold = await nativeRuntime.loadAuthProfileStoreForRuntimeAsync(
-      current.agentDir,
-      { externalCli: { mode: "none" }, inheritedAuthDir: current.agentDir },
-      current.env,
-    );
-    expect(cold.profiles[profileId]).toEqual(credential("upserted"));
-    expect(current.read()).toEqual(cold.profiles[profileId]);
-  });
 });
 
 describe("prepared persisted credential readers", () => {

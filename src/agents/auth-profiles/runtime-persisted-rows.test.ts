@@ -113,39 +113,15 @@ it.each([true, false])(
   },
 );
 
-it("serves a committed postimage without rereading or freezing its publisher", async () => {
-  const databasePath = path.join(tempDirs.make("auth-row-postimage-"), "auth.sqlite");
-  using database = openNodeSqliteDatabase(databasePath);
-  database.exec("CREATE TABLE cache_fixture (value)");
-  const read = vi.fn(async () => emptyRows());
-  const resolve = () =>
-    cache.prepare(databasePath, { identity: "fixture", read, assertCurrent() {} }).read();
-  await resolve();
-  const committed = { ...profileStore("fixture-new"), lastGood: { example: "example:key" } };
-  noteCredentialMutation(databasePath);
-  cache.recordSource(databasePath, "fixture", committed);
-  committed.profiles = {};
-  committed.lastGood!.example = "caller-edit";
-  const rows = await resolve();
-  expect(rows).toMatchObject({
-    store: { status: "readable", raw: { profiles: { "example:key": { key: "fixture-new" } } } },
-    state: { status: "readable", raw: { lastGood: { example: "example:key" } } },
-  });
-  expect(read).toHaveBeenCalledOnce();
-  cache.recordSource(databasePath, "fixture", null);
-  await resolve();
-  expect(read).toHaveBeenCalledTimes(2);
-});
-
 it("retains private lifetimes across runtime publication and reloads incomplete postimages", async () => {
   const databasePath = path.join(tempDirs.make("auth-row-lifetimes-"), "auth.sqlite");
-  const store = profileStore();
+  const store = { ...profileStore(), lastGood: { example: "example:key" } };
   const rows = {
     ...emptyRows(),
     store: {
       status: "readable" as const,
       raw: {
-        ...store,
+        ...structuredClone(store),
         authorizationLifetimes: { "example:key": "00000000-0000-4000-8000-000000000001" },
       },
     },
@@ -160,9 +136,20 @@ it("retains private lifetimes across runtime publication and reloads incomplete 
 
   noteCredentialMutation(databasePath);
   cache.recordSource(databasePath, "fixture", store);
-  expect((await resolve("runtime")).store).toEqual({ status: "readable", raw: store });
+  store.profiles = {};
+  store.lastGood.example = "caller-edit";
+  const runtimeRows = await resolve("runtime");
+  expect(runtimeRows.store).toEqual({ status: "readable", raw: profileStore() });
+  expect(runtimeRows.state).toMatchObject({
+    status: "readable",
+    raw: { lastGood: { example: "example:key" } },
+  });
+  expect(read).toHaveBeenCalledOnce();
   expect(await resolve("canonical")).toEqual(rows);
   expect(read).toHaveBeenCalledTimes(2);
+  cache.recordSource(databasePath, "fixture", null);
+  await resolve("runtime");
+  expect(read).toHaveBeenCalledTimes(3);
 });
 
 it.each(["agent", "shared-state"] as const)(
