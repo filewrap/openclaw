@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
@@ -23,21 +24,13 @@ import { runQaGatewayFixture } from "./qa-gateway-cleanup.js";
 
 const occupied = { code: "EADDRINUSE" };
 
-function listen(server: net.Server, port: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(port, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
+async function listen(server: net.Server, port: number) {
+  await once(server.listen(port, "127.0.0.1"), "listening");
 }
 
 async function close(server: net.Server): Promise<void> {
   if (server.listening) {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => (error ? reject(error) : resolve()));
-    });
+    await server[Symbol.asyncDispose]();
   }
 }
 
@@ -308,11 +301,11 @@ it.each([
     if (failsCleanup) {
       expect(result).toBeInstanceOf(AggregateError);
       expect(result).toHaveProperty("errors", [failure, cleanupFailure]);
-    } else if (stage === "write") {
-      expect(state.writeFailure).toMatchObject({ code: "EISDIR" });
-      expect(result).toBe(state.writeFailure);
     } else {
-      expect(result).toBe(failure);
+      if (stage === "write") {
+        expect(state.writeFailure).toMatchObject({ code: "EISDIR" });
+      }
+      expect(result).toBe(stage === "write" ? state.writeFailure : failure);
     }
     if (lifetime && lifetimeOwner) {
       const drained = await outcomeOf(lifetime.cleanup());
@@ -340,23 +333,18 @@ it.each([
     await acquired?.cleanup();
     await lifetime?.cleanup().catch(() => undefined);
     snapshot.restore();
-    if (state.root) {
-      await fs.rm(state.root, { recursive: true, force: true });
-    }
-    if (lifetimeRoot) {
-      await fs.rm(lifetimeRoot, { recursive: true, force: true });
+    for (const root of [state.root, lifetimeRoot]) {
+      if (root) {
+        await fs.rm(root, { recursive: true, force: true });
+      }
     }
   }
 });
 
-type EndpointEnv = {
-  OPENCLAW_GATEWAY_PORT?: string;
-  OPENCLAW_GATEWAY_URL?: string;
-};
 const port = 19701;
 const inheritedUrl = "wss://inherited.fixture.invalid";
 const explicitUrl = "wss://explicit.fixture.invalid";
-const endpoints = (value?: string, url?: string): EndpointEnv => ({
+const endpoints = (value?: string, url?: string) => ({
   OPENCLAW_GATEWAY_PORT: value,
   OPENCLAW_GATEWAY_URL: url,
 });

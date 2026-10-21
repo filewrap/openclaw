@@ -897,31 +897,21 @@ describe("openclaw test instance", () => {
         if (mode === "wait") {
           await expect(command).rejects.toThrow(`command timed out after ${timeoutMs}ms`);
         } else {
-          const result = await command;
-          if (mode === "stderr" || mode === "signal") {
-            expect(result).toEqual({
-              code: mode === "signal" ? null : 1,
-              signal: mode === "signal" ? "SIGTERM" : null,
-              stdout: "fake gateway attempt 1\n",
-              stderr: `${MIGRATION_CONVERGENCE_REFUSAL} ${mode === "stderr" ? "delayed " : ""}fixture\n`,
-            });
-          } else {
-            expect(result).toMatchObject({
-              code: mode === "drain" || mode === "large" ? 0 : Number(mode),
-              signal: null,
-              stderr: "cli diagnostic\n",
-            });
-            if (mode === "large") {
-              expect(result.stdout.startsWith("fake gateway attempt 1\n")).toBe(true);
-              expect(result.stdout.length).toBe("fake gateway attempt 1\n".length + 300 * 1024);
-            } else {
-              expect(result.stdout).toBe(
-                mode === "drain"
-                  ? "fake gateway attempt 1\ndrained cli output\n"
-                  : "fake gateway attempt 1\n",
-              );
-            }
-          }
+          const refusal = mode === "stderr" || mode === "signal";
+          await expect(command).resolves.toEqual({
+            code: mode === "signal" ? null : refusal ? 1 : Number(mode) || 0,
+            signal: mode === "signal" ? "SIGTERM" : null,
+            stdout:
+              "fake gateway attempt 1\n" +
+              (mode === "large"
+                ? "x".repeat(300 * 1024)
+                : mode === "drain"
+                  ? "drained cli output\n"
+                  : ""),
+            stderr: refusal
+              ? `${MIGRATION_CONVERGENCE_REFUSAL} ${mode === "stderr" ? "delayed " : ""}fixture\n`
+              : "cli diagnostic\n",
+          });
         }
         const attempts = await readAttempts();
         expect(attempts).toHaveLength(1);
