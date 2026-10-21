@@ -11,6 +11,7 @@ import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
 import {
   type createCliRunnerPrepareFixture,
   createTestMcpLoopbackClientGrant,
+  createTestMcpLoopbackServer,
   createTestMcpLoopbackServerConfig,
 } from "../cli-runner.test-helpers.js";
 import { setCliRunnerPrepareTestDeps } from "./prepare.test-support.js";
@@ -32,6 +33,16 @@ export function expectCall(mock: unknown, fields: object) {
   expect(mock).toHaveBeenCalledWith(expect.objectContaining(fields));
 }
 
+export function createCliTool(name: string, label = name, description = name) {
+  return {
+    name,
+    label,
+    description,
+    parameters: { type: "object", properties: {} },
+    execute: vi.fn(),
+  };
+}
+
 export function emptyCliPreparation() {
   return {
     isWorkspaceBootstrapPending: async () => false,
@@ -42,13 +53,35 @@ export function emptyCliPreparation() {
   };
 }
 
-type McpProjectionParams = Parameters<typeof resolveMcpLoopbackScopedTools>[0];
-type McpRunOverrides = Pick<RunCliAgentParams, "config" | "execOverrides" | "toolsAllow">;
-const nodeConfig = (): OpenClawConfig => ({ tools: { exec: { host: "node" } } });
+export function createCliPreparationMocks() {
+  return {
+    isWorkspaceBootstrapPending: vi.fn(async () => false),
+    makeBootstrapWarn: vi.fn(() => () => undefined),
+    resolveBootstrapContextForRun: vi.fn(async () => ({ bootstrapFiles: [], contextFiles: [] })),
+    getActiveMcpLoopbackRuntime: vi.fn(() => undefined),
+    ensureMcpLoopbackServer: vi.fn(createTestMcpLoopbackServer),
+    createMcpLoopbackServerConfig: vi.fn(createTestMcpLoopbackServerConfig),
+    mintMcpLoopbackClientGrant: vi.fn(createTestMcpLoopbackClientGrant),
+    bindMcpLoopbackClientGrantAdmission: vi.fn(() => true),
+    revokeMcpLoopbackClientGrant: vi.fn(() => true),
+    resolveMcpLoopbackPolicyTools: vi.fn(() => ({ agentId: "main", tools: [] })),
+    resolveMcpLoopbackScopedTools: vi.fn(() => ({ agentId: "main", tools: [] })),
+    resolveOpenClawReferencePaths: vi.fn(async () => ({ docsPath: null, sourcePath: null })),
+    prepareClaudeCliSkillsPlugin: vi.fn(async () => ({
+      args: [],
+      cleanup: vi.fn(async () => undefined),
+    })),
+    getCliLiveSessionGeneration: vi.fn(() => undefined),
+    loadManifestModelCatalog: vi.fn(() => []),
+  };
+}
 
 const runtimeOwnerToken = "loopback-owner-token";
 const token = "loopback-token";
 const processToken = "stable-loopback-token";
+type McpProjectionParams = Parameters<typeof resolveMcpLoopbackScopedTools>[0];
+type McpRunOverrides = Pick<RunCliAgentParams, "config" | "execOverrides" | "toolsAllow">;
+const nodeConfig = (): OpenClawConfig => ({ tools: { exec: { host: "node" } } });
 const loopbackRuntime = () => ({
   port: 31783,
   ownerToken: runtimeOwnerToken,

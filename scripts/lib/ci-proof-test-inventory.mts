@@ -1028,7 +1028,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "src/agents/cli-runner/execute.executable-invocation.test.ts",
   "src/agents/cli-runner/execute.plugin-reload.test.ts",
   "src/agents/cli-runner/prepare.durable-context.test.ts",
-  "src/agents/cli-runner/prepare.model-routing-authority.test.ts",
   "src/agents/cli-runner/prepare.test.ts",
   "src/agents/cli-runner/prepare.web-search.test.ts",
   "src/agents/cli-runner/session-history.async.test.ts",

@@ -57,6 +57,7 @@ import {
   clearMemoryPluginState,
   registerTestMemoryPromptBuilder,
 } from "../../plugins/memory-state.test-fixtures.js";
+import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { createPluginRegistry } from "../../plugins/registry.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { withPluginRuntimeRegistryScope } from "../../plugins/runtime/gateway-request-scope.js";
@@ -144,13 +145,14 @@ import { finalizeCliContextEngineTurn } from "./cli-run-transcript.js";
 import { executePluginOwnedProcess } from "./execute-plugin.js";
 import { prepareCliHistoryBoundary } from "./history-boundary.js";
 import {
+  createCliTool,
   expectCall,
   cliSessionBinding as buildCliSessionBinding,
   createJsonlStdinBackendConfig,
+  createCliPreparationMocks,
   registerCliMcpPreparationTests,
   setRawCliBackendForPrepareTest,
 } from "./prepare-mcp.test-support.js";
-import { registerCliThinkingPreparationTests } from "./prepare-thinking.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
@@ -316,14 +318,6 @@ function createArgBackendConfig(
   return { command, args, output, input: "arg", sessionMode: "existing" };
 }
 
-type CliContextBudgetTestCase = {
-  name: string;
-  provider: string;
-  expectedContextTokens: number;
-  model: string;
-  modelAliases?: Record<string, string>;
-};
-
 describe("prepareCliRunContext", () => {
   const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-cli-prepare-");
   const retainedStateDirs: string[] = [];
@@ -465,9 +459,89 @@ describe("prepareCliRunContext", () => {
     });
   });
 
-  registerCliThinkingPreparationTests({
-    getFixture: () => fixture,
-    setBackend: setCliBackendForPrepareTest,
+  describe("CLI thinking", () => {
+    const base = { provider: "claude-cli", model: "claude-sonnet-4-5" };
+    async function prepare(
+      expected: string,
+      overrides: Partial<RunCliAgentParams> = {},
+      modelProvider?: string,
+    ) {
+      const prepareExecution = vi.fn(async () => undefined);
+      setCliBackendForPrepareTest({ prepareExecution, modelProvider });
+      const turn = await fixture.prepare({ ...base, thinkLevel: "ultra", ...overrides });
+      expect(turn.providerThinkingLevel).toBe(expected);
+      expectCall(prepareExecution, { thinkingLevel: expected });
+      return turn;
+    }
+
+    it("lowers Ultra to supported CLI effort and adds only current-turn guidance", async () => {
+      const turn = await prepare("high");
+      expect(turn.systemPrompt).not.toContain("Ultra active");
+      expect([turn.params.prompt, turn.promptContext?.appendContext].join("\n")).toContain(
+        "Ultra active for this turn",
+      );
+      const next = await fixture.prepare({ ...base, thinkLevel: "high" });
+      expect(next.params.sessionId).toBe(turn.params.sessionId);
+      expect(
+        [next.systemPrompt, next.params.prompt, next.promptContext?.appendContext].join("\n"),
+      ).not.toContain("Ultra active");
+    });
+
+    it("uses the model provider for uncataloged CLI Ultra with max effort", async () => {
+      const modelProvider = "cli-thinking-policy-fixture";
+      const registry = createEmptyPluginRegistry();
+      registry.providers.push({
+        pluginId: modelProvider,
+        source: "test",
+        provider: {
+          id: modelProvider,
+          label: "CLI model owner",
+          auth: [],
+          resolveThinkingProfile: () => ({ levels: [{ id: "max" }], defaultLevel: "max" }),
+        },
+      });
+      setActivePluginRegistry(registry);
+      await prepare("max", { model: "uncataloged-model" }, modelProvider);
+    });
+
+    it.each([
+      [undefined, false, undefined, "off"],
+      ["replace", true, { high: null }, "medium"],
+    ] as const)(
+      "honors configured CLI Ultra effort in mode %s",
+      async (mode, reasoning, thinkingLevelMap, expected) => {
+        const manifestEntry = {
+          id: "claude-sonnet-4-5",
+          name: "Claude Sonnet 4.5",
+          provider: "anthropic",
+          api: "anthropic-messages",
+          reasoning: true,
+        };
+        setCliRunnerPrepareTestDeps({
+          loadManifestModelCatalog: vi.fn(() => [manifestEntry]),
+        });
+        const model = {
+          id: manifestEntry.id,
+          name: manifestEntry.name,
+          reasoning,
+          thinkingLevelMap,
+          input: ["text" as const],
+          contextWindow: 8192,
+          maxTokens: 2048,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        };
+        const anthropic = {
+          baseUrl: "https://example.invalid/v1",
+          api: "anthropic-messages" as const,
+          models: [model],
+        };
+        await prepare(expected, {
+          config: { models: { mode, providers: { anthropic } } },
+        });
+        expect(manifestEntry.reasoning).toBe(true);
+        expect(manifestEntry).not.toHaveProperty("thinkingLevelMap");
+      },
+    );
   });
 
   it.each<CliContextBudgetTestCase>([
@@ -559,50 +633,49 @@ describe("prepareCliRunContext", () => {
     expectCall(prepareExecution, { contextTokenBudget: testCase.expectedContextTokens });
   });
 
-  it.each([
-    { name: "the session-selected 200k option", selection: "200k", expected: 200_000 },
-    {
-      name: "the declared default option when unselected",
-      selection: undefined,
-      expected: 1_000_000,
-    },
-  ])("caps the context budget with $name from catalog contextWindows", async (testCase) => {
-    const prepareExecution = vi.fn(async () => undefined);
-    setCliBackendForPrepareTest({ prepareExecution });
-    setCliRunnerPrepareTestDeps({
-      loadManifestModelCatalog: vi.fn(() => [
-        {
-          id: "claude-fable-5",
-          name: "Claude Fable 5",
-          provider: "anthropic",
-          contextWindow: 1_000_000,
-          contextWindows: [
-            { id: "200k", label: "200K", contextWindow: 200_000 },
-            { id: "1m", label: "1M", contextWindow: 1_000_000 },
-          ],
-          contextWindowDefault: "1m",
+  it.each<[name: string, selection: string | undefined, expected: number]>([
+    ["the session-selected 200k option", "200k", 200_000],
+    ["the declared default option when unselected", undefined, 1_000_000],
+  ])(
+    "caps the context budget with %s from catalog contextWindows",
+    async (_name, selection, expected) => {
+      const prepareExecution = vi.fn(async () => undefined);
+      setCliBackendForPrepareTest({ prepareExecution });
+      setCliRunnerPrepareTestDeps({
+        loadManifestModelCatalog: vi.fn(() => [
+          {
+            id: "claude-fable-5",
+            name: "Claude Fable 5",
+            provider: "anthropic",
+            contextWindow: 1_000_000,
+            contextWindows: [
+              { id: "200k", label: "200K", contextWindow: 200_000 },
+              { id: "1m", label: "1M", contextWindow: 1_000_000 },
+            ],
+            contextWindowDefault: "1m",
+          },
+        ]),
+      });
+
+      const context = await fixture.prepare({
+        provider: "claude-cli",
+        model: "claude-fable-5",
+
+        // The run owner carries the selection as a prepared fact; a session entry
+        // alone must not drive it (reply-path regression: selection dropped when
+        // prepare read sessionEntry directly).
+        ...(selection ? { contextWindow: selection } : {}),
+        sessionEntry: {
+          sessionId: "cli-session",
+          updatedAt: 0,
+          ...(selection ? {} : { contextWindow: "200k" }),
         },
-      ]),
-    });
+      });
 
-    const context = await fixture.prepare({
-      provider: "claude-cli",
-      model: "claude-fable-5",
-
-      // The run owner carries the selection as a prepared fact; a session entry
-      // alone must not drive it (reply-path regression: selection dropped when
-      // prepare read sessionEntry directly).
-      ...(testCase.selection ? { contextWindow: testCase.selection } : {}),
-      sessionEntry: {
-        sessionId: "cli-session",
-        updatedAt: 0,
-        ...(testCase.selection ? {} : { contextWindow: "200k" }),
-      },
-    });
-
-    expect(context.contextWindowInfo?.tokens).toBe(testCase.expected);
-    expectCall(prepareExecution, { contextTokenBudget: testCase.expected });
-  });
+      expect(context.contextWindowInfo?.tokens).toBe(expected);
+      expectCall(prepareExecution, { contextTokenBudget: expected });
+    },
+  );
 
   beforeEach(() => {
     // Install narrow test doubles for external runtime seams so preparation
@@ -610,30 +683,8 @@ describe("prepareCliRunContext", () => {
     defaultTestCliBackend = buildDefaultTestCliBackend();
     setRawCliBackendForPrepareTest(defaultTestCliBackend);
     setCliRunnerPrepareTestDeps({
-      isWorkspaceBootstrapPending: vi.fn(async () => false),
-      makeBootstrapWarn: vi.fn(() => () => undefined),
-      resolveBootstrapContextForRun: vi.fn(async () => ({
-        bootstrapFiles: [],
-        contextFiles: [],
-      })),
-      getActiveMcpLoopbackRuntime: vi.fn(() => undefined),
-      ensureMcpLoopbackServer: vi.fn(createTestMcpLoopbackServer),
-      createMcpLoopbackServerConfig: vi.fn(createTestMcpLoopbackServerConfig),
-      mintMcpLoopbackClientGrant: vi.fn(createTestMcpLoopbackClientGrant),
-      bindMcpLoopbackClientGrantAdmission: vi.fn(() => true),
-      revokeMcpLoopbackClientGrant: vi.fn(() => true),
-      resolveMcpLoopbackPolicyTools: vi.fn(() => ({ agentId: "main", tools: [] })),
-      resolveMcpLoopbackScopedTools: vi.fn(() => ({ agentId: "main", tools: [] })),
-      resolveOpenClawReferencePaths: vi.fn(async () => ({ docsPath: null, sourcePath: null })),
-      prepareClaudeCliSkillsPlugin: vi.fn(async () => ({
-        args: [],
-        cleanup: vi.fn(async () => undefined),
-      })),
-      getCliLiveSessionGeneration: vi.fn(() => undefined),
+      ...createCliPreparationMocks(),
       resolveApiKeyForProfile: resolveApiKeyForProfileImpl,
-      // Keep preparation off the real plugin-metadata snapshot; catalog-driven
-      // cases inject their own rows.
-      loadManifestModelCatalog: vi.fn(() => []),
     });
     mockGetGlobalHookRunner.mockReturnValue(null);
     const config: OpenClawConfig = {};
@@ -1530,20 +1581,27 @@ describe("prepareCliRunContext", () => {
     expect(context.systemPromptReport.tools.entries).toEqual([]);
   });
 
-  it.each([
-    {
-      name: "full guidance for a backend with native file tools",
-      nativeToolMode: "always-on" as const,
-      transportsSystemPrompt: true,
-      expectedText: "BOOTSTRAP.md below; follow before normal reply.",
-    },
-    {
-      name: "limited guidance for a backend without native file tools",
-      nativeToolMode: undefined,
-      transportsSystemPrompt: true,
-      expectedText: "this run cannot safely finish full BOOTSTRAP.md",
-    },
-  ])("renders $name", async ({ nativeToolMode, transportsSystemPrompt, expectedText }) => {
+  it.each<
+    [
+      name: string,
+      nativeToolMode: "always-on" | undefined,
+      transportsSystemPrompt: boolean,
+      expectedText: string,
+    ]
+  >([
+    [
+      "full guidance for a backend with native file tools",
+      "always-on" as const,
+      true,
+      "BOOTSTRAP.md below; follow before normal reply.",
+    ],
+    [
+      "limited guidance for a backend without native file tools",
+      undefined,
+      true,
+      "this run cannot safely finish full BOOTSTRAP.md",
+    ],
+  ])("renders %s", async (_name, nativeToolMode, transportsSystemPrompt, expectedText) => {
     const { dir } = fixture.session;
     const bootstrapPath = path.join(dir, "BOOTSTRAP.md");
     const config = {
@@ -2303,24 +2361,10 @@ describe("prepareCliRunContext", () => {
     const resolveMcpLoopbackScopedTools = vi.fn((scope: McpProjectionParams) => ({
       agentId: "main",
       tools: [
-        {
-          name: "message",
-          label: "Message",
-          description: "Send a message",
-          parameters: { type: "object", properties: {} },
-          execute: vi.fn(),
-        },
+        createCliTool("message", "Message", "Send a message"),
         ...(scope.context.senderIsOwner === false
           ? []
-          : [
-              {
-                name: "gateway",
-                label: "Gateway",
-                description: "Manage the gateway",
-                parameters: { type: "object", properties: {} },
-                execute: vi.fn(),
-              },
-            ]),
+          : [createCliTool("gateway", "Gateway", "Manage the gateway")]),
       ],
     }));
     setCliRunnerPrepareTestDeps({
@@ -2506,13 +2550,7 @@ describe("prepareCliRunContext", () => {
     const resolveMcpLoopbackScopedTools = vi.fn((_scope: McpProjectionParams) => ({
       agentId: "main",
       tools: [
-        {
-          name: "memory_search",
-          label: "Memory Search",
-          description: "Search memory",
-          parameters: { type: "object", properties: {} },
-          execute: vi.fn(),
-        },
+        createCliTool("memory_search", "Memory Search", "Search memory"),
         {
           name: "fake_web_tool",
           label: "Fake web tool",
@@ -2639,15 +2677,7 @@ describe("prepareCliRunContext", () => {
     const createMcpLoopbackServerConfig = vi.fn(createTestMcpLoopbackServerConfig);
     const resolveMcpLoopbackScopedTools = vi.fn(() => ({
       agentId: "main",
-      tools: [
-        {
-          name: "memory_search",
-          label: "Memory Search",
-          description: "Search memory",
-          parameters: { type: "object", properties: {} },
-          execute: vi.fn(),
-        },
-      ],
+      tools: [createCliTool("memory_search", "Memory Search", "Search memory")],
     }));
     setCliRunnerPrepareTestDeps({
       getActiveMcpLoopbackRuntime,
@@ -2680,24 +2710,20 @@ describe("prepareCliRunContext", () => {
     expect(resolveMcpLoopbackScopedTools).not.toHaveBeenCalled();
   });
 
-  it.each([
-    {
-      name: "host selection",
-      observed: ["Read", "Bash", "Write"],
-      selected: ["Read"],
-      projected: ["Read"],
-      capabilities: ["read"],
-    },
-    {
-      name: "observed empty surface",
-      observed: [],
-      selected: undefined,
-      projected: [],
-      capabilities: [],
-    },
+  it.each<
+    [
+      name: string,
+      observed: string[],
+      selected: string[] | undefined,
+      projected: string[],
+      capabilities: string[],
+    ]
+  >([
+    ["host selection", ["Read", "Bash", "Write"], ["Read"], ["Read"], ["read"]],
+    ["observed empty surface", [], undefined, [], []],
   ])(
-    "bounds native authority by $name",
-    async ({ observed, selected, projected, capabilities }) => {
+    "bounds native authority by %s",
+    async (_name, observed, selected, projected, capabilities) => {
       const { capture, observe, projectNativeToolAuthority, captureNativeToolAuthority } =
         await prepareNativeAuthority(
           capabilities,
@@ -2713,28 +2739,18 @@ describe("prepareCliRunContext", () => {
     },
   );
 
-  it.each([
-    {
-      name: "missing runtime snapshot",
-      tools: undefined,
-      invalidProjection: false,
-      error: "invalid tool list",
-    },
-    {
-      name: "mixed runtime snapshot",
-      tools: ["Read", 7],
-      invalidProjection: false,
-      error: "invalid tool list",
-    },
-    {
-      name: "non-canonical backend projection",
-      tools: ["Read", "Bash"],
-      invalidProjection: true,
-      error: 'non-canonical native capability "Bash"',
-    },
+  it.each<[name: string, tools: unknown, invalidProjection: boolean, error: string]>([
+    ["missing runtime snapshot", undefined, false, "invalid tool list"],
+    ["mixed runtime snapshot", ["Read", 7], false, "invalid tool list"],
+    [
+      "non-canonical backend projection",
+      ["Read", "Bash"],
+      true,
+      'non-canonical native capability "Bash"',
+    ],
   ])(
-    "clears native authority before rejecting a $name",
-    async ({ tools, invalidProjection, error }) => {
+    "clears native authority before rejecting a %s",
+    async (_name, tools, invalidProjection, error) => {
       const {
         capture,
         observe,
@@ -3270,15 +3286,7 @@ describe("prepareCliRunContext", () => {
     };
     const resolveMcpLoopbackScopedTools = vi.fn(() => ({
       agentId: "main",
-      tools: [
-        {
-          name: "skill_workshop",
-          label: "Skill Workshop",
-          description: "Manage skills",
-          parameters: { type: "object", properties: {} },
-          execute: vi.fn(),
-        },
-      ],
+      tools: [createCliTool("skill_workshop", "Skill Workshop", "Manage skills")],
     }));
     setCliRunnerPrepareTestDeps({ resolveMcpLoopbackScopedTools });
     const prepareExecution = vi.fn(async () => ({ toolAvailabilityEnforced: true as const }));
@@ -3318,22 +3326,29 @@ describe("prepareCliRunContext", () => {
     await context.preparedBackend.cleanup?.();
   });
 
-  it.each([
-    {
-      name: "materializes exact availability when the caller did not provide it",
-      cliToolAvailability: undefined,
-      hookToolsAllow: ["read"],
-      projectedToolNames: ["read", "message"],
-    },
-    {
-      name: "keeps existing CLI availability as the upper bound",
-      cliToolAvailability: { native: [], openClaw: ["read", "message"] },
-      hookToolsAllow: ["read", "write"],
-      projectedToolNames: ["read", "message", "write"],
-    },
+  it.each<
+    [
+      name: string,
+      cliToolAvailability: RunCliAgentParams["cliToolAvailability"],
+      hookToolsAllow: string[],
+      projectedToolNames: string[],
+    ]
+  >([
+    [
+      "materializes exact availability when the caller did not provide it",
+      undefined,
+      ["read"],
+      ["read", "message"],
+    ],
+    [
+      "keeps existing CLI availability as the upper bound",
+      { native: [], openClaw: ["read", "message"] },
+      ["read", "write"],
+      ["read", "message", "write"],
+    ],
   ])(
-    "applies before_prompt_build tool filtering before CLI guidance and submission: $name",
-    async ({ cliToolAvailability, hookToolsAllow, projectedToolNames }) => {
+    "applies before_prompt_build tool filtering before CLI guidance and submission: %s",
+    async (_name, cliToolAvailability, hookToolsAllow, projectedToolNames) => {
       const prepareExecution = vi.fn(async () => ({ toolAvailabilityEnforced: true as const }));
       const mintMcpLoopbackClientGrant = vi.fn(createTestMcpLoopbackClientGrant);
       const hookRunner = {

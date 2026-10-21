@@ -619,7 +619,6 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/subagents/spawn/subagent-spawn.thinking-provenance.test.ts",
   "src/agents/subagents/spawn/subagent-spawn-session-patch.test.ts",
   "src/agents/cli-runner/prepare.test.ts",
-  "src/agents/cli-runner/prepare.model-routing-authority.test.ts",
   "src/agents/cli-runner/prepare.durable-context.test.ts",
   "src/agents/embedded-agent-runner/run-orchestrator.projection.test.ts",
   "src/agents/embedded-agent-runner/run.prepared-harness-source-delivery.integration.test.ts",
