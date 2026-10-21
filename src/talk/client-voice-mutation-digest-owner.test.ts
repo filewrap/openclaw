@@ -169,54 +169,25 @@ describe("client voice mutation digest owner", () => {
     },
   );
 
-  it.each(["unknown outcome", "confirmed delivery"] as const)(
-    "fences later lifecycle intents after %s without retaining settlement",
-    async (fence) => {
-      const confirmed = fence === "confirmed delivery";
-      const releases: Array<ReturnType<typeof vi.fn>> = [];
-      const attempt = vi.fn<() => Promise<boolean>>();
-      if (confirmed) {
-        attempt.mockRejectedValue(new Error("marker refused"));
-      } else {
-        attempt
-          .mockRejectedValueOnce(new Error("offline"))
-          .mockRejectedValueOnce(new SqliteWorkerError("lost acknowledgment", "outcome-unknown"))
-          .mockResolvedValue(true);
-      }
-      const owner = makeOwner<number>({
-        attempt,
-        captureAttempt: () => capture(releases),
-        ...(confirmed ? { deliveryState: () => "confirmed" as const } : {}),
-      });
-      record(owner, 1);
-      await flushMicrotasks();
-      if (!confirmed) {
-        owner.retry(identity);
-        await flushMicrotasks();
-        expect(releases).toHaveLength(2);
-        expectReleased(releases);
-      }
-      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
-      const expectedAttempts = confirmed ? attempt.mock.calls.length : 2;
-      if (confirmed) {
-        record(owner, 1);
-      }
-      owner.retry(identity);
-      owner.retryAgent("a", confirmed ? 1 : 2);
-      if (!confirmed) {
-        record(owner, 3);
-      }
-      await flushMicrotasks();
-      expect(attempt).toHaveBeenCalledTimes(expectedAttempts);
-      expectReleased(releases);
-      if (!confirmed) {
-        expect(releases).toHaveLength(2);
-        owner.record({ agentId: "a", voiceSessionId: "v2", context: 1 });
-        await flushMicrotasks();
-        expect(attempt).toHaveBeenCalledTimes(3);
-      }
-    },
-  );
+  it("fences later confirmed-delivery intents without retaining settlement", async () => {
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    const attempt = vi.fn<() => Promise<boolean>>().mockRejectedValue(new Error("marker refused"));
+    const owner = makeOwner<number>({
+      attempt,
+      captureAttempt: () => capture(releases),
+      deliveryState: () => "confirmed",
+    });
+    record(owner, 1);
+    await flushMicrotasks();
+    await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+    const expectedAttempts = attempt.mock.calls.length;
+    record(owner, 1);
+    owner.retry(identity);
+    owner.retryAgent("a", 1);
+    await flushMicrotasks();
+    expect(attempt).toHaveBeenCalledTimes(expectedAttempts);
+    expectReleased(releases);
+  });
 
   it("keeps an ignored abort request active until its real promise settles", async () => {
     const { owner, attempts } = pendingOwner();
@@ -292,27 +263,6 @@ describe("client voice mutation digest owner", () => {
     owner.record({ agentId: "second", voiceSessionId: "v2", context: 2 });
     await flushMicrotasks();
     expect(attempts).toEqual(["first", "first", "first", "first", "second"]);
-  });
-
-  it("suspends failure expiry while a legitimate defer owns the retry", async () => {
-    let outcome: "fail" | "defer" | "succeed" = "fail";
-    const attempt = vi.fn(async () => {
-      if (outcome === "fail") {
-        throw new Error("offline");
-      }
-      return outcome === "succeed";
-    });
-    const owner = makeOwner<number>({ attempt });
-    record(owner, 1);
-    await vi.advanceTimersByTimeAsync(0);
-    outcome = "defer";
-    owner.retry(identity);
-    await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(300_001);
-    outcome = "succeed";
-    owner.retry(identity);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(attempt).toHaveBeenCalledTimes(3);
   });
 
   it("ignores settlement from an attempt owned by a cleared generation", async () => {

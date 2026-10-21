@@ -158,7 +158,7 @@ describe("voice consult concrete store ownership", () => {
       const sessionKey = "agent:main:voice-child";
       const storePath = state.statePath("consult", "sessions.sqlite");
       const target = { agentId: "main", sessionKey, storePath };
-      const result = consult({ ...target, spawnedBy, contextMode: "isolated" });
+      const result = consult({ ...target, spawnedBy, contextMode: locked ? "fork" : "isolated" });
       if (locked) {
         await expect(result).rejects.toThrow(MODEL_SELECTION_LOCKED_MESSAGE);
         expect(runEmbeddedAgent).not.toHaveBeenCalled();

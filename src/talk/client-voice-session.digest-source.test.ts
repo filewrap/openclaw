@@ -102,6 +102,8 @@ it("records a missing conversation instead of silently completing its digest", a
 
 it("does not retry an unknown digest marker when writer cleanup also fails", async () => {
   const voiceSessionId = await seedDigest("channel:unknown-marker");
+  using timers = fakeTimers();
+  void timers;
   const unknown = new SqliteWorkerError("synthetic unknown digest marker", "outcome-unknown");
   const cleanupError = new Error("synthetic digest writer release failure");
   let attempts = 0;
@@ -118,6 +120,10 @@ it("does not retry an unknown digest marker when writer cleanup also fails", asy
   try {
     await closeVoice(voiceSessionId, target);
     await settleDigestAttempts();
+    await vi.advanceTimersByTimeAsync(
+      clientVoiceSessionTesting.digestDeliveryPolicy.failureRetentionMs + 1,
+    );
+    await recoverStale();
     await closeVoice(voiceSessionId, target);
     await settleDigestAttempts();
     expect(attempts).toBe(1);
@@ -125,6 +131,10 @@ it("does not retry an unknown digest marker when writer cleanup also fails", asy
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("settlement is unknown"));
     expect(readRecord(voiceSessionId)).toMatchObject({ status: "closed" });
     expect(readRecord(voiceSessionId)?.digestDeliveredAt).toBeUndefined();
+    const freshVoiceSessionId = await createCompletedMutationSession();
+    await closeVoice(freshVoiceSessionId, target);
+    await settleDigestAttempts();
+    expect({ attempts, sends: send.mock.calls.length }).toEqual({ attempts: 2, sends: 2 });
   } finally {
     await settleDigestAttempts();
   }

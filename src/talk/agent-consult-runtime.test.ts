@@ -275,7 +275,9 @@ describe("realtime voice agent consult runtime", () => {
   it("runs an embedded agent using the shared session and prompt contract", async () => {
     const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime([
       setReplyPayloadMetadata({ text: "Earlier answer." }, { precedingInputAnswer: true }),
+      { text: "thinking", isReasoning: true },
       { text: "Speak this." },
+      { text: "error", isError: true },
       { text: "Then this." },
     ]);
 
@@ -349,25 +351,15 @@ describe("realtime voice agent consult runtime", () => {
     );
   });
 
-  it.each(["consult", "requester"])(
-    "fails closed before forking or dispatching from a locked %s session",
-    async (lockedSession) => {
-      const { runtime, sessionStore } = createAgentRuntime();
-      const requester = lockedSession === "requester";
-      sessionStore[requester ? requesterSessionKey : "voice:locked"] = {
-        ...lockedEntry,
-        sessionId: requester ? "locked-requester" : "locked-session",
-      };
-      const consult = requester
-        ? forkConsult(runtime, {
-            sessionKey: "agent:main:subagent:google-meet:meet-locked",
-          })
-        : runConsult(runtime, { sessionKey: "voice:locked", provider: "openai", model: "gpt-5.4" });
-      await expect(consult).rejects.toThrow(MODEL_SELECTION_LOCKED_MESSAGE);
-      expect(forkSessionEntryFromParent).not.toHaveBeenCalled();
-      expectNoDispatch(runtime);
-    },
-  );
+  it("fails closed before dispatching from a locked consult session", async () => {
+    const { runtime, sessionStore } = createAgentRuntime();
+    sessionStore["voice:locked"] = { ...lockedEntry, sessionId: "locked-session" };
+    await expect(
+      runConsult(runtime, { sessionKey: "voice:locked", provider: "openai", model: "gpt-5.4" }),
+    ).rejects.toThrow(MODEL_SELECTION_LOCKED_MESSAGE);
+    expect(forkSessionEntryFromParent).not.toHaveBeenCalled();
+    expectNoDispatch(runtime);
+  });
 
   it("allows an independent consult when only the requester session is locked", async () => {
     const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime();

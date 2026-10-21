@@ -710,50 +710,6 @@ describe("client voice session worker contract", () => {
     });
   });
 
-  it("publishes transcripts only after their voice bookkeeping commits", async () => {
-    const voiceSessionId = await seededVoice();
-    const observed: Array<{
-      transcript: ReturnType<typeof readSessionTranscriptMessageEvents>;
-      voice: ReturnType<typeof clientVoiceSessionTesting.readRecord>;
-    }> = [];
-    const unsubscribe = onSessionTranscriptUpdate((update) => {
-      if (update.sessionKey === target.sessionKey) {
-        observed.push({
-          transcript: readSessionTranscriptMessageEvents(update.target),
-          voice: readRecord(voiceSessionId),
-        });
-      }
-    });
-    try {
-      await appendTranscript(
-        voiceSessionId,
-        "committed-together",
-        "Confirm both records before notifying observers",
-      );
-      expect(observed).toEqual([
-        {
-          transcript: [
-            expect.objectContaining({
-              event: expect.objectContaining({
-                message: expect.objectContaining({
-                  content: [
-                    { type: "text", text: "Confirm both records before notifying observers" },
-                  ],
-                }),
-              }),
-            }),
-          ],
-          voice: expect.objectContaining({
-            hasUserTranscript: true,
-            transcriptFailureKeys: [],
-          }),
-        },
-      ]);
-    } finally {
-      unsubscribe();
-    }
-  });
-
   it.each(["unrelated", "same-source", "default-unrelated"] as const)(
     "resolves the conversation store before atomic append (%s)",
     async (selection) => {
@@ -800,10 +756,16 @@ describe("client voice session worker contract", () => {
         ),
       });
       const voiceSessionId = "selector-voice";
-      const published: Array<ReturnType<typeof readVoiceSessionRecord>> = [];
+      const published: Array<{
+        voice: ReturnType<typeof readVoiceSessionRecord>;
+        transcript: ReturnType<typeof readSessionTranscriptMessageEvents>;
+      }> = [];
       const unsubscribe = onSessionTranscriptUpdate((update) => {
         if (update.sessionKey === selectedTarget.sessionKey) {
-          published.push(readVoiceSessionRecord(options.agentId, voiceSessionId, options));
+          published.push({
+            voice: readVoiceSessionRecord(options.agentId, voiceSessionId, options),
+            transcript: readSessionTranscriptMessageEvents(update.target),
+          });
         }
       });
       try {
@@ -831,7 +793,21 @@ describe("client voice session worker contract", () => {
         ).toHaveLength(1);
         if (selection === "same-source") {
           expect(published).toEqual([
-            expect.objectContaining({ hasUserTranscript: true, transcriptFailureKeys: [] }),
+            {
+              voice: expect.objectContaining({
+                hasUserTranscript: true,
+                transcriptFailureKeys: [],
+              }),
+              transcript: [
+                expect.objectContaining({
+                  event: expect.objectContaining({
+                    message: expect.objectContaining({
+                      content: [{ type: "text", text: "Keep the selected conversation" }],
+                    }),
+                  }),
+                }),
+              ],
+            },
           ]);
         } else {
           expect(

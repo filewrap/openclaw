@@ -164,14 +164,13 @@ describe("realtime voice bridge session runtime", () => {
     expect(handleDelegationInput).toHaveBeenCalledExactlyOnceWith("status", expect.any(Function));
     request.onTranscript?.("user", "status", true);
     expect(onTranscript).toHaveBeenCalledExactlyOnceWith("user", "status", true);
-    request.onTranscript?.("user", "corrected", false, {
-      textMode: "snapshot",
+    const textMode = { textMode: "snapshot" } as const;
+    request.onTranscript?.("user", "corrected", false, textMode);
+    expect(onTranscript).toHaveBeenLastCalledWith("user", "corrected", false, textMode);
+    expect({ agentId: request.agentId, audioFormat: request.audioFormat }).toEqual({
+      agentId: "voice-agent",
+      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
     });
-    expect(onTranscript).toHaveBeenLastCalledWith("user", "corrected", false, {
-      textMode: "snapshot",
-    });
-    expect(request.agentId).toBe("voice-agent");
-    expect(request.audioFormat).toEqual(REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ);
   });
 
   it.each(["ack-immediately", "ignore"] as const)("handles %s provider marks", (markStrategy) => {
@@ -299,9 +298,7 @@ describe("realtime voice bridge session runtime", () => {
 
     expect(connect).toHaveBeenCalledTimes(1);
     expect(onReady).toHaveBeenCalledWith(session);
-    expect(onClose).toHaveBeenNthCalledWith(1, "error");
-    expect(onClose).toHaveBeenNthCalledWith(2, "completed");
-    expect(onClose).toHaveBeenCalledTimes(2);
+    expect(onClose.mock.calls).toEqual([["error"], ["completed"]]);
     expect(sendProviderAudio).toHaveBeenCalledExactlyOnceWith(Buffer.from("next-input"));
     expect(sendSinkAudio).toHaveBeenCalledExactlyOnceWith(Buffer.from("next-output"), undefined);
   });

@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   buildRealtimeVoiceAgentConsultChatMessage as buildChatMessage,
   buildRealtimeVoiceSessionInstructions as buildSessionInstructions,
-  collectRealtimeVoiceAgentConsultVisibleText as collectVisibleText,
   parseRealtimeVoiceAgentConsultArgs as parseArgs,
   REALTIME_VOICE_AGENT_CONSULT_TOOL as consultTool,
   REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME as consultName,
@@ -56,17 +55,6 @@ describe("realtime voice agent consult tool", () => {
       context: undefined,
       responseStyle: undefined,
     });
-  });
-
-  it("filters reasoning and error payloads from visible consult output", () => {
-    expect(
-      collectVisibleText([
-        { text: "thinking", isReasoning: true },
-        { text: "first" },
-        { text: "error", isError: true },
-        { text: "second" },
-      ]),
-    ).toBe("first\n\nsecond");
   });
 
   it("builds byte-stable agent-proxy session instructions", () => {
