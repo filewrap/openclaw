@@ -27,7 +27,6 @@ type ProjectSearchRead = Readonly<{
 }>;
 
 export type BrowserProjectRegistration = Readonly<{
-  completed: Promise<void>;
   retired: Promise<void>;
   isCurrent: () => boolean;
 }>;
@@ -476,31 +475,28 @@ export class DraftPlaceBrowser {
     // Retire the preceding directory error without hiding reads started during registration.
     this.browser.readCompletion = null;
     this.callbacks.changed();
-    const completed = (async () => {
-      try {
-        const project = await client.request<ProjectsRegisterResult>("projects.register", { path });
-        if (!isCurrentRegistration()) {
-          return;
-        }
-        await this.refreshProjects(true);
-        if (!isCurrentRegistration()) {
-          return;
-        }
-        this.callbacks.onSelectProject(project.id);
-        this.close();
-      } catch (error) {
-        if (isCurrentRegistration()) {
-          this.browser.error = formatUiError(error);
-        }
-      } finally {
-        if (this.browserRegistration === operation) {
-          this.browserRegistration = null;
-          this.callbacks.changed();
-        }
+    onStarted?.({ retired: retirement.promise, isCurrent: isCurrentBrowser });
+    try {
+      const project = await client.request<ProjectsRegisterResult>("projects.register", { path });
+      if (!isCurrentRegistration()) {
+        return;
       }
-    })();
-    onStarted?.({ completed, retired: retirement.promise, isCurrent: isCurrentBrowser });
-    await completed;
+      await this.refreshProjects(true);
+      if (!isCurrentRegistration()) {
+        return;
+      }
+      this.callbacks.onSelectProject(project.id);
+      this.close();
+    } catch (error) {
+      if (isCurrentRegistration()) {
+        this.browser.error = formatUiError(error);
+      }
+    } finally {
+      if (this.browserRegistration === operation) {
+        this.browserRegistration = null;
+        this.callbacks.changed();
+      }
+    }
   }
 
   private transitionPopover(kind: DraftPickerKind, showing: boolean) {

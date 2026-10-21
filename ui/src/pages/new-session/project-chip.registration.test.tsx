@@ -18,10 +18,18 @@ function mountBrowser() {
     client: context.gateway.snapshot.client,
     connectionEpoch: 1,
   });
+  Object.assign(context.gateway.snapshot.hello!, {
+    features: { methods: ["projects.list", "sessions.create"] },
+  });
   request.mockImplementation(async (method) =>
-    method === "fs.listDir"
-      ? { path: "/workspace", entries: [] }
-      : { repositoryStatus: "git", branches: [] },
+    method === "projects.list"
+      ? { projects: [] }
+      : method === "fs.listDir"
+        ? {
+            path: "/workspace",
+            entries: [{ name: "packages", path: "/workspace/packages" }],
+          }
+        : { repositoryStatus: "git", branches: [] },
   );
   vi.spyOn(browser, "popoverOpen").mockReturnValue(true);
   vi.spyOn(place, "deviceFolderAvailable", "get").mockReturnValue(false);
@@ -59,6 +67,7 @@ function mountBrowser() {
     });
     return <ProjectChip {...props()} />;
   });
+  browser.synchronize();
   const open = async () => {
     browser.selectGatewayBrowser("/workspace");
     await waitForSolid(() => expect(browser.browserProjectPath).toBe("/workspace"));
@@ -84,6 +93,16 @@ describe("project registration presentation", () => {
     });
     register.click();
     expect(request.mock.calls.filter(([method]) => method === "projects.register")).toHaveLength(1);
+    const input = view.getByRole<HTMLInputElement>("combobox");
+    input.focus();
+    browser.browser.setDraft("/workspace/no");
+    await waitForSolid(() => {
+      expect(input.value).toBe("/workspace/no");
+      expect(view.queryByRole("option")).toBeNull();
+    });
+    expect(document.activeElement).toBe(input);
+    browser.browser.setDraft("/workspace");
+    await waitForSolid(() => expect(view.getByRole("option").textContent).toContain("packages"));
     registration.reject(new Error("Project registry unavailable"));
     await waitForSolid(() => {
       expect(view.container.textContent).toContain("Project registry unavailable");

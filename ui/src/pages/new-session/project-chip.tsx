@@ -31,6 +31,7 @@ export function ProjectChip(props: {
   });
   const presentRegistration = action(function* (
     view: ReturnType<typeof registration>,
+    pending: Promise<void>,
     receipt: BrowserProjectRegistration,
   ) {
     if (
@@ -40,21 +41,21 @@ export function ProjectChip(props: {
     ) {
       view.setSaving(true);
     }
-    yield Promise.race([receipt.completed, receipt.retired]);
+    yield Promise.race([pending, receipt.retired]);
   });
   const registerProject = async (path: string) => {
     const view = registration();
     let receipt: BrowserProjectRegistration | undefined;
-    const completed = view.browser.registerBrowserProject(path, (started) => {
+    const pending = view.browser.registerBrowserProject(path, (started) => {
       receipt = started;
     });
     if (!receipt) {
-      return completed;
+      return pending;
     }
     // Publish the admitted owner operation before joining its presentation action.
     await Promise.resolve();
     try {
-      await presentRegistration(view, receipt);
+      await presentRegistration(view, pending, receipt);
     } catch (error) {
       if (
         view.browser === props.params.place.browser &&
@@ -193,13 +194,14 @@ export function ProjectChip(props: {
       {props.params.place.browser.browserOpen ? (
         <PlaceBrowser
           pathRef={(node) => props.focus && (props.focus.path = node)}
+          registeringProject={
+            registration().saving() || props.params.place.browser.browserRegistering
+          }
           params={{
             browser: props.params.place.browser.browser,
             id: "new-session-place-browser",
             label: view().browserLabel,
             registerProjectPath: props.params.place.browser.browserProjectPath,
-            registeringProject:
-              registration().saving() || props.params.place.browser.browserRegistering,
             onBack: () => props.params.place.browser.showRoot(),
             onRegisterProject: (path) => void registerProject(path),
             onClose: () => props.params.place.browser.close(),
