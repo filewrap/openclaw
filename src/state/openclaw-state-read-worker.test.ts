@@ -1,13 +1,18 @@
 // Register shared pool mocks before modules that consume them.
 // oxfmt-ignore
 import { emptyReply, mock, queueTask, source, tempDirs } from "./openclaw-state-read-worker.test-harness.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
 import { threadId } from "node:worker_threads";
 import { expect, it, vi } from "vitest";
 import type { AcpSessionReadInput } from "../acp/runtime/session-meta-read.types.js";
+import { resolveRuntimeProcessEntrypointUrl } from "../infra/runtime-process-url.js";
+import { withRuntimeWorkerGeneration } from "../infra/runtime-worker-generation.js";
+import { captureRetainedNativeWorkerSource } from "../infra/worker-native-lifecycle.js";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { runOpenClawAgentWriteAdmission } from "./openclaw-agent-write-admission.js";
 import {
   closeOpenClawStateDatabaseByPathAsync,
   registerOpenClawStateDatabaseAsyncResource,
@@ -19,11 +24,11 @@ import {
 } from "./openclaw-state-db-readonly.js";
 import { withExistingOpenClawStateSchema } from "./openclaw-state-db-schema-policy.js";
 import { closeOpenClawStateDatabaseAsync, openOpenClawStateDatabase } from "./openclaw-state-db.js";
-import { captureOpenClawStateReadSource } from "./openclaw-state-read-worker.js";
-import type {
-  OpenClawStateReadCommand,
-  OpenClawStateReadReply,
-} from "./openclaw-state-read.types.js";
+import {
+  captureOpenClawStateReadSource,
+  retireIdleOpenClawStateReadWorkers,
+} from "./openclaw-state-read-worker.js";
+import type { OpenClawStateReadReply } from "./openclaw-state-read.types.js";
 import { captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context.js";
 import { encodeOpenClawStateWorkerError } from "./openclaw-state-worker-error.js";
 
@@ -441,197 +446,61 @@ it("closes one read path without aborting its sibling", async () => {
   expect(mock.closePool).toHaveBeenCalledOnce();
 });
 
-function captureCase<T extends OpenClawStateReadCommand>(
-  command: T,
-  reply: OpenClawStateReadReply,
-  bytes: number,
-  mutate: (command: T) => void,
-  options: {
-    prepared?: boolean;
-    queued?: () => void;
-  } = {},
-) {
-  return { command, reply, bytes, mutate: () => mutate(command), ...options };
-}
-
-const selector = "租户🦞".repeat(512);
-const selectorBytes = Buffer.byteLength(selector);
-const historyInput = { reason: selector, includeRunId: selector, active: true, limit: 100 };
-const descendants = {
-  kind: "descendants" as const,
-  sessionKeys: ["父会话🦞".repeat(256)],
-  liveTopology: [
-    { childSessionKey: "子会话🦞".repeat(256), requesterSessionKey: "请求者🦞".repeat(256) },
-  ],
-};
-const inspection = {
-  runId: "运行🦞",
-  now: 0,
-  executionOffset: 0,
-  executionLimit: 0,
-  decisionLimit: 0,
-  decisionCursor: "游标🦞",
-};
-// Capture and byte accounting are structural, not command-specific. Keep nested
-// objects, arrays, numbers/booleans, and mutation before both preparation and dispatch.
-const captures = [
-  captureCase(
-    {
-      type: "githubPublication.sharedObservation",
-      input: {
-        session: {
-          agentId: selector,
-          sessionKey: selector,
-          sessionId: selector,
-          lifecycleRevision: selector,
-        },
-        selector: { requestId: selector },
-        entry: {
-          repositoryWorkspaceId: selector,
-          lifecycleRevision: selector,
-          worktree: { id: selector, branch: selector, repoRoot: selector },
-        },
-      },
-    },
-    { ok: true, type: "githubPublication.sharedObservation", sourceAdmitted: true, row: undefined },
-    selectorBytes * 10,
-    ({ input }) => {
-      Object.assign(input.session, {
-        agentId: "changed",
-        sessionKey: "changed",
-        sessionId: "changed",
-        lifecycleRevision: "changed",
-      });
-      input.selector.requestId = "changed";
-      input.entry.repositoryWorkspaceId = "changed";
-      input.entry.lifecycleRevision = "changed";
-      Object.assign(input.entry.worktree, {
-        id: "changed",
-        branch: "changed",
-        repoRoot: "changed",
-      });
-    },
-  ),
-  captureCase(
-    {
+// Capture and byte accounting are structural; the batch case below adds arrays and preparation.
+it("captures scalar selectors and byte charges before queued dispatch", async () => {
+  const { options } = source();
+  const selector = "租户🦞".repeat(512);
+  const input = { reason: selector, includeRunId: selector, active: true, limit: 100 };
+  const command = { type: "updateRuns.list", input } as const;
+  const expected = structuredClone(command);
+  const originalRoot = options.env.OPENCLAW_STATE_DIR;
+  const dispatch = createDeferredCore();
+  const baselineTask = queueTask(dispatch.promise);
+  const task = queueTask(dispatch.promise);
+  const baseline = executeExistingOpenClawStateRead(options, { type: "backup.runs" });
+  const result = executeExistingOpenClawStateRead(options, command);
+  try {
+    const [baselineOptions, submitted] = await Promise.all([
+      baselineTask.submitted,
+      Promise.race([
+        task.submitted,
+        result.then(() => {
+          throw new Error("Read settled before queued dispatch");
+        }),
+      ]),
+    ]);
+    Object.assign(input, { reason: "changed", includeRunId: "changed", active: false, limit: 1 });
+    options.env.OPENCLAW_STATE_DIR = path.join(originalRoot, "different");
+    expect(Number.isSafeInteger(submitted.inputBytes)).toBe(true);
+    expect(submitted.inputBytes).toBeGreaterThanOrEqual(
+      Number(baselineOptions.inputBytes) +
+        Buffer.byteLength(expected.type) -
+        Buffer.byteLength("backup.runs") +
+        Buffer.byteLength(selector) * 2 +
+        9,
+    );
+    dispatch.resolve();
+    await baselineTask.captured;
+    baselineTask.result.resolve(emptyReply);
+    const request = await task.captured;
+    expect(request.command).toEqual(expected);
+    expect(request.context.environment.OPENCLAW_STATE_DIR).toBe(originalRoot);
+    const reply: OpenClawStateReadReply = {
+      ok: true,
       type: "updateRuns.list",
-      input: historyInput,
-    },
-    { ok: true, type: "updateRuns.list", sourceAdmitted: true, runs: [] },
-    selectorBytes * 2 + 9,
-    ({ input }) => {
-      input.reason = "changed";
-      input.includeRunId = "changed";
-      input.active = false;
-      input.limit = 1;
-    },
-  ),
-  captureCase(
-    { type: "subagents.runs", scope: descendants },
-    { ok: true, type: "subagents.runs", sourceAdmitted: true, runs: new Map() },
-    Buffer.byteLength(descendants.sessionKeys[0]!) +
-      Buffer.byteLength(descendants.liveTopology[0]!.childSessionKey) +
-      Buffer.byteLength(descendants.liveTopology[0]!.requesterSessionKey),
-    ({ scope }) => {
-      scope.sessionKeys[0] = "changed";
-      scope.sessionKeys.push("added after admission");
-      scope.liveTopology[0]!.childSessionKey = "changed child";
-      scope.liveTopology[0]!.requesterSessionKey = "changed requester";
-      scope.liveTopology.push({
-        childSessionKey: "added child",
-        requesterSessionKey: "added requester",
-      });
-    },
-  ),
-  captureCase(
-    { type: "audit.run.inspect", input: inspection },
-    emptyReply,
-    Buffer.byteLength(inspection.runId) + Buffer.byteLength(inspection.decisionCursor) + 32,
-    ({ input }) => {
-      input.now = 999;
-      input.decisionCursor = "changed before read";
-      input.decisionLimit = 99;
-      input.runId = "changed run";
-      input.executionOffset = 99;
-      input.executionLimit = 99;
-    },
-    {
-      prepared: true,
-      queued: () => {
-        inspection.now = 1234;
-        inspection.decisionCursor = "changed while queued";
-      },
-    },
-  ),
-];
-
-it.each(captures)(
-  "captures $command.type selectors and byte charges before queued dispatch (%#)",
-  async (fixture) => {
-    const { pathname, options } = source();
-    const expected = structuredClone(fixture.command);
-    const originalRoot = options.env.OPENCLAW_STATE_DIR;
-    const context = captureOpenClawStateWorkerContext(options);
-    const location = { context, location: pathname, checkFreshAdmission: false };
-    const authority = { signal: new AbortController().signal, assertCurrent: () => {} };
-    const transport = fixture.prepared
-      ? captureOpenClawStateReadSource().createTransport(fixture.command)
-      : undefined;
-    const baselineTransport = fixture.prepared
-      ? captureOpenClawStateReadSource().createTransport({ type: "backup.runs" })
-      : undefined;
-    if (transport) {
-      fixture.mutate();
-    }
-    const dispatch = createDeferredCore();
-    const baselineTask = queueTask(dispatch.promise);
-    const task = queueTask(dispatch.promise);
-    const baseline = baselineTransport
-      ? baselineTransport.startRead(location, authority)
-      : executeExistingOpenClawStateRead(options, { type: "backup.runs" });
-    const result = transport
-      ? transport.startRead(location, authority)
-      : executeExistingOpenClawStateRead(options, fixture.command);
-    try {
-      const [baselineOptions, submitted] = await Promise.all([
-        baselineTask.submitted,
-        Promise.race([
-          task.submitted,
-          result.then(() => {
-            throw new Error("Read settled before queued dispatch");
-          }),
-        ]),
-      ]);
-      if (!transport) {
-        fixture.mutate();
-      }
-      fixture.queued?.();
-      options.env.OPENCLAW_STATE_DIR = path.join(originalRoot, "different");
-      expect(Number.isSafeInteger(submitted.inputBytes)).toBe(true);
-      expect(submitted.inputBytes).toBeGreaterThanOrEqual(
-        Number(baselineOptions.inputBytes) +
-          Buffer.byteLength(expected.type) -
-          Buffer.byteLength("backup.runs") +
-          fixture.bytes,
-      );
-      dispatch.resolve();
-      await baselineTask.captured;
-      baselineTask.result.resolve(emptyReply);
-      const request = await task.captured;
-      expect(request.command).toEqual(expected);
-      expect(request.context.environment.OPENCLAW_STATE_DIR).toBe(originalRoot);
-      task.result.resolve(fixture.reply);
-      expect(await result).toEqual(transport ? { value: fixture.reply } : fixture.reply);
-      await baseline;
-    } finally {
-      dispatch.resolve();
-      baselineTask.result.resolve(emptyReply);
-      task.result.resolve(fixture.reply);
-      await Promise.allSettled([baseline, result]);
-      await Promise.all([baselineTransport?.startClose(), transport?.startClose()]);
-    }
-  },
-);
+      sourceAdmitted: true,
+      runs: [],
+    };
+    task.result.resolve(reply);
+    expect(await result).toEqual(reply);
+    await baseline;
+  } finally {
+    dispatch.resolve();
+    baselineTask.result.resolve(emptyReply);
+    task.result.resolve(emptyReply);
+    await Promise.allSettled([baseline, result]);
+  }
+});
 
 it("captures and charges nested batches before preparation and queued dispatch", async () => {
   const type = "acpSessions.metadata";
@@ -707,4 +576,176 @@ it("captures and charges nested batches before preparation and queued dispatch",
     await Promise.allSettled([baselineRead, read]);
     await Promise.all([baseline.startClose(), transport.startClose()]);
   }
+});
+
+const backupRead = { type: "backup.runs" } as const;
+function readyTask() {
+  const task = queueTask();
+  task.result.resolve(emptyReply);
+  return task;
+}
+
+function withReadGeneration(
+  workerUrl: URL,
+  operation: (source: ReturnType<typeof captureOpenClawStateReadSource>) => Promise<void>,
+) {
+  const moduleUrl = resolveRuntimeProcessEntrypointUrl("stateRead");
+  return withRuntimeWorkerGeneration(
+    async (bind) => {
+      bind((url) => (url.href === moduleUrl.href ? workerUrl : url));
+      await operation(captureOpenClawStateReadSource());
+    },
+    async () => {},
+  );
+}
+
+function readFixture() {
+  const { options, pathname } = source();
+  return {
+    options,
+    read: () => executeExistingOpenClawStateRead(options, backupRead),
+    get location() {
+      return {
+        context: captureOpenClawStateWorkerContext(options),
+        location: pathname,
+        checkFreshAdmission: false,
+      };
+    },
+    authority: { signal: new AbortController().signal, assertCurrent: () => {} },
+  };
+}
+
+it("retires cached readers after independent custody joins and permits reuse", async () => {
+  const { read } = readFixture();
+  const nativeSource = captureRetainedNativeWorkerSource();
+  const task = queueTask();
+  const reading = read();
+  try {
+    await task.captured;
+    expect(await retireIdleOpenClawStateReadWorkers(nativeSource)).toBe(false);
+    expect(mock.closePool).not.toHaveBeenCalled();
+  } finally {
+    task.result.resolve(emptyReply);
+    await reading;
+  }
+  expect(mock.closePool).not.toHaveBeenCalled();
+  expect(await retireIdleOpenClawStateReadWorkers(nativeSource)).toBe(true);
+  expect(mock.closePool).toHaveBeenCalledOnce();
+
+  readyTask();
+  await expect(read()).resolves.toEqual(emptyReply);
+  expect(mock.create).toHaveBeenCalledTimes(2);
+});
+
+it.each([true, false])(
+  "refuses writer-held reader retirement before cleanup (targeted close: %s)",
+  async (explicitSqliteCloseReleasesNativeResources) => {
+    const { options, read } = readFixture();
+    mock.capabilities.mockReturnValue({
+      explicitSqliteCloseReleasesNativeResources,
+      decided: true,
+      reason: "test policy",
+    });
+    const nativeSource = captureRetainedNativeWorkerSource();
+    readyTask();
+    await read();
+
+    await expect(
+      runOpenClawAgentWriteAdmission({ agentId: "main", path: options.path }, () =>
+        retireIdleOpenClawStateReadWorkers(nativeSource),
+      ),
+    ).rejects.toThrow("while holding a store writer");
+    expect(mock.closeResources).not.toHaveBeenCalled();
+    expect(mock.rotate).not.toHaveBeenCalled();
+    expect(mock.closePool).not.toHaveBeenCalled();
+
+    await expect(retireIdleOpenClawStateReadWorkers(nativeSource)).resolves.toBe(true);
+    expect(
+      explicitSqliteCloseReleasesNativeResources ? mock.closeResources : mock.rotate,
+    ).toHaveBeenCalledOnce();
+    expect(mock.closePool).toHaveBeenCalledOnce();
+  },
+);
+
+it("keeps lazy reads with their captured generation when another generation dispatches them", async () => {
+  const { location, authority } = readFixture();
+  const firstUrl = new URL("file:///synthetic/first/state-reader.mjs");
+  const secondUrl = new URL("file:///synthetic/second/state-reader.mjs");
+  await withReadGeneration(firstUrl, async (first) => {
+    expect(mock.create).not.toHaveBeenCalled();
+    expect(mock.selectSqlite).not.toHaveBeenCalled();
+    await withReadGeneration(secondUrl, async (second) => {
+      const transports = [first, second].map((reader) => {
+        readyTask();
+        return reader.createTransport(backupRead);
+      });
+      try {
+        for (const transport of transports) {
+          await expect(transport.startRead(location, authority)).resolves.toEqual({
+            value: emptyReply,
+          });
+        }
+        expect(mock.create.mock.calls).toMatchObject(
+          [firstUrl, secondUrl].map((workerUrl) => [{ workerUrl }, { retainedTransport: true }]),
+        );
+      } finally {
+        await Promise.all(transports.map((transport) => transport.startClose()));
+      }
+    });
+  });
+});
+
+it("joins captured domain cleanup before retiring its pool and execution generation", async () => {
+  const { location, authority } = readFixture();
+  const scope = new AsyncLocalStorage<string>();
+  const ownerCloseStarted = createDeferredCore();
+  const ownerMayClose = createDeferredCore();
+  const events: string[] = [];
+  const record = (event: string) => async () => {
+    events.push(event);
+  };
+  const releaseGeneration = vi.fn(record("generation released"));
+  mock.closeResources.mockImplementation(record("resources closed"));
+  mock.closePool.mockImplementation(record("pool closed"));
+  let captured: ReturnType<typeof captureOpenClawStateReadSource> | undefined;
+  const generation = withRuntimeWorkerGeneration(async (bind) => {
+    bind((url) => new URL(`${url.href}?synthetic-generation=owned`));
+    captured = captureOpenClawStateReadSource();
+    const retainedSource = captured;
+    const transport = retainedSource.createTransport(backupRead);
+    readyTask();
+    scope.run("accepted reader", () => {
+      const unregister = retainedSource.own(async () => {
+        expect(scope.getStore()).toBe("accepted reader");
+        events.push("domain closing");
+        ownerCloseStarted.resolve();
+        await ownerMayClose.promise;
+        await transport.startRead(location, authority);
+        await transport.startClose();
+        unregister();
+        events.push("domain closed");
+      });
+    });
+  }, releaseGeneration);
+  try {
+    await Promise.race([
+      ownerCloseStarted.promise,
+      generation.then(() => {
+        throw new Error("Generation completed before domain cleanup");
+      }),
+    ]);
+    expect(events).toEqual(["domain closing"]);
+    expect(mock.create).not.toHaveBeenCalled();
+    expect(() => captured?.own(async () => {})).toThrow(/closing/);
+  } finally {
+    ownerMayClose.resolve();
+    await generation;
+  }
+  expect(events).toEqual([
+    "domain closing",
+    "domain closed",
+    "resources closed",
+    "pool closed",
+    "generation released",
+  ]);
 });

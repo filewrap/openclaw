@@ -1,6 +1,8 @@
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
-import { afterEach, assert, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { SqliteWorkerError } from "../infra/sqlite-worker-contract.js";
+import * as leaseStorage from "./openclaw-state-lease-storage.js";
+import { withOpenClawStateLeaseWorkerAdmission as withAdmission } from "./openclaw-state-lease-worker-owner.js";
 import { OpenClawStateLeaseError, withOpenClawStateLease } from "./openclaw-state-lease.js";
 
 const fixture = vi.hoisted(() => ({
@@ -48,6 +50,68 @@ beforeEach(() => {
   fixture.loseRenewal = false;
   vi.useFakeTimers();
   vi.setSystemTime(10_000);
+});
+
+describe("native lease admission", () => {
+  const options = {
+    scope: "projects.checkout",
+    key: "synthetic-checkout",
+    database: { scope: "shared" as const },
+    leaseMs: 1_000,
+    waitMs: 0,
+  };
+  beforeEach(() => {
+    fixture.expiresAt = 10_000;
+    vi.setSystemTime(9_000);
+    vi.spyOn(leaseStorage, "verifyOpenClawStateLeaseOwnership").mockImplementation(() => {
+      if (Date.now() >= fixture.expiresAt) {
+        throw new OpenClawStateLeaseError("Synthetic lease ownership expired", {
+          code: "OPENCLAW_STATE_LEASE_LOST",
+        });
+      }
+      return fixture.expiresAt;
+    });
+    vi.spyOn(leaseStorage, "renewOpenClawStateLease").mockImplementation(() => {
+      fixture.expiresAt = Date.now() + 1_000;
+      return fixture.expiresAt;
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps a lease with a worker expiry 30 days ahead alive", async () => {
+    fixture.expiresAt = Date.now() + 30 * 24 * 60 * 60_000;
+    await withOpenClawStateLease(options, async (lease) => {
+      await vi.advanceTimersByTimeAsync(100);
+      expect(lease.signal.aborted).toBe(false);
+      lease.assertOwned();
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["live", "expired", "renewed"] as const)(
+    "gates effects on a %s native lease",
+    async (state) => {
+      const effect = vi.fn();
+      const operation = withOpenClawStateLease(options, async (lease) =>
+        withAdmission(lease, "/synthetic-state/lease.sqlite", async (admission) => {
+          if (state === "renewed") {
+            vi.setSystemTime(9_500);
+            lease.renew?.();
+          }
+          // Change only the clock; the queued expiry callback has not run.
+          vi.setSystemTime(state === "live" ? 9_999 : 10_000);
+          admission.assertCurrent();
+          effect();
+        }),
+      );
+      if (state === "expired") {
+        await expect(operation).rejects.toMatchObject({ code: "OPENCLAW_STATE_LEASE_LOST" });
+      } else {
+        await operation;
+      }
+      expect(effect).toHaveBeenCalledTimes(state === "expired" ? 0 : 1);
+    },
+  );
 });
 
 afterEach(() => {
