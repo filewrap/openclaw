@@ -3,6 +3,7 @@ import type { CliBackendPlugin } from "../../plugins/cli-backend.types.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import type { createCliRunnerPrepareFixture } from "../cli-runner.test-helpers.js";
+import { expectCall } from "./prepare-mcp.test-support.js";
 import { setCliRunnerPrepareTestDeps } from "./prepare.test-support.js";
 import type { RunCliAgentParams } from "./types.js";
 
@@ -23,9 +24,7 @@ export function registerCliThinkingPreparationTests({
     setBackend({ prepareExecution, modelProvider });
     const turn = await getFixture().prepare({ ...base, thinkLevel: "ultra", ...overrides });
     expect(turn.providerThinkingLevel).toBe(expected);
-    expect(prepareExecution).toHaveBeenCalledWith(
-      expect.objectContaining({ thinkingLevel: expected }),
-    );
+    expectCall(prepareExecution, { thinkingLevel: expected });
     return turn;
   }
 

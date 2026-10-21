@@ -10,7 +10,10 @@ import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-
 import { execSchema } from "../bash-tools.schemas.js";
 import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
 import { createCliRunnerPrepareFixture } from "../cli-runner.test-helpers.js";
-import { mockCliMcpPreparation } from "./prepare-mcp.test-support.js";
+import {
+  setRawCliBackendForPrepareTest,
+  mockCliMcpPreparation,
+} from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import { resetCliRunnerPrepareTestDeps } from "./prepare.test-support.js";
 
@@ -72,10 +75,7 @@ let mintGrant: ReturnType<typeof mockCliMcpPreparation>["mint"];
 
 beforeEach(() => {
   vi.clearAllMocks();
-  cliBackendsTesting.setDepsForTest({
-    resolvePluginSetupCliBackend: () => undefined,
-    resolveRuntimeCliBackends: () => [{ ...buildAnthropicCliBackend(), pluginId: "anthropic" }],
-  });
+  setRawCliBackendForPrepareTest({ ...buildAnthropicCliBackend(), pluginId: "anthropic" });
   ({ mint: mintGrant } = mockCliMcpPreparation({
     activateMcpLoopbackClientGrantCapture: () => ({ captureNativeToolAuthority: nativeAuthority }),
     resolveMcpLoopbackPolicyTools,

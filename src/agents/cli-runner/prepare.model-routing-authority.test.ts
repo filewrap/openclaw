@@ -28,6 +28,7 @@ import {
 } from "../context-cache.js";
 import { resetContextWindowCacheForTest } from "../context.test-support.js";
 import { prepareOperatorModelPolicy } from "../operator-model-policy.js";
+import { emptyCliPreparation, setRawCliBackendForPrepareTest } from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
@@ -91,10 +92,7 @@ describe("CLI model-routing receipt authority", () => {
   let clearDecisionSink: (() => void) | undefined;
 
   beforeEach(() => {
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [buildDefaultTestCliBackend()],
-    });
+    setRawCliBackendForPrepareTest(buildDefaultTestCliBackend());
     setCliRunnerPrepareTestDeps({
       isWorkspaceBootstrapPending: vi.fn(async () => false),
       makeBootstrapWarn: vi.fn(() => () => undefined),
@@ -146,16 +144,11 @@ describe("CLI model-routing receipt authority", () => {
         ],
       });
       const prepareExecution = vi.fn(async () => undefined);
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [
-          {
-            ...buildDefaultTestCliBackend(),
-            authEpochMode: "profile-only",
-            autoSelectAuthProfile: kind === "automatic",
-            prepareExecution,
-          },
-        ],
+      setRawCliBackendForPrepareTest({
+        ...buildDefaultTestCliBackend(),
+        authEpochMode: "profile-only",
+        autoSelectAuthProfile: kind === "automatic",
+        prepareExecution,
       });
       const prepared = fixture.prepare({
         agentDir,
@@ -185,10 +178,7 @@ describe("CLI model-routing receipt authority", () => {
       },
     });
     const prepareExecution = vi.fn(async () => undefined);
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [{ ...buildDefaultTestCliBackend(), prepareExecution }],
-    });
+    setRawCliBackendForPrepareTest({ ...buildDefaultTestCliBackend(), prepareExecution });
     const admission = prepareSystemAgentRunAdmission(
       config,
       "cli-policy-run",
@@ -277,13 +267,7 @@ describe("CLI context-window ownership", () => {
 
   beforeEach(() => {
     resetContextWindowCacheForTest();
-    setCliRunnerPrepareTestDeps({
-      isWorkspaceBootstrapPending: async () => false,
-      resolveBootstrapContextForRun: async () => ({ bootstrapFiles: [], contextFiles: [] }),
-      resolveOpenClawReferencePaths: async () => ({ docsPath: null, sourcePath: null }),
-      prepareClaudeCliSkillsPlugin: async () => ({ args: [], cleanup: async () => {} }),
-      loadManifestModelCatalog: () => [],
-    });
+    setCliRunnerPrepareTestDeps(emptyCliPreparation());
     fixture = createCliRunnerPrepareFixture(prepareCliRunContext);
   });
 
@@ -301,16 +285,11 @@ describe("CLI context-window ownership", () => {
     const prepareExecution = vi.fn<NonNullable<CliBackendPlugin["prepareExecution"]>>(
       async () => undefined,
     );
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [
-        {
-          ...buildDefaultTestCliBackend(),
-          id: provider,
-          modelProvider: catalogProvider,
-          prepareExecution,
-        },
-      ],
+    setRawCliBackendForPrepareTest({
+      ...buildDefaultTestCliBackend(),
+      id: provider,
+      modelProvider: catalogProvider,
+      prepareExecution,
     });
     const prepare = () => fixture.prepare({ provider, model });
     const cold = await prepare();

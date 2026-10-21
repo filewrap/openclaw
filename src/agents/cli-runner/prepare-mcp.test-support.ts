@@ -14,7 +14,33 @@ import {
   createTestMcpLoopbackServerConfig,
 } from "../cli-runner.test-helpers.js";
 import { setCliRunnerPrepareTestDeps } from "./prepare.test-support.js";
-import type { RunCliAgentParams } from "./types.js";
+import type { PreparedCliRunContext, RunCliAgentParams } from "./types.js";
+
+export function cliSessionBinding(context: PreparedCliRunContext, sessionId = "cli-session") {
+  return {
+    sessionId,
+    extraSystemPromptHash: context.extraSystemPromptHash,
+    messageToolPolicyHash: context.messageToolPolicyHash,
+    promptToolNamesHash: context.promptToolNamesHash,
+    cwdHash: context.cwdHash,
+    mcpConfigHash: context.preparedBackend.mcpConfigHash,
+    mcpResumeHash: context.preparedBackend.mcpResumeHash,
+  };
+}
+
+export function expectCall(mock: unknown, fields: object) {
+  expect(mock).toHaveBeenCalledWith(expect.objectContaining(fields));
+}
+
+export function emptyCliPreparation() {
+  return {
+    isWorkspaceBootstrapPending: async () => false,
+    resolveBootstrapContextForRun: async () => ({ bootstrapFiles: [], contextFiles: [] }),
+    resolveOpenClawReferencePaths: async () => ({ docsPath: null, sourcePath: null }),
+    prepareClaudeCliSkillsPlugin: async () => ({ args: [], cleanup: async () => {} }),
+    loadManifestModelCatalog: () => [],
+  };
+}
 
 type McpProjectionParams = Parameters<typeof resolveMcpLoopbackScopedTools>[0];
 type McpRunOverrides = Pick<RunCliAgentParams, "config" | "execOverrides" | "toolsAllow">;

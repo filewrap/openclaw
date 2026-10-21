@@ -32,6 +32,10 @@ import {
 } from "../cli-runner.test-helpers.js";
 import { resolveClaudeCliProjectDirForWorkspace } from "../command/claude-cli-project-dir.js";
 import { executePreparedCliRun } from "./execute.js";
+import {
+  cliSessionBinding as buildCliSessionBinding,
+  setRawCliBackendForPrepareTest,
+} from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
@@ -53,41 +57,36 @@ const sent: Array<
 
 function installBackend(args?: string[]) {
   const backend = buildAnthropicCliBackend();
-  cliBackendsTesting.setDepsForTest({
-    resolvePluginSetupCliBackend: () => undefined,
-    resolveRuntimeCliBackends: () => [
-      {
-        ...backend,
-        pluginId: "anthropic",
-        config: {
-          ...backend.config,
-          command: process.execPath,
-          ...(args ? { args, resumeArgs: [...args, "--resume", "{sessionId}"] } : {}),
-        },
-        // Replace only final provider I/O; config, storage, preparation and
-        // session-reusing execution are exercised through their production paths.
-        runtimeArtifact: undefined,
-        prepareExecution: async (context) => ({
-          ...(await backend.prepareExecution?.(context)),
-          async *execute(input: CliBackendExecuteContext) {
-            sent.push({
-              args: [...input.args],
-              sessionId: input.sessionId,
-              useResume: input.useResume,
-              systemPrompt: input.systemPrompt,
-              prompt: input.prompt,
-              toolAvailability: input.toolAvailability,
-            });
-            yield {
-              type: "result",
-              subtype: "success",
-              result: "resumed",
-              session_id: nativeSessionId,
-            };
-          },
-        }),
+  setRawCliBackendForPrepareTest({
+    ...backend,
+    pluginId: "anthropic",
+    config: {
+      ...backend.config,
+      command: process.execPath,
+      ...(args ? { args, resumeArgs: [...args, "--resume", "{sessionId}"] } : {}),
+    },
+    // Replace only final provider I/O; config, storage, preparation and
+    // session-reusing execution are exercised through their production paths.
+    runtimeArtifact: undefined,
+    prepareExecution: async (context) => ({
+      ...(await backend.prepareExecution?.(context)),
+      async *execute(input: CliBackendExecuteContext) {
+        sent.push({
+          args: [...input.args],
+          sessionId: input.sessionId,
+          useResume: input.useResume,
+          systemPrompt: input.systemPrompt,
+          prompt: input.prompt,
+          toolAvailability: input.toolAvailability,
+        });
+        yield {
+          type: "result",
+          subtype: "success",
+          result: "resumed",
+          session_id: nativeSessionId,
+        };
       },
-    ],
+    }),
   });
 }
 
@@ -332,15 +331,9 @@ it("keeps a stored Claude conversation across the upgrade while excluding native
     });
     await executePreparedCliRun(upgraded);
     upgradedBinding = {
-      sessionId: nativeSessionId,
+      ...buildCliSessionBinding(upgraded, nativeSessionId),
       authEpoch: upgraded.authEpoch,
       authEpochVersion: upgraded.authEpochVersion,
-      extraSystemPromptHash: upgraded.extraSystemPromptHash,
-      messageToolPolicyHash: upgraded.messageToolPolicyHash,
-      promptToolNamesHash: upgraded.promptToolNamesHash,
-      cwdHash: upgraded.cwdHash,
-      mcpConfigHash: upgraded.preparedBackend.mcpConfigHash,
-      mcpResumeHash: upgraded.preparedBackend.mcpResumeHash,
     };
   } finally {
     await upgraded.preparedBackend.cleanup?.();
@@ -374,6 +367,8 @@ it("keeps a stored Claude conversation across the upgrade while excluding native
     expect(turn.args).not.toContain("--plugin-dir");
     expect(turn.args).not.toContain("--no-session-persistence");
     expect(turn.toolAvailability).toEqual({ native: [], openClaw: ["read"] });
+    expect(turn.args[turn.args.indexOf("--tools") + 1]).toBe("");
+    expect(turn.args[turn.args.indexOf("--allowedTools") + 1]).toBe("mcp__openclaw__read");
     expect(turn.systemPrompt).toContain("OPENCLAW_CONTEXT_SURVIVES_UPGRADE");
     expect(turn.systemPrompt).toContain("weather");
     expect(turn.systemPrompt).not.toContain("NATIVE_CUSTOMIZATION_MUST_NOT_BE_INJECTED");

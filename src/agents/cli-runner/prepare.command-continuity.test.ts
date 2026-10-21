@@ -16,6 +16,11 @@ import {
 } from "../cli-runner.test-helpers.js";
 import { hashCliSessionText } from "../cli-session.js";
 import { prepareAgentCommandExecution } from "../command/prepare.js";
+import {
+  cliSessionBinding,
+  emptyCliPreparation,
+  setRawCliBackendForPrepareTest,
+} from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
@@ -24,32 +29,15 @@ import {
 import type { PreparedCliRunContext, RunCliAgentParams } from "./types.js";
 
 function nativeBinding(context: PreparedCliRunContext) {
-  return {
-    sessionId: "native-cli-session",
-    extraSystemPromptHash: context.extraSystemPromptHash,
-    messageToolPolicyHash: context.messageToolPolicyHash,
-    promptToolNamesHash: context.promptToolNamesHash,
-    cwdHash: context.cwdHash,
-    mcpConfigHash: context.preparedBackend.mcpConfigHash,
-    mcpResumeHash: context.preparedBackend.mcpResumeHash,
-  };
+  return cliSessionBinding(context, "native-cli-session");
 }
 
 describe("direct CLI command continuity", () => {
   let cli: ReturnType<typeof createCliRunnerPrepareFixture>;
 
   beforeEach(() => {
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [buildDefaultTestCliBackend()],
-    });
-    setCliRunnerPrepareTestDeps({
-      isWorkspaceBootstrapPending: async () => false,
-      resolveBootstrapContextForRun: async () => ({ bootstrapFiles: [], contextFiles: [] }),
-      resolveOpenClawReferencePaths: async () => ({ docsPath: null, sourcePath: null }),
-      prepareClaudeCliSkillsPlugin: async () => ({ args: [], cleanup: async () => {} }),
-      loadManifestModelCatalog: () => [],
-    });
+    setRawCliBackendForPrepareTest(buildDefaultTestCliBackend());
+    setCliRunnerPrepareTestDeps(emptyCliPreparation());
     cli = createCliRunnerPrepareFixture((params) =>
       prepareCliRunContext({ skillsSnapshot: { prompt: "", skills: [] }, ...params }),
     );
@@ -259,10 +247,7 @@ describe("direct CLI command continuity", () => {
       extraSystemPromptStatic: staticPrompt,
       sourceReplyDeliveryMode: stableMode,
     } satisfies NonNullable<RunCliAgentParams["cliSessionBindingFacts"]>;
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [buildDefaultTestCliBackend({ bundleMcp: true })],
-    });
+    setRawCliBackendForPrepareTest(buildDefaultTestCliBackend({ bundleMcp: true }));
     const config = {};
     const prepared: PreparedCliRunContext[] = [];
     try {

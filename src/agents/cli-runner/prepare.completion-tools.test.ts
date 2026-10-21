@@ -17,7 +17,6 @@ import {
 } from "../../gateway/mcp-http.runtime.js";
 import { buildMcpToolSchema } from "../../gateway/mcp-http.schema.js";
 import type { CliBackendPlugin } from "../../plugins/cli-backend.types.js";
-import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-surface.js";
 import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
 import {
   createCliRunnerPrepareFixture,
@@ -30,16 +29,18 @@ import {
   getTextContent,
 } from "../test-helpers/agent-tools-fs-helpers.js";
 import { requestNativeTool, runPlugin, SUCCESS_RESULT } from "./execute-plugin.test-support.js";
+import {
+  createJsonlStdinBackendConfig,
+  cliSessionBinding,
+  emptyCliPreparation,
+  setRawCliBackendForPrepareTest,
+} from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
   setCliRunnerPrepareTestDeps,
 } from "./prepare.test-support.js";
 import type { RunCliAgentParams } from "./types.js";
-
-const { buildAnthropicCliBackend } = await loadBundledPluginFacade<{
-  buildAnthropicCliBackend: () => CliBackendPlugin;
-}>({ pluginId: "anthropic", artifactBasename: "api.js" });
 
 const claudeBackend: CliBackendPlugin & { pluginId: string } = {
   id: "claude-cli",
@@ -49,14 +50,7 @@ const claudeBackend: CliBackendPlugin & { pluginId: string } = {
   nativeToolMode: "selectable",
   toolAvailabilityEnforcement: "execution-args",
   resolveExecutionArgs: ({ baseArgs }) => [...baseArgs],
-  config: {
-    command: "claude",
-    args: ["--print"],
-    output: "jsonl",
-    jsonlDialect: "claude-stream-json",
-    input: "stdin",
-    sessionMode: "existing",
-  },
+  config: { ...createJsonlStdinBackendConfig("claude"), jsonlDialect: "claude-stream-json" },
 };
 
 /** A completion run whose handoff names a child without persisted lineage. */
@@ -93,14 +87,10 @@ describe("restricted CLI tool preparation", () => {
 
   beforeEach(() => {
     mintGrant.mockReset().mockImplementation(createTestMcpLoopbackClientGrant);
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [claudeBackend],
-    });
+    setRawCliBackendForPrepareTest(claudeBackend);
     setCliRunnerPrepareTestDeps({
-      isWorkspaceBootstrapPending: async () => false,
+      ...emptyCliPreparation(),
       makeBootstrapWarn: () => () => undefined,
-      resolveBootstrapContextForRun: async () => ({ bootstrapFiles: [], contextFiles: [] }),
       getActiveMcpLoopbackRuntime: () => ({
         port: 31783,
         ownerToken: "loopback-owner-token",
@@ -112,10 +102,7 @@ describe("restricted CLI tool preparation", () => {
       revokeMcpLoopbackClientGrant: () => true,
       resolveMcpLoopbackPolicyTools,
       resolveMcpLoopbackScopedTools,
-      resolveOpenClawReferencePaths: async () => ({ docsPath: null, sourcePath: null }),
-      prepareClaudeCliSkillsPlugin: async () => ({ args: [], cleanup: async () => {} }),
       getCliLiveSessionGeneration: () => undefined,
-      loadManifestModelCatalog: () => [],
     });
     fixture = createCliRunnerPrepareFixture((params) => {
       setRuntimeConfigSnapshot(params.config ?? {});
@@ -474,10 +461,7 @@ describe("restricted CLI tool preparation", () => {
       execHost: "node" as const,
     },
   ])("refuses a persisted sender-restricted child $name", async ({ nativeToolMode, execHost }) => {
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [{ ...claudeBackend, nativeToolMode }],
-    });
+    setRawCliBackendForPrepareTest({ ...claudeBackend, nativeToolMode });
     const sessionKey = "agent:main:subagent:restricted-child";
     const sessionEntry: SessionEntry = {
       sessionId: fixture.session.sessionTarget.sessionId,
@@ -509,10 +493,7 @@ describe("restricted CLI tool preparation", () => {
     { name: "bundled MCP", backend: { bundleMcp: false } },
     { name: "exact native tool selection", backend: { nativeToolMode: "always-on" as const } },
   ])("refuses a channel-restricted turn without $name", async ({ backend }) => {
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [{ ...claudeBackend, ...backend }],
-    });
+    setRawCliBackendForPrepareTest({ ...claudeBackend, ...backend });
     await expect(
       fixture.prepare({
         provider: "claude-cli",
@@ -520,136 +501,6 @@ describe("restricted CLI tool preparation", () => {
       }),
     ).rejects.toThrow("cannot enforce conversation tool policy");
     expect(mintGrant).not.toHaveBeenCalled();
-  });
-
-  it("keeps the Claude tool and system prefix across ordinary and completion turns", async () => {
-    const nativeBackend = buildAnthropicCliBackend();
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [
-        {
-          ...claudeBackend,
-          prepareExecution: nativeBackend.prepareExecution,
-          resolveExecutionArgs: nativeBackend.resolveExecutionArgs,
-          transformSystemPrompt: nativeBackend.transformSystemPrompt,
-        },
-      ],
-    });
-    const { sessionTarget } = fixture.session;
-    const skillPath = path.join(fixture.session.dir, "SKILL.md");
-    const skillPrompt = `<available_skills><skill><name>cache-fixture</name><description>Check the prefix.</description><location>${skillPath}</location></skill></available_skills>`;
-    fs.writeFileSync(
-      skillPath,
-      "---\nname: cache-fixture\ndescription: Check the prefix.\n---\nRead the current facts.\n",
-    );
-    const nativeSkillsPlugin = vi.fn(async () => ({
-      args: ["--plugin-dir", "/synthetic/native-skills"],
-      cleanup: async () => {},
-    }));
-    setCliRunnerPrepareTestDeps({ prepareClaudeCliSkillsPlugin: nativeSkillsPlugin });
-    const childSessionKey = "agent:main:subagent:cache-prefix";
-    replaceSessionEntrySync(
-      { storePath: sessionTarget.storePath, sessionKey: childSessionKey },
-      {
-        sessionId: "cache-prefix-child",
-        updatedAt: 1,
-        spawnedBy: sessionTarget.sessionKey,
-        spawnDepth: 1,
-        inheritedToolPolicyVersion: 1,
-        inheritedToolAllow: ["read"],
-      },
-    );
-    const base = {
-      sessionKey: sessionTarget.sessionKey,
-      sessionId: sessionTarget.sessionId,
-      provider: "claude-cli",
-      model: "opus",
-      modelHasVision: false,
-      sourceReplyDeliveryMode: "automatic" as const,
-      skillsSnapshot: {
-        prompt: skillPrompt,
-        skills: [{ name: "cache-fixture" }],
-        resolvedSkills: [
-          {
-            name: "cache-fixture",
-            description: "Check the prefix.",
-            filePath: skillPath,
-            baseDir: fixture.session.dir,
-            source: "openclaw-workspace",
-            sourceInfo: {
-              path: skillPath,
-              source: "openclaw-workspace",
-              scope: "project" as const,
-              origin: "top-level" as const,
-              baseDir: fixture.session.dir,
-            },
-            disableModelInvocation: false,
-          },
-        ],
-      },
-      config: {
-        session: { store: sessionTarget.storePath },
-        tools: { allow: ["read"] },
-      },
-    };
-    const turns = [];
-    for (const completion of [false, true, false]) {
-      const context = await fixture.prepare({
-        ...base,
-        ...(completion
-          ? {
-              trustedInternalHandoff: {
-                kind: "subagent-completion" as const,
-                sourceSessionKey: childSessionKey,
-                sourceSessionId: "cache-prefix-child",
-                targetSessionKey: sessionTarget.sessionKey,
-                targetSessionId: sessionTarget.sessionId,
-                provider: "claude-cli",
-                model: "opus",
-              },
-              inputProvenance: {
-                kind: "inter_session" as const,
-                sourceTool: "subagent_announce",
-                sourceSessionKey: childSessionKey,
-              },
-            }
-          : {}),
-      });
-      try {
-        expect(context.executionTarget.kind).toBe("plugin");
-        expect(context.promptContext?.appendContext).toBeTruthy();
-        expect(context.systemPrompt).toContain("cache-fixture");
-        const executionArgs =
-          context.backendResolved.resolveExecutionArgs?.({
-            config: context.params.config,
-            workspaceDir: context.workspaceDir,
-            provider: context.params.provider,
-            modelId: context.modelId,
-            executionMode: "agent",
-            toolAvailability: context.params.cliToolAvailability,
-            hostOwnedTools: context.hostOwnedTools,
-            useResume: completion,
-            baseArgs: context.preparedBackend.backend.args ?? [],
-          }) ?? [];
-        turns.push({
-          availability: context.params.cliToolAvailability,
-          systemPrompt: context.systemPrompt,
-          toolsAllow: mintGrant.mock.lastCall?.[0]?.context.toolsAllow,
-          nativeTools: executionArgs[executionArgs.indexOf("--tools") + 1],
-          allowedTools: executionArgs[executionArgs.indexOf("--allowedTools") + 1],
-        });
-        expect(executionArgs).not.toContain("--plugin-dir");
-      } finally {
-        await context.preparedBackend.cleanup?.();
-      }
-    }
-    expect(turns[0]?.availability).toEqual({ native: [], openClaw: ["read"] });
-    expect(turns[0]?.toolsAllow).toEqual(["read"]);
-    expect(turns[0]?.nativeTools).toBe("");
-    expect(turns[0]?.allowedTools).toBe("mcp__openclaw__read");
-    expect(turns[1]).toEqual(turns[0]);
-    expect(turns[2]).toEqual(turns[0]);
-    expect(nativeSkillsPlugin).not.toHaveBeenCalled();
   });
 
   it.each([false, true])(
@@ -665,14 +516,9 @@ describe("restricted CLI tool preparation", () => {
           contextFiles: [{ path: bootstrapPath, content }],
         }),
       });
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [
-          {
-            ...claudeBackend,
-            config: { ...claudeBackend.config, systemPromptArg: "--system-prompt" },
-          },
-        ],
+      setRawCliBackendForPrepareTest({
+        ...claudeBackend,
+        config: { ...claudeBackend.config, systemPromptArg: "--system-prompt" },
       });
       const context = await fixture.prepare({
         provider: "claude-cli",
@@ -763,15 +609,9 @@ describe("restricted CLI tool preparation", () => {
         ...run,
         senderIsOwner,
         cliSessionBinding: {
-          sessionId: "native-parent-session",
+          ...cliSessionBinding(owner, "native-parent-session"),
           authEpoch: owner.authEpoch,
           authEpochVersion: owner.authEpochVersion,
-          extraSystemPromptHash: owner.extraSystemPromptHash,
-          messageToolPolicyHash: owner.messageToolPolicyHash,
-          promptToolNamesHash: owner.promptToolNamesHash,
-          cwdHash: owner.cwdHash,
-          mcpConfigHash: owner.preparedBackend.mcpConfigHash,
-          mcpResumeHash: owner.preparedBackend.mcpResumeHash,
         },
         trustedInternalHandoff,
         inputProvenance: {
@@ -871,10 +711,7 @@ describe("restricted CLI tool preparation", () => {
   }>)("refuses trusted completion tools for $name", async (testCase) => {
     const run = completionRun(fixture.session.sessionTarget);
     if ("backend" in testCase) {
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [{ ...claudeBackend, ...testCase.backend }],
-      });
+      setRawCliBackendForPrepareTest({ ...claudeBackend, ...testCase.backend });
     }
     await expect(
       fixture.prepare({

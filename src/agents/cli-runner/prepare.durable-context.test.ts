@@ -23,6 +23,7 @@ import {
 import * as maintenance from "../session-maintenance/coordinator.js";
 import { SessionManager } from "../sessions/session-manager.js";
 import { executePreparedCliRun } from "./execute.js";
+import { emptyCliPreparation, setRawCliBackendForPrepareTest } from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
@@ -78,13 +79,7 @@ describe("CLI durable session context", () => {
   }
 
   beforeEach(() => {
-    setCliRunnerPrepareTestDeps({
-      isWorkspaceBootstrapPending: async () => false,
-      resolveBootstrapContextForRun: async () => ({ bootstrapFiles: [], contextFiles: [] }),
-      resolveOpenClawReferencePaths: async () => ({ docsPath: null, sourcePath: null }),
-      prepareClaudeCliSkillsPlugin: async () => ({ args: [], cleanup: async () => {} }),
-      loadManifestModelCatalog: () => [],
-    });
+    setCliRunnerPrepareTestDeps(emptyCliPreparation());
     fixture = createCliRunnerPrepareFixture((params) => {
       setRuntimeConfigSnapshot(params.config ?? {});
       return prepareCliRunContext(params);
@@ -133,10 +128,7 @@ describe("CLI durable session context", () => {
             }
           : {}),
       };
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [runtimeBackend],
-      });
+      setRawCliBackendForPrepareTest(runtimeBackend);
       setActiveNodeContexts([{ nodeId: "mac-one" }]);
       const hookRunner = {
         hasHooks: vi.fn((hookName: string) => hookName === "before_prompt_build"),
@@ -244,10 +236,7 @@ describe("CLI durable session context", () => {
             }
           : {}),
       };
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [backend],
-      });
+      setRawCliBackendForPrepareTest(backend);
       const prepare = async (key: string) => {
         const context = await fixture.prepare({
           provider: backendId,
@@ -278,10 +267,7 @@ describe("CLI durable session context", () => {
   it.each(["public", "private"] as const)(
     "carries the %s session sharing state into the CLI system prompt",
     async (visibility) => {
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [buildDefaultTestCliBackend()],
-      });
+      setRawCliBackendForPrepareTest(buildDefaultTestCliBackend());
       const { sessionTarget } = fixture.session;
       const context = await fixture.prepare({
         sessionKey: sessionTarget.sessionKey,
@@ -318,20 +304,15 @@ describe("CLI durable session context", () => {
       expectDefined(manager.getLeafId(), "retained history entry"),
       10_000,
     );
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [
-        {
-          ...buildDefaultTestCliBackend(),
-          config: {
-            command: "test-cli",
-            args: ["--print"],
-            output: "text",
-            input: "arg",
-            sessionMode: "existing",
-          },
-        },
-      ],
+    setRawCliBackendForPrepareTest({
+      ...buildDefaultTestCliBackend(),
+      config: {
+        command: "test-cli",
+        args: ["--print"],
+        output: "text",
+        input: "arg",
+        sessionMode: "existing",
+      },
     });
     const hookRunner = {
       hasHooks: vi.fn((hookName: string) => hookName === "before_prompt_build"),
@@ -361,26 +342,21 @@ describe("CLI durable session context", () => {
   it("does not reattach historical images on a later text-only CLI turn", async () => {
     const sent: string[] = [];
     const backend = buildDefaultTestCliBackend();
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [
-        {
-          ...backend,
-          config: {
-            ...backend.config,
-            command: process.execPath,
-            output: "jsonl",
-            imageArg: "@",
-            imagePathScope: "workspace",
-          },
-          prepareExecution: () => ({
-            async *execute(input: CliBackendExecuteContext) {
-              sent.push(input.prompt);
-              yield { type: "result", subtype: "success", result: "complete" };
-            },
-          }),
+    setRawCliBackendForPrepareTest({
+      ...backend,
+      config: {
+        ...backend.config,
+        command: process.execPath,
+        output: "jsonl",
+        imageArg: "@",
+        imagePathScope: "workspace",
+      },
+      prepareExecution: () => ({
+        async *execute(input: CliBackendExecuteContext) {
+          sent.push(input.prompt);
+          yield { type: "result", subtype: "success", result: "complete" };
         },
-      ],
+      }),
     });
     const { dir } = fixture.session;
     const inboundPath = path.join(dir, "inbound.png");
@@ -435,10 +411,7 @@ describe("CLI durable session context", () => {
   });
 
   it("joins deferred maintenance before reading durable context", async () => {
-    cliBackendsTesting.setDepsForTest({
-      resolvePluginSetupCliBackend: () => undefined,
-      resolveRuntimeCliBackends: () => [buildDefaultTestCliBackend()],
-    });
+    setRawCliBackendForPrepareTest(buildDefaultTestCliBackend());
     const history = await prepareOwnedHistory();
     const { sessionTarget } = fixture.session;
     const wait = vi.spyOn(maintenance, "waitForSessionMaintenance").mockImplementation(async () => {
@@ -478,29 +451,24 @@ describe("CLI durable session context", () => {
     "preserves owned reference facts for $transport, resume=$resume, account=$account, callerMemory=$callerMemory, revoke=$revoke",
     async (testCase) => {
       const sent: Array<Pick<CliBackendExecuteContext, "prompt" | "promptContext">> = [];
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [
-          {
-            ...buildDefaultTestCliBackend(),
-            config: {
-              ...buildDefaultTestCliBackend().config,
-              command: process.execPath,
-              output: "jsonl",
-              jsonlDialect: "claude-stream-json",
-            },
-            ...(testCase.transport === "plugin"
-              ? {
-                  prepareExecution: () => ({
-                    async *execute(input: CliBackendExecuteContext) {
-                      sent.push({ prompt: input.prompt, promptContext: input.promptContext });
-                      yield { type: "result", subtype: "success", result: "complete" };
-                    },
-                  }),
-                }
-              : {}),
-          },
-        ],
+      setRawCliBackendForPrepareTest({
+        ...buildDefaultTestCliBackend(),
+        config: {
+          ...buildDefaultTestCliBackend().config,
+          command: process.execPath,
+          output: "jsonl",
+          jsonlDialect: "claude-stream-json",
+        },
+        ...(testCase.transport === "plugin"
+          ? {
+              prepareExecution: () => ({
+                async *execute(input: CliBackendExecuteContext) {
+                  sent.push({ prompt: input.prompt, promptContext: input.promptContext });
+                  yield { type: "result", subtype: "success", result: "complete" };
+                },
+              }),
+            }
+          : {}),
       });
       const history = await prepareOwnedHistory();
       history.appendTranscript({
@@ -591,11 +559,9 @@ describe("CLI durable session context", () => {
     "replays owned uncompacted history to a session-less backend, changeAccount=$changeAccount",
     async ({ changeAccount }) => {
       const backend = buildDefaultTestCliBackend({ reseedFromRawTranscriptWhenUncompacted: true });
-      cliBackendsTesting.setDepsForTest({
-        resolvePluginSetupCliBackend: () => undefined,
-        resolveRuntimeCliBackends: () => [
-          { ...backend, config: { ...backend.config, sessionMode: "none" } },
-        ],
+      setRawCliBackendForPrepareTest({
+        ...backend,
+        config: { ...backend.config, sessionMode: "none" },
       });
       const history = await prepareOwnedHistory();
       history.appendTranscript({
