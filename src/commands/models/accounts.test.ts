@@ -81,6 +81,9 @@ type Request = {
 };
 const operation = { profileId: PROFILE_ID, connectId: "operation-one" };
 const pendingInput = { status: "pending", step: inputStep };
+const rpc = (method: string, params: Request["params"] = {}) => ({ method, params });
+const authRpc = (method: string, params: Request["params"] = operation) =>
+  rpc(`users.authConnect.${method}`, params);
 const requestData = (requests: Request[]) =>
   requests.map(({ method, params }) => ({ method, params }));
 const methods = (requests: Request[]) => requests.map(({ method }) => method);
@@ -295,8 +298,8 @@ describe("personal model account CLI over an identified Gateway connection", () 
       async ({ port, url, requests, connections }) => {
         await modelsAccountsListCommand({ port, cursor: "previous-account", json: true }, output);
         expect(requestData(requests)).toEqual([
-          { method: "users.self", params: {} },
-          { method: "users.listModelAccounts", params: { cursor: "previous-account" } },
+          rpc("users.self"),
+          rpc("users.listModelAccounts", { cursor: "previous-account" }),
         ]);
         expectJsonOutput(output, page);
         expectPersonalContext(output, url);
@@ -378,10 +381,7 @@ describe("personal model account CLI over an identified Gateway connection", () 
         (request) => (request.method === method ? { links: connected.links } : undefined),
         async ({ port, url, requests, connections }) => {
           await run(port, output);
-          expect(requestData(requests)).toEqual([
-            { method: "users.self", params: {} },
-            { method, params },
-          ]);
+          expect(requestData(requests)).toEqual([rpc("users.self"), rpc(method, params)]);
           expect(connections).toHaveLength(1);
           expectPersonalContext(output, url);
           expect(output.log).toHaveBeenCalledWith(expect.stringContaining(note));
@@ -442,32 +442,12 @@ describe("personal model account CLI over an identified Gateway connection", () 
         });
         await modelsAccountsLoginCommand({ port, json: true }, output);
         expect(requestData(requests)).toEqual([
-          { method: "users.self", params: {} },
-          { method: "users.authConnect.catalog", params: { profileId: PROFILE_ID } },
-          {
-            method: "users.authConnect.start",
-            params: { profileId: PROFILE_ID, provider: "xai", method: "api-key" },
-          },
-          {
-            method: "users.authConnect.status",
-            params: operation,
-          },
-          {
-            method: "users.authConnect.answer",
-            params: {
-              ...operation,
-              stepId: "api-key",
-              value: invalidKey,
-            },
-          },
-          {
-            method: "users.authConnect.answer",
-            params: {
-              ...operation,
-              stepId: "api-key",
-              value: apiKey,
-            },
-          },
+          rpc("users.self"),
+          authRpc("catalog", { profileId: PROFILE_ID }),
+          authRpc("start", { profileId: PROFILE_ID, provider: "xai", method: "api-key" }),
+          authRpc("status"),
+          authRpc("answer", { ...operation, stepId: "api-key", value: invalidKey }),
+          authRpc("answer", { ...operation, stepId: "api-key", value: apiKey }),
         ]);
         expect(connections).toHaveLength(1);
         expect(

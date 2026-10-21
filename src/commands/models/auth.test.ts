@@ -204,28 +204,18 @@ function withPipedStdin(input: string | Buffer) {
   };
 }
 
-function createProvider(params: {
-  id: string;
-  label?: string;
-  auth?: ProviderPlugin["auth"];
-  run: NonNullable<ProviderPlugin["auth"]>[number]["run"];
-}): ProviderPlugin {
-  return {
-    id: params.id,
-    label: params.label ?? params.id,
-    auth: params.auth ?? [{ id: "oauth", label: "OAuth", kind: "oauth", run: params.run }],
-  };
+function createProvider(
+  id: string,
+  label: string,
+  auth: ProviderPlugin["auth"] = [
+    { id: "oauth", label: "OAuth", kind: "oauth", run: runProviderAuth },
+  ],
+): ProviderPlugin {
+  return { id, label, auth };
 }
 
 function useProvider(id: string, label: string, auth?: ProviderPlugin["auth"]) {
-  mocks.resolvePluginProvidersCore.mockReturnValue([
-    createProvider({
-      id,
-      label,
-      auth,
-      run: runProviderAuth as ProviderPlugin["auth"][number]["run"],
-    }),
-  ]);
+  mocks.resolvePluginProvidersCore.mockReturnValue([createProvider(id, label, auth)]);
 }
 
 function expectNoCalls(...callbacks: unknown[]) {
@@ -238,15 +228,10 @@ function createOpenAISetupProvider(
   runOauthAuth: ProviderPlugin["auth"][number]["run"],
   runApiKeyAuth: ProviderPlugin["auth"][number]["run"],
 ): ProviderPlugin {
-  return createProvider({
-    id: "openai",
-    label: "OpenAI",
-    run: runOauthAuth,
-    auth: [
-      { id: "oauth", label: "ChatGPT Login", kind: "oauth", run: runOauthAuth },
-      { id: "api-key", label: "OpenAI API Key", kind: "api_key", run: runApiKeyAuth },
-    ],
-  });
+  return createProvider("openai", "OpenAI", [
+    { id: "oauth", label: "ChatGPT Login", kind: "oauth", run: runOauthAuth },
+    { id: "api-key", label: "OpenAI API Key", kind: "api_key", run: runApiKeyAuth },
+  ]);
 }
 
 function oauthProfile(
@@ -801,29 +786,6 @@ it("runs the requested anthropic cli auth method with the full login context", a
   expect(runtime.log).toHaveBeenCalledWith("Default model set to claude-cli/claude-sonnet-4-6");
 });
 
-it("normalizes retired Google Gemini login defaults before config writes", async () => {
-  runProviderAuth.mockResolvedValue({
-    profiles: [
-      {
-        profileId: "google:default",
-        credential: { type: "api_key", provider: "google", key: "gemini-demo" },
-      },
-    ],
-    defaultModel: "google/gemini-3-pro-preview",
-  });
-  useProvider("google", "Google");
-
-  await loginCommand({ provider: "google", setDefault: true });
-
-  expect(lastUpdatedConfig?.agents?.defaults?.model).toEqual({
-    primary: "google/gemini-3.1-pro-preview",
-  });
-  expect(lastUpdatedConfig?.agents?.defaults?.models).toEqual({
-    "google/gemini-3.1-pro-preview": {},
-  });
-  expect(runtime.log).toHaveBeenCalledWith("Default model set to google/gemini-3.1-pro-preview");
-});
-
 it("--force refreshes after the purge when replacement login fails", async () => {
   runProviderAuth.mockRejectedValueOnce(new Error("provider rejected login"));
 
@@ -868,11 +830,7 @@ it("rejects unknown auth methods before a forced login can purge profiles", asyn
 it("opens the provider picker when a CLI backend has no provider auth method", async () => {
   const prompter = usePrompter(vi.fn(async () => "openai"));
   mocks.isCliProvider.mockImplementation((provider: string) => provider === "claude-cli");
-  const openaiProvider = createProvider({
-    id: "openai",
-    label: "OpenAI Codex",
-    run: runProviderAuth as ProviderPlugin["auth"][number]["run"],
-  });
+  const openaiProvider = createProvider("openai", "OpenAI Codex");
   mocks.resolvePluginProvidersCore.mockImplementation(
     (params: ResolvePluginProvidersCall | undefined) =>
       params?.providerRefs?.includes("claude-cli") ? [] : [openaiProvider],

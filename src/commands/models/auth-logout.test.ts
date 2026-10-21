@@ -145,11 +145,12 @@ type ConfigMutator = (
 ) => OpenClawConfig | Promise<OpenClawConfig>;
 const createRuntime = () => createCapturingTestRuntime().runtime;
 
-function trackConfig(initial: OpenClawConfig) {
+function trackConfig(initial: OpenClawConfig, afterWrite?: (cfg: OpenClawConfig) => void) {
   let current = initial;
   mocks.loadModelsConfig.mockImplementation(async () => current);
   mocks.updateConfig.mockImplementation(async (mutate: ConfigMutator) => {
     current = await mutate(current, { runtimeConfig: current });
+    afterWrite?.(current);
     return current;
   });
   return () => current;
@@ -215,27 +216,6 @@ describe("models auth logout", () => {
         "openai:manual": createOAuthRefreshCredential({ expires: 1_000_000 }),
       }),
     );
-  });
-
-  it("removes the config reference before deleting the credential", async () => {
-    const cfg = {
-      auth: { profiles: { "openai:manual": { provider: "openai", mode: "oauth" } } },
-    } satisfies OpenClawConfig;
-    mocks.loadModelsConfig.mockResolvedValue(cfg);
-    const calls: string[] = [];
-    mocks.updateConfig.mockImplementation(async () => {
-      calls.push("config");
-      return cfg;
-    });
-    mocks.removeAuthProfilesAcrossOwnerStores.mockImplementation(async (params) => {
-      await params.beforeRemove?.(params.profileIds, []);
-      calls.push("store");
-      return true;
-    });
-
-    await modelsAuthLogoutCommand({ profileId: "openai:manual", yes: true }, createRuntime());
-
-    expect(calls).toEqual(["config", "store"]);
   });
 
   it.each([
@@ -336,16 +316,22 @@ describe("models auth logout", () => {
       }
     }));
 
-  it("restores the credential and config after final catalog cleanup fails, then permits retry", () =>
+  it("removes config before credentials, restores both after cleanup fails, then permits retry", () =>
     withAuthProfileTestState("openclaw-logout-final-scrub-", async ({ agentDir }) => {
       const profileId = "openai:manual";
       const credential = createApiKeyCredential("openai", "retryable-secret");
       saveAuthProfileStore(createAuthProfileStoreFixture({ [profileId]: credential }), agentDir);
       const originalConfig = authConfig({ [profileId]: { provider: "openai", mode: "api_key" } });
-      const liveConfig = trackConfig(structuredClone(originalConfig));
-      usePersistedStore(agentDir);
       const readProfile = () =>
         loadAuthProfileStoreWithoutExternalProfiles(agentDir).profiles[profileId];
+      const beforeDelete = vi.fn(() => expect(readProfile()).toEqual(credential));
+      const liveConfig = trackConfig(structuredClone(originalConfig), (next) => {
+        if (!next.auth?.profiles?.[profileId]) {
+          expect(next.auth).toEqual({ profiles: {} });
+          beforeDelete();
+        }
+      });
+      usePersistedStore(agentDir);
       const scrub = catalogCredentials.removePersistedPluginModelCatalogCredentials;
       let calls = 0;
       const cleanup = vi
@@ -370,6 +356,7 @@ describe("models auth logout", () => {
         expect(readProfile()).toBeUndefined();
         expect(liveConfig().auth?.profiles?.[profileId]).toBeUndefined();
         expect(liveConfig().auth?.order?.openai).toBeUndefined();
+        expect(beforeDelete).toHaveBeenCalledTimes(2);
       } finally {
         cleanup.mockRestore();
       }
