@@ -9,26 +9,20 @@ import {
   openOpenClawStateDatabase,
   closeOpenClawStateDatabaseAsync,
 } from "../../state/openclaw-state-db.js";
-import type { SystemAgentOverview } from "../../system-agent/overview.js";
+import { createSystemAgentOverviewFixture } from "../../system-agent/overview.fixture.test-support.js";
 import { readTranscriptTailAsync } from "../../system-agent/transcript-store.js";
 import { withTestDir } from "../../test-helpers/temp-dir.js";
 import { systemAgentHandlers, type SystemAgentChatSession } from "./system-agent.js";
 import type { GatewayClient } from "./types.js";
 
-const overview: SystemAgentOverview = {
+const overview = createSystemAgentOverviewFixture({
   config: { path: "/tmp/openclaw.json", exists: true, valid: true, issues: [], hash: "hash" },
   agents: [{ id: "main", name: "Main", isDefault: true, model: "openai/gpt-5.5" }],
   defaultAgentId: "main",
   defaultModel: "openai/gpt-5.5",
-  tools: {
-    codex: { command: "codex", found: false },
-    claude: { command: "claude", found: false },
-    gemini: { command: "gemini", found: false },
-    apiKeys: { openai: false, anthropic: false },
-  },
   gateway: { url: "ws://127.0.0.1:18789", source: "test", reachable: true },
   references: { docsUrl: "https://docs.test", sourceUrl: "https://source.test" },
-};
+});
 
 const engines = vi.hoisted(() => [] as Array<ReturnType<typeof makeEngine>>);
 

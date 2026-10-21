@@ -27,7 +27,11 @@ import {
   setupInferenceMocks,
   transcriptStoreMocks,
 } from "./system-agent.mocks.test-support.js";
-import type { GatewayClient, GatewayRequestContext } from "./types.js";
+import type {
+  GatewayClient,
+  GatewayRequestContext,
+  GatewayRequestHandlerOptions,
+} from "./types.js";
 
 export {
   inferenceFallbackMocks,
@@ -191,12 +195,20 @@ export async function callChat(
   params: Record<string, unknown>,
   client: GatewayClient | null = defaultClient,
 ): Promise<RespondCall> {
+  const calls = await invokeSystemAgent("openclaw.chat", params, { context, client });
+  return expectDefined(calls[0], "expected a respond call");
+}
+
+export async function invokeSystemAgent(
+  method: keyof typeof systemAgentHandlers,
+  params: Record<string, unknown>,
+  options: Partial<GatewayRequestHandlerOptions> = {},
+) {
   const { calls, respond } = makeRespond();
-  await systemAgentHandler("openclaw.chat")({
+  await systemAgentHandler(method)({
     params,
     respond,
-    context,
-    client,
+    ...options,
   } as never);
-  return expectDefined(calls[0], "expected a respond call");
+  return calls;
 }

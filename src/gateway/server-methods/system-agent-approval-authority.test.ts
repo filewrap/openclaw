@@ -180,30 +180,9 @@ describe("prepareDelegatedSystemAgentApproval", () => {
   it.each(["run", "tool", "gateway", "worker", "session"] as const)(
     "fences Full Access when its %s closes during apply preparation",
     async (owner) => {
-      const started = createDeferred();
-      const release = createDeferred();
-      const effect = vi.fn();
+      const apply = pausedApply();
       const proposal = { operation: { kind: "gateway-restart" as const }, hash: "f".repeat(64) };
-      const session = {
-        engine: {
-          resolveOperatorApproval: async (
-            decision: ExecApprovalDecision | null,
-            _hash: string,
-            assertCurrent?: () => void,
-          ) => {
-            if (decision === null) {
-              return null;
-            }
-            started.resolve();
-            await release.promise;
-            assertCurrent?.();
-            effect();
-            return { text: "Applied", action: "none" as const, applied: true };
-          },
-        },
-        ownerKey: "agent:main:main",
-        lastUsedAt: 1,
-      } as unknown as SystemAgentChatSession;
+      const session = approvalSession(proposal, apply.resolve);
       const sessions = new Map([["delegate-full", session]]);
       let workerActive = true;
       const context = {
@@ -235,7 +214,7 @@ describe("prepareDelegatedSystemAgentApproval", () => {
             proposal,
           }),
       );
-      await started.promise;
+      await apply.started.promise;
       if (owner === "run") {
         releaseAgentRunDelegatedAuthority(authority);
       } else if (owner === "tool") {
@@ -247,10 +226,10 @@ describe("prepareDelegatedSystemAgentApproval", () => {
       } else {
         sessions.set("delegate-full", { ...session });
       }
-      release.resolve();
+      apply.release.resolve();
 
       await expect(pending).rejects.toThrow("system-agent approval authority is no longer active");
-      expect(effect).not.toHaveBeenCalled();
+      expect(apply.effect).not.toHaveBeenCalled();
     },
   );
 

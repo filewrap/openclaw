@@ -28,6 +28,7 @@ import {
   defaultClient,
   inferenceFallbackMocks,
   makeContext,
+  invokeSystemAgent,
   makeRespond,
   setupInferenceDetectionMocks,
   setupInferenceMocks,
@@ -46,6 +47,13 @@ const {
   makeVerifiedEngine,
   seededSession,
 } = useSystemAgentGatewayTestFixture();
+
+function mockChat(text = "Ready.") {
+  const engine = makeVerifiedEngine();
+  const handle = vi.spyOn(engine, "handle").mockResolvedValue({ text, action: "none" });
+  const context = makeContext(new Map([["s1", seededSession({ engine })]]));
+  return { handle, context };
+}
 
 function makeWizardContext() {
   const wizardSessions = new Map<string, WizardSession>();
@@ -114,17 +122,12 @@ describe("openclaw.setup", () => {
         error: "Synthetic end of setup",
       });
       const { wizardSessions, context } = makeWizardContext();
-      const { calls, respond } = makeRespond();
       const sessionId = `custom-auth-${String(isLocalClient)}`;
-      await systemAgentHandler("openclaw.setup.auth.start")({
-        params: {
-          sessionId,
-          authChoice: "custom-api-key",
-        },
-        client: { ...defaultClient, internal: { isLocalClient } },
-        context,
-        respond,
-      } as never);
+      const calls = await invokeSystemAgent(
+        "openclaw.setup.auth.start",
+        { sessionId, authChoice: "custom-api-key" },
+        { client: { ...defaultClient, internal: { isLocalClient } }, context },
+      );
       expect(calls).toMatchObject([{ ok: true, payload: { sessionId } }]);
       const session = expectDefined(wizardSessions.get(sessionId), "admitted setup session");
       await session.next();
@@ -221,8 +224,7 @@ describe("openclaw.setup", () => {
     const { wizardSessions, context } = makeWizardContext();
 
     try {
-      const { calls, respond } = makeRespond();
-      await systemAgentHandler(method)({ params, respond, context } as never);
+      const calls = await invokeSystemAgent(method, params, { context });
 
       expect(calls).toEqual([
         {
@@ -352,11 +354,7 @@ describe("openclaw.chat", () => {
         setupInferenceDetectionMocks.detectSetupInferenceIsolated.mockImplementation(
           async (params) => detectSetupInference(params?.agentId),
         );
-        const { calls, respond } = makeRespond();
-        await systemAgentHandler("openclaw.setup.detect")({
-          params: { agentId: "research" },
-          respond,
-        } as never);
+        const calls = await invokeSystemAgent("openclaw.setup.detect", { agentId: "research" });
         expect(calls).toMatchObject([
           {
             ok: true,
@@ -435,9 +433,7 @@ describe("openclaw.chat", () => {
         return { ok: true, modelRef: "openai/gpt-5.6-luna", latencyMs: 1 };
       });
     }
-    const { calls, respond } = makeRespond();
-
-    await systemAgentHandler("openclaw.setup.verify")({ params: {}, respond, context } as never);
+    const calls = await invokeSystemAgent("openclaw.setup.verify", {}, { context });
 
     expect(calls).toEqual([
       {
@@ -679,13 +675,9 @@ describe("openclaw.chat", () => {
   });
 
   it("trims, canonicalizes, and forwards valid UI context for a user turn", async () => {
-    const engine = makeVerifiedEngine();
-    const handle = vi
-      .spyOn(engine, "handle")
-      .mockResolvedValue({ text: "Everything is healthy.", action: "none" });
-    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
+    const { handle, context } = mockChat("Everything is healthy.");
 
-    const call = await callChat(makeContext(sessions), {
+    const call = await callChat(context, {
       sessionId: "s1",
       message: "What about this page?",
       context: {
@@ -720,13 +712,9 @@ describe("openclaw.chat", () => {
   it.each([{ name: "a Unicode case-folding character", page: "\u212A" }])(
     "drops UI context with $name without rejecting the turn",
     async ({ page }) => {
-      const engine = makeVerifiedEngine();
-      const handle = vi
-        .spyOn(engine, "handle")
-        .mockResolvedValue({ text: "Everything is healthy.", action: "none" });
-      const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
+      const { handle, context } = mockChat("Everything is healthy.");
 
-      const call = await callChat(makeContext(sessions), {
+      const call = await callChat(context, {
         sessionId: "s1",
         message: "Status please.",
         context: { page },
@@ -741,10 +729,8 @@ describe("openclaw.chat", () => {
     { id: "bad?id", name: "Example" },
     { id: "example", name: "n".repeat(97) },
   ])("drops an invalid plugin reference while keeping the human turn", async (plugin) => {
-    const engine = makeVerifiedEngine();
-    const handle = vi.spyOn(engine, "handle").mockResolvedValue({ text: "Ready.", action: "none" });
-    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
-    const call = await callChat(makeContext(sessions), {
+    const { handle, context } = mockChat();
+    const call = await callChat(context, {
       sessionId: "s1",
       message: "Help with this",
       context: { page: "plugin-settings", plugin },
@@ -756,10 +742,8 @@ describe("openclaw.chat", () => {
   });
 
   it("bounds escaped plugin reference data before forwarding it", async () => {
-    const engine = makeVerifiedEngine();
-    const handle = vi.spyOn(engine, "handle").mockResolvedValue({ text: "Ready.", action: "none" });
-    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
-    await callChat(makeContext(sessions), {
+    const { handle, context } = mockChat();
+    await callChat(context, {
       sessionId: "s1",
       message: "Help with this",
       context: {
@@ -838,9 +822,7 @@ describe("openclaw.chat", () => {
       turns.slice(-limit),
     );
     const invoke = async (params: Record<string, unknown>) => {
-      const { calls, respond } = makeRespond();
-      await systemAgentHandler("openclaw.chat.history")({ params, respond } as never);
-      return calls[0];
+      return (await invokeSystemAgent("openclaw.chat.history", params))[0];
     };
 
     expect(await invoke({})).toEqual({ ok: true, payload: { turns }, error: undefined });

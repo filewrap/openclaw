@@ -2,6 +2,7 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../../test/helpers/promise.js";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
 import { withGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
 import {
@@ -11,7 +12,12 @@ import {
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
 import { SystemAgentWizardAnswerError } from "../../system-agent/chat-engine.js";
 import { systemAgentHandlers, type SystemAgentChatSession } from "./system-agent.js";
-import type { GatewayClient, GatewayRequestContext, RespondFn } from "./types.js";
+import type {
+  GatewayClient,
+  GatewayRequestContext,
+  GatewayRequestHandlerOptions,
+  RespondFn,
+} from "./types.js";
 
 const inferenceFallbackMocks = vi.hoisted(() => ({
   verifySystemAgentInferenceWithFallback: vi.fn(),
@@ -158,12 +164,15 @@ function makeContext(sessions: Map<string, SystemAgentChatSession>): GatewayRequ
 function seededSession(params?: {
   engine?: FakeEngine;
   ownerKey?: string;
+  lastUsedAt?: number;
+  optionalWelcome?: boolean;
 }): SystemAgentChatSession {
   return {
     engine: params?.engine ?? makeEngine(),
     welcome: "welcome text",
     lastUsedAt: 1,
-    ownerKey: params?.ownerKey ?? "device:device-test",
+    ownerKey: "device:device-test",
+    ...params,
   } as unknown as SystemAgentChatSession;
 }
 
@@ -171,6 +180,7 @@ async function callChat(
   context: GatewayRequestContext,
   params: Record<string, unknown>,
   client: GatewayClient | null = defaultClient,
+  options: Partial<GatewayRequestHandlerOptions> = {},
 ): Promise<RespondCall> {
   const calls: RespondCall[] = [];
   const respond: RespondFn = (ok, payload, error) => calls.push({ ok, payload, error });
@@ -182,6 +192,7 @@ async function callChat(
     client,
     context,
     respond,
+    ...options,
   } as never);
   return expectDefined(calls[0], "system-agent response");
 }
@@ -189,6 +200,9 @@ async function callChat(
 beforeEach(() => {
   createdEngines.length = 0;
   createdEngineOptions.length = 0;
+  transcriptStoreMocks.appendReset.mockReset();
+  transcriptStoreMocks.appendTurn.mockReset();
+  transcriptStoreMocks.readTranscriptTailAsync.mockReset().mockResolvedValue([]);
   inferenceFallbackMocks.verifySystemAgentInferenceWithFallback.mockResolvedValue({
     ok: true,
     binding: {},
@@ -434,16 +448,6 @@ describe("openclaw.chat session ownership", () => {
 });
 
 describe("openclaw.chat session responses", () => {
-  it("returns the stored welcome when no message is sent", async () => {
-    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession()]]);
-    const call = await callChat(makeContext(sessions), { sessionId: "s1" });
-
-    expect(call).toMatchObject({
-      ok: true,
-      payload: { sessionId: "s1", reply: "welcome text", action: "none" },
-    });
-  });
-
   it("rejects a structured answer without an active chat session", async () => {
     const call = await callChat(makeContext(new Map()), {
       sessionId: "missing",
@@ -552,6 +556,134 @@ describe("openclaw.chat session responses", () => {
       action: "open-agent",
       agentDraft: "hatch",
       agentId: "researcher",
+    });
+  });
+});
+
+function fullSessions(oldest: SystemAgentChatSession) {
+  return new Map([
+    ["oldest", oldest],
+    ...Array.from({ length: 7 }, (_, i): [string, SystemAgentChatSession] => [
+      `existing-${i + 1}`,
+      seededSession({ lastUsedAt: i + 1 }),
+    ]),
+  ]);
+}
+
+const welcomeQuestion = { id: "welcome-q", header: "Welcome", options: [] };
+const waitOneTask = () =>
+  new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+
+describe("openclaw.chat session lifecycle", () => {
+  it.each([false, true])(
+    "rejoins with the current wizard interaction when live=%s",
+    async (live) => {
+      const engine = makeEngine();
+      const liveQuestion = { id: "wizard-q", header: "Pick", options: [{ label: "A" }] };
+      const liveStep = { id: "step-1", type: "text", message: "Enter a value" };
+      const interaction = {
+        sensitive: true,
+        wizardInputPending: true,
+        question: liveQuestion,
+        step: liveStep,
+      };
+      if (live) {
+        engine.decorateRejoinReply = vi.fn((reply: Record<string, unknown>) => ({
+          ...reply,
+          ...interaction,
+        }));
+      }
+      const session = seededSession({ engine, optionalWelcome: true });
+      (session as { welcomeQuestion?: unknown }).welcomeQuestion = welcomeQuestion;
+      const sessions = new Map<string, SystemAgentChatSession>([["s1", session]]);
+      const call = await callChat(makeContext(sessions), { sessionId: "s1" });
+      expect(call).toMatchObject({
+        ok: true,
+        payload: {
+          sessionId: "s1",
+          reply: "welcome text",
+          action: "none",
+          ...(live ? { optionalWelcome: false, ...interaction } : { question: welcomeQuestion }),
+        },
+      });
+      if (!live) {
+        expect((call.payload as { step?: unknown }).step).toBeUndefined();
+      }
+    },
+  );
+
+  it("keeps the session map bounded during concurrent unique initialization", async () => {
+    const evictionStarted = createDeferred();
+    const releaseEviction = createDeferred();
+    const oldest = seededSession({ lastUsedAt: 0 });
+    oldest.engine.dispose = vi.fn(async () => {
+      evictionStarted.resolve();
+      await releaseEviction.promise;
+    });
+    const sessions = fullSessions(oldest);
+
+    const context = makeContext(sessions);
+    const first = callChat(context, { sessionId: "new-1" });
+    const second = callChat(context, { sessionId: "new-2" });
+    await evictionStarted.promise;
+    await waitOneTask();
+    releaseEviction.resolve();
+    await Promise.all([first, second]);
+
+    expect(oldest.engine.dispose).toHaveBeenCalledOnce();
+    expect(sessions.size).toBe(8);
+    expect([sessions.has("new-1"), sessions.has("new-2")]).toEqual([true, true]);
+  });
+
+  it("disposes the unpublished engine when requester authority changes during eviction", async () => {
+    let current = true;
+    const oldest = seededSession({ lastUsedAt: 0 });
+    oldest.engine.dispose = vi.fn(async () => {
+      current = false;
+    });
+    const sessions = fullSessions(oldest);
+    const respond = vi.fn();
+    const pending = callChat(makeContext(sessions), { sessionId: "unpublished" }, defaultClient, {
+      hasCurrentClientAuthority: () => current,
+      respond,
+    });
+
+    await expect(pending).rejects.toThrow("Gateway requester authority changed");
+    expect(oldest.engine.dispose).toHaveBeenCalledOnce();
+    expect(createdEngines[0]?.dispose).toHaveBeenCalledOnce();
+    expect(sessions.has("unpublished")).toBe(false);
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it("resets a session on request", async () => {
+    const engine = makeEngine();
+    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
+    const context = makeContext(sessions);
+
+    const reset = await callChat(context, { sessionId: "s1", reset: true });
+
+    expect(engine.handle).not.toHaveBeenCalled();
+    expect(engine.dispose).toHaveBeenCalledOnce();
+    expect(sessions.get("s1")?.engine).not.toBe(engine);
+    expect(reset.ok).toBe(true);
+    expect(transcriptStoreMocks.appendReset).toHaveBeenCalledOnce();
+    expect(createdEngines[0]?.seedHistory).not.toHaveBeenCalled();
+
+    const turns = [
+      { role: "user", text: "After reset" },
+      { role: "assistant", text: "Fresh answer" },
+    ] as const;
+    transcriptStoreMocks.readTranscriptTailAsync.mockResolvedValue(
+      turns.map((turn, at) => ({ ...turn, at })),
+    );
+    const fresh = await callChat(context, { sessionId: "fresh-after-reset" });
+
+    expect(fresh.ok).toBe(true);
+    expect(createdEngines.at(-1)?.seedHistory).toHaveBeenCalledWith(turns);
+    expect(transcriptStoreMocks.readTranscriptTailAsync).toHaveBeenLastCalledWith(30, {
+      afterLastReset: true,
     });
   });
 });

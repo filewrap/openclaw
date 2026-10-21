@@ -40,7 +40,7 @@ import {
 import { runSystemAgentTurn } from "../../system-agent/agent-turn.js";
 import { SystemAgentChatEngine } from "../../system-agent/chat-engine.js";
 import * as operations from "../../system-agent/operations.js";
-import type { SystemAgentOverview } from "../../system-agent/overview.js";
+import { createSystemAgentOverviewFixture } from "../../system-agent/overview.fixture.test-support.js";
 import {
   createSystemAgentPluginMetadataTestSnapshot,
   createSystemAgentVerifiedInferenceTestFixture,
@@ -171,7 +171,7 @@ async function createConversation() {
     observed.resolve("dispatched");
     return completedResult();
   });
-  const overview: SystemAgentOverview = {
+  const overview = createSystemAgentOverviewFixture({
     config: {
       path: path.join(root, "synthetic-config.json"),
       exists: true,
@@ -182,18 +182,8 @@ async function createConversation() {
     agents: [],
     defaultAgentId: "main",
     defaultModel: "openai/gpt-5.5",
-    tools: {
-      codex: { command: "codex", found: false },
-      claude: { command: "claude", found: false },
-      gemini: { command: "gemini", found: false },
-      apiKeys: { openai: false, anthropic: false },
-    },
     gateway: { url: "ws://127.0.0.1:18789", source: "test", reachable: false },
-    references: {
-      docsUrl: "https://docs.openclaw.ai",
-      sourceUrl: "https://github.com/openclaw/openclaw",
-    },
-  };
+  });
   const deps = {
     loadOverview: async () => overview,
   };

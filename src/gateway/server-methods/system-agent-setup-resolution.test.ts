@@ -702,4 +702,152 @@ describe("openclaw.setup provider resolution", () => {
       expect(wizardSessions.has(sessionId)).toBe(false);
     },
   );
+  it.each(["before credentials", "during credentials"])(
+    "keeps provider preparation consistent when expiry occurs %s",
+    async (expiryPoint) => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const preparationStarted = createDeferredCore();
+      const finishPreparation = createDeferredCore();
+      const credentialWriteStarted = createDeferredCore();
+      const finishCredentialWrite = createDeferredCore();
+      const preparedConfig: OpenClawConfig = {
+        ...config,
+        auth: { profiles: { "fixture:default": { provider: "fixture", mode: "api_key" } } },
+      };
+      const beforeCredentials = expiryPoint === "before credentials";
+      let credentialsWritten = false;
+      let session: WizardSession | undefined;
+      const persistAuthProfiles = vi.fn();
+      mocks.prepareProvider.mockImplementationOnce(async (params, consume) => {
+        await params.prompter.confirm({ message: "Prepare provider?", initialValue: false });
+        await params.beforePersistentEffect();
+        preparationStarted.resolve();
+        await finishPreparation.promise;
+        persistAuthProfiles.mockImplementationOnce(async () => {
+          await params.beforePersistentEffect();
+          credentialWriteStarted.resolve();
+          await finishCredentialWrite.promise;
+          credentialsWritten = true;
+        });
+        return consume({
+          config: preparedConfig,
+          agentModelOverride: "fixture/demo-model",
+          authProfiles: [],
+          persistAuthProfiles,
+        });
+      });
+      try {
+        await invoke("openclaw.setup.prepare.start", context, {
+          sessionId,
+          authChoice: "fixture-provider",
+        });
+        session = expectDefined(wizardSessions.get(sessionId), "provider preparation wizard");
+        const confirmation = await callWizardNext(context, { sessionId });
+        const terminal = answerWizard(context, sessionId, confirmation, true);
+        await preparationStarted.promise;
+        if (beforeCredentials) {
+          await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1_000);
+          expect(session.getStatus()).toBe("running");
+          finishCredentialWrite.resolve();
+        }
+        finishPreparation.resolve();
+        if (!beforeCredentials) {
+          await credentialWriteStarted.promise;
+          await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1_000);
+
+          const calls = await invoke("wizard.cancel", context, { sessionId });
+          expect(calls[0]?.payload).toMatchObject({ status: "running" });
+          expect(session.signal.aborted).toBe(false);
+          expect(mocks.writeConfig).not.toHaveBeenCalled();
+          finishCredentialWrite.resolve();
+        }
+        const done = await terminal;
+        expect(credentialsWritten).toBe(!beforeCredentials);
+        expect(persistAuthProfiles).toHaveBeenCalledTimes(beforeCredentials ? 0 : 1);
+        expect(done).toMatchObject({
+          done: true,
+          status: beforeCredentials ? "cancelled" : "done",
+        });
+        if (beforeCredentials) {
+          expect(mocks.writeConfig).not.toHaveBeenCalled();
+          expect(done).not.toHaveProperty("preparedModelRef");
+        } else {
+          expect(mocks.writeConfig).toHaveBeenCalledOnce();
+          expect(done.preparedModelRef).toBe("fixture/demo-model");
+        }
+        expect(wizardSessions.has(sessionId)).toBe(false);
+      } finally {
+        finishPreparation.resolve();
+        finishCredentialWrite.resolve();
+        session?.cancel();
+        if (session) {
+          await whenAdmittedWizardSessionSettled(session);
+        }
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "runs provider preparation with native discovery preference %s",
+    async (nativeSessionCatalogsEnabled) => {
+      const preparedConfig: OpenClawConfig = {
+        ...config,
+        models: { providers: { ollama: { baseUrl: "http://127.0.0.1:11434", models: [] } } },
+      };
+      const persistAuthProfiles = vi.fn();
+      mocks.prepareProvider.mockImplementationOnce(async (params, consume) => {
+        await params.prompter.note("Model ready", "Ollama");
+        await params.beforePersistentEffect();
+        return consume({
+          config: preparedConfig,
+          agentModelOverride: "ollama/qwen3:0.6b",
+          authProfiles: [],
+          persistAuthProfiles,
+        });
+      });
+      const calls = await invoke("openclaw.setup.prepare.start", context, {
+        sessionId: "prepare-session-1",
+        nativeSessionCatalogsEnabled,
+        agentId: "research",
+        authChoice: "ollama",
+        workspace: "/tmp/models-workspace",
+      });
+
+      expect(calls[0]).toMatchObject({
+        ok: true,
+        payload: { sessionId: "prepare-session-1", done: false, status: "running" },
+      });
+      const session = expectDefined(
+        wizardSessions.get("prepare-session-1"),
+        "prepare wizard session",
+      );
+      const note = await callWizardNext(context, { sessionId: "prepare-session-1" });
+      expect(note).toMatchObject({
+        done: false,
+        step: { type: "note", title: "Ollama", message: "Model ready" },
+      });
+      expect(mocks.prepareProvider).toHaveBeenCalledWith(
+        expect.objectContaining({
+          authChoice: "ollama",
+          agentId: "research",
+          config,
+          workspaceDir: "/tmp/models-workspace",
+          setDefaultModel: false,
+          preserveExistingDefaultModel: true,
+          signal: session.signal,
+          isRemote: true,
+        }),
+        expect.any(Function),
+      );
+      const done = await answerWizard(context, "prepare-session-1", note, null);
+      expect(done).toEqual({
+        done: true,
+        status: "done",
+        preparedModelRef: "ollama/qwen3:0.6b",
+      });
+      expect(persistAuthProfiles).toHaveBeenCalledOnce();
+      expect(mocks.writeConfig).toHaveBeenCalledOnce();
+    },
+  );
 });
