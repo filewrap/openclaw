@@ -1,6 +1,7 @@
 // Register shared pool mocks before modules that consume them.
 // oxfmt-ignore
 import { emptyReply, mock, queueTask, source, tempDirs } from "./openclaw-state-read-worker.test-harness.js";
+import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import path from "node:path";
@@ -251,10 +252,9 @@ it("lets an active reader's host callback finish a nested read before the parent
 });
 
 it("retains the shared pool after a resource drain fails until canonical retry", async () => {
-  const { options } = source();
-  const warm = queueTask();
-  warm.result.resolve(emptyReply);
-  await executeExistingOpenClawStateRead(options, { type: "backup.runs" });
+  const { options, read } = readFixture();
+  readyTask();
+  await read();
   const failure = new Error("accepted resource cleanup failed");
   const close = vi.fn<() => Promise<void>>().mockRejectedValueOnce(failure).mockResolvedValue();
   const unregister = registerOpenClawStateDatabaseAsyncResource({ close });
@@ -275,14 +275,14 @@ it("retains the shared pool after a resource drain fails until canonical retry",
 });
 
 it("preserves task and cleanup errors across explicit retirement retries", async () => {
-  const { pathname, options } = source();
+  const { pathname, read } = readFixture();
   const task = queueTask();
   const original = new Error("original worker task failed");
   const retirement = new Error("first worker stop failed");
   const retryFailure = new Error("second worker stop failed");
   task.close.mockRejectedValueOnce(retirement);
   task.close.mockRejectedValueOnce(retryFailure);
-  const result = executeExistingOpenClawStateRead(options, { type: "backup.runs" });
+  const result = read();
   const assertion = expect(result).rejects.toMatchObject({
     cause: original,
     errors: [original, retirement],
@@ -327,7 +327,7 @@ it("reads externally created state after an absent read without allocating a wor
 });
 
 it("retires a successful read without hydrating an error and retains custody until exit", async () => {
-  const { options } = source();
+  const { read } = readFixture();
   const hydrate = vi.spyOn(
     await import("./openclaw-state-worker-error.js"),
     "hydrateOpenClawStateWorkerError",
@@ -343,7 +343,7 @@ it("retires a successful read without hydrating an error and retains custody unt
     ...emptyReply,
     nativeCleanupFailure: { error: undefined },
   };
-  const result = executeExistingOpenClawStateRead(options, { type: "backup.runs" });
+  const result = read();
   const assertion = expect(result).resolves.toMatchObject({
     ok: true,
     type: "backup.runs",
@@ -379,31 +379,23 @@ it("retires a successful read without hydrating an error and retains custody unt
 });
 
 it("preserves source and worker stop failures when native cleanup fails", async () => {
-  const { pathname, options } = source();
+  const { pathname, read } = readFixture();
   const task = queueTask();
   const primary = new Error("source query failed");
   const stop = new Error("worker native exit not confirmed");
   task.close.mockRejectedValueOnce(stop);
-  const result = executeExistingOpenClawStateRead(options, { type: "backup.runs" });
+  const result = read();
   const outcome = result.catch((error: unknown) => error);
   await task.captured;
-  const reply: OpenClawStateReadReply = {
+  task.result.resolve({
     ok: false,
     sourceAdmitted: true,
     message: primary.message,
     error: encodeOpenClawStateWorkerError(primary, { includeOrdinary: true }),
-  };
-  task.result.resolve({
-    ...reply,
-    nativeCleanupFailure: {
-      error: undefined,
-    },
+    nativeCleanupFailure: { error: undefined },
   });
   const failure = await outcome;
-  expect(failure).toBeInstanceOf(AggregateError);
-  if (!(failure instanceof AggregateError)) {
-    throw new Error("Read cleanup did not retain its error graph");
-  }
+  assert(failure instanceof AggregateError, "Read cleanup did not retain its error graph");
   expect(failure.cause).toBe(failure.errors[0]);
   expect(failure.errors).toHaveLength(2);
   expect(failure.cause).toMatchObject({ message: primary.message });
@@ -417,17 +409,13 @@ it("preserves source and worker stop failures when native cleanup fails", async 
 });
 
 it("closes one read path without aborting its sibling", async () => {
-  const firstSource = source("first.sqlite");
-  const siblingSource = source("sibling.sqlite");
+  const firstSource = readFixture("first.sqlite");
+  const siblingSource = readFixture("sibling.sqlite");
   const first = queueTask();
   const sibling = queueTask();
-  const firstRead = executeExistingOpenClawStateRead(firstSource.options, {
-    type: "backup.runs",
-  });
+  const firstRead = firstSource.read();
   const assertion = expect(firstRead).rejects.toThrow(/read admission (?:is )?closed/i);
-  const siblingRead = executeExistingOpenClawStateRead(siblingSource.options, {
-    type: "backup.runs",
-  });
+  const siblingRead = siblingSource.read();
   await Promise.all([first.captured, sibling.captured]);
   const firstOptions = await first.submitted;
   const siblingOptions = await sibling.submitted;
@@ -518,6 +506,10 @@ it("captures and charges nested batches before preparation and queued dispatch",
     { ...metadata, keys: [...keys], entry: { ...entry } },
     { keys: ["entry-without-optionals"] },
   ];
+  const payloadBytes =
+    Buffer.byteLength(
+      [...keys, entry.lifecycleRevision, entry.sessionId, "entry-without-optionals"].join(""),
+    ) + 8;
   const dispatch = createDeferredCore();
   const baselineTask = queueTask(dispatch.promise);
   const task = queueTask(dispatch.promise);
@@ -538,17 +530,7 @@ it("captures and charges nested batches before preparation and queued dispatch",
       task.submitted,
     ]);
     const additionalBytes =
-      Buffer.byteLength(type) -
-      Buffer.byteLength("backup.runs") +
-      expectedEntries.reduce(
-        (bytes, input) =>
-          bytes +
-          input.keys.reduce((total, sessionKey) => total + Buffer.byteLength(sessionKey), 0) +
-          Buffer.byteLength(input.entry?.lifecycleRevision ?? "") +
-          Buffer.byteLength(input.entry?.sessionId ?? "") +
-          (input.entry?.sessionStartedAt === undefined ? 0 : 8),
-        0,
-      );
+      Buffer.byteLength(type) - Buffer.byteLength("backup.runs") + payloadBytes;
     expect(batchOptions.inputBytes).toBeGreaterThanOrEqual(
       Number(baselineOptions.inputBytes) + additionalBytes,
     );
@@ -599,10 +581,11 @@ function withReadGeneration(
   );
 }
 
-function readFixture() {
-  const { options, pathname } = source();
+function readFixture(name?: string) {
+  const fixture = source(name);
+  const { options, pathname } = fixture;
   return {
-    options,
+    ...fixture,
     read: () => executeExistingOpenClawStateRead(options, backupRead),
     get location() {
       return {

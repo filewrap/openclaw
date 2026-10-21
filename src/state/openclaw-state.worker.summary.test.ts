@@ -31,6 +31,8 @@ import {
 let state: Awaited<ReturnType<typeof createOpenClawTestState>>;
 const backends = new Set<ReturnType<typeof createSqliteWorkerBackend>>();
 const pluginKey = { pluginId: "native-borrow-fixture", namespace: "shared", key: "answer" };
+const auditRecord = (key: string) => ({ key, value: { marker: key }, createdAt: 100 });
+const healthEntry = (signature: string) => ({ lastObservedSuspiciousSignature: signature });
 beforeEach(async () => {
   state = await createOpenClawTestState({ prefix: "openclaw-native-handles-", applyEnv: true });
 });
@@ -198,9 +200,7 @@ it.each(["kv", "health"] as const)(
     expect(pluginStateLookup(pluginKey)).toEqual({ value: 42 });
     expect(readConfigHealthStateInDatabase(openOpenClawStateDatabase().db)).toMatchObject({
       entries: {
-        [configPath]: {
-          lastObservedSuspiciousSignature: firstToClose === "kv" ? "second" : "first",
-        },
+        [configPath]: healthEntry(firstToClose === "kv" ? "second" : "first"),
       },
     });
   },
@@ -235,11 +235,7 @@ it.each(["config.health.patch", "diagnostic.register"] as const)(
               input: {
                 scope,
                 maxEntries: 10,
-                record: prepareSqliteAuditRecord(scope, {
-                  key,
-                  value: { marker: key },
-                  createdAt: 100,
-                }),
+                record: prepareSqliteAuditRecord(scope, auditRecord(key)),
               },
             }),
           );
@@ -259,19 +255,15 @@ it.each(["config.health.patch", "diagnostic.register"] as const)(
     if (operation === "config.health.patch") {
       expect(readConfigHealthStateInDatabase(reopenedDatabase.db)).toMatchObject({
         entries: {
-          "/first.json": { lastObservedSuspiciousSignature: "first" },
-          "/second.json": { lastObservedSuspiciousSignature: "second" },
-          "/third.json": { lastObservedSuspiciousSignature: "third" },
+          "/first.json": healthEntry("first"),
+          "/second.json": healthEntry("second"),
+          "/third.json": healthEntry("third"),
         },
       });
     } else {
       expect(
         createSqliteAuditRecordKernel(reopenedDatabase.db, { scope, maxEntries: 10 }).entries(),
-      ).toEqual([
-        { key: "first", value: { marker: "first" }, createdAt: 100 },
-        { key: "second", value: { marker: "second" }, createdAt: 100 },
-        { key: "third", value: { marker: "third" }, createdAt: 100 },
-      ]);
+      ).toEqual(["first", "second", "third"].map(auditRecord));
     }
     await reopened.close();
     expect(reopenedDatabase.db.isOpen).toBe(false);
