@@ -179,7 +179,6 @@ export abstract class ChatPaneSessionObservation extends ChatPaneSessionCreation
     if (!routeResolutionChanged || this.routeResolutionPending || !state) {
       return;
     }
-    void replayPendingChatAbort(state);
     void resumeStoredChatOutboxes(state);
   }
 
