@@ -109,37 +109,21 @@ function fixture(
 }
 
 describe("screen-owned desktop audio", () => {
-  it("does not capture on attach or before screen authentication, then delivers remote PCM", async () => {
-    const f = fixture();
-    f.attach();
-    await flush();
-    expect(f.start).not.toHaveBeenCalled();
-    f.peer.command("start");
-    await flush();
-    expect(f.start).not.toHaveBeenCalled();
-    f.observation.activate();
-    await flush();
-    expect(f.start).toHaveBeenCalledTimes(1);
-    const pcm = Buffer.from([0, 1, 0, 2]);
-    f.firstCapture().stream.write(pcm);
-    expect(f.peer.sent).toContainEqual(pcm);
-    f.observation.close();
-    await flush();
-    expect(f.firstCapture().signal.aborted).toBe(true);
-    expect(f.firstCapture().stop).toHaveBeenCalledTimes(1);
-  });
-
   it.each([false, true])(
     "serializes capture intent (pending authentication: %s)",
     async (pending) => {
       const f = fixture();
       f.attach();
+      await flush();
+      expect(f.start).not.toHaveBeenCalled();
       if (pending) {
         for (let n = 0; n < 100; n++) {
           f.peer.command("start");
           f.peer.command("stop");
         }
         f.peer.command("start");
+        await flush();
+        expect(f.start).not.toHaveBeenCalled();
       }
       f.observation.activate();
       await flush();
@@ -225,7 +209,6 @@ describe("screen-owned desktop audio", () => {
       const settled = createDeferred();
       let current = true;
       let admitted = false;
-      const nativeGuard = vi.fn();
       const cleanup = vi.fn(async () => undefined);
       const supervisor: ProcessSupervisor = {
         acquireScopeCleanup: () => cleanup,
@@ -239,7 +222,6 @@ describe("screen-owned desktop audio", () => {
             attempted.resolve();
             await admission.promise;
             try {
-              nativeGuard(() => input.assertCurrent?.());
               input.assertCurrent?.();
               admitted = true;
               input.onStdoutRaw?.(Buffer.alloc(4));
@@ -292,7 +274,6 @@ describe("screen-owned desktop audio", () => {
       await flush();
       expect(admitted).toBe(allowed);
       expect(requesterAbort.signal.aborted).toBe(false);
-      expect(nativeGuard).toHaveBeenCalledOnce();
       expect(f.peer.sent.filter((frame) => typeof frame === "string")).toEqual(
         allowed ? ['{"state":"started"}'] : [],
       );

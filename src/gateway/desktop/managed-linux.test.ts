@@ -351,10 +351,8 @@ describe("managed Linux desktop", () => {
     available = false;
     fake.exit(1);
     await recoveryFinished.promise;
-    expect(lease.isCurrent()).toBe(true);
-    expect(stopped).not.toHaveBeenCalled();
-    expect(onFailed).not.toHaveBeenCalled();
-    expect(desktop.status().state).toBe("running");
+    expect([desktop.status().state, lease.isCurrent()]).toEqual(["running", true]);
+    expect([stopped.mock.calls, onFailed.mock.calls]).toEqual([[], []]);
     expectAppsRunning(fake);
     expect(fake.inputs).toHaveLength(5);
     expect(capture.stream.destroyed).toBe(true);
@@ -432,10 +430,8 @@ describe("managed Linux desktop", () => {
     const capture = await lastSource.start(signal());
     fake.exit(6);
     await audioStopped.promise;
-    expect(desktop.status().state).toBe("running");
-    expect(lease.isCurrent()).toBe(true);
-    expect(stopped).not.toHaveBeenCalled();
-    expect(onFailed).not.toHaveBeenCalled();
+    expect([desktop.status().state, lease.isCurrent()]).toEqual(["running", true]);
+    expect([stopped.mock.calls, onFailed.mock.calls]).toEqual([[], []]);
     expectAppsRunning(fake);
     expect(fake.inputs).toHaveLength(8);
     expect(capture.stream.destroyed).toBe(true);

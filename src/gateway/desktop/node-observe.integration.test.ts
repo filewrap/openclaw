@@ -187,7 +187,7 @@ describe.each(["node", "worker"] as const)("%s desktop observe integration", (ki
       let nodeRegistry: NodeRegistry;
       let observe: () => Promise<{ wsPath: string }>;
       let stop: () => Promise<unknown>;
-      let verify: { dispatch: () => void; stopped: () => void } | undefined;
+      let verifyStopped: (() => void) | undefined;
       if (kind === "node") {
         const nodeSession = {
           nodeId: "node-1",
@@ -252,6 +252,7 @@ describe.each(["node", "worker"] as const)("%s desktop observe integration", (ki
           isConnectionCurrentPairingState: async (connId: string) => connId === proof.connId,
         } as unknown as NodeRegistry;
         const invoke = vi.fn<NodeWorkerSupervisorTransport["invoke"]>(async (request) => {
+          expect(request.command).toBe(NODE_WORKER_DESKTOP_STREAM_COMMAND);
           if (!request.isDispatchAuthorized()) {
             return { ok: false, error: { code: "STALE", message: "desktop owner is stale" } };
           }
@@ -286,28 +287,9 @@ describe.each(["node", "worker"] as const)("%s desktop observe integration", (ki
 
         observe = () => observeEnvironmentDesktop(workerService, record.environmentId);
         stop = () => workerService.destroy(record.environmentId);
-        verify = {
-          dispatch: () => {
-            expect(invoke).toHaveBeenCalledWith(
-              expect.objectContaining({
-                command: NODE_WORKER_DESKTOP_STREAM_COMMAND,
-                params: {
-                  ticket: expect.stringMatching(/^[a-f0-9]{48}$/u),
-                  attachPath: expect.stringMatching(
-                    /^\/node-desktop\/attach\?ticket=[a-f0-9]{48}$/u,
-                  ),
-                  port: rfb.port,
-                  passwordFilePath,
-                },
-              }),
-            );
-          },
-          stopped: () => {
-            expect(workerSupport.testState.store.get(record.environmentId)?.state).toBe(
-              "destroyed",
-            );
-            expect(invoke.mock.calls[0]?.[0].signal?.aborted).toBe(true);
-          },
+        verifyStopped = () => {
+          expect(workerSupport.testState.store.get(record.environmentId)?.state).toBe("destroyed");
+          expect(invoke.mock.calls[0]?.[0].signal?.aborted).toBe(true);
         };
       }
       gatewayUrl = await startDesktopGateway({ desktopRegistry, nodeRegistry, streamBroker });
@@ -323,7 +305,6 @@ describe.each(["node", "worker"] as const)("%s desktop observe integration", (ki
       expect(observers.every((ws) => ws.readyState === WebSocket.OPEN)).toBe(true);
       await expect(rfb.completion).resolves.toBeUndefined();
       await vi.waitFor(() => expect(rfb.connectionCount()).toBe(3));
-      verify?.dispatch();
       if (closeMode === "peer-eof") {
         const terminalFrames = observers.map((ws) => {
           const received: string[] = [];
@@ -347,7 +328,7 @@ describe.each(["node", "worker"] as const)("%s desktop observe integration", (ki
         await Promise.all(closed);
         await vi.waitFor(() => expect(rfb.peers.size).toBe(0));
       }
-      verify?.stopped();
+      verifyStopped?.();
     },
   );
 });

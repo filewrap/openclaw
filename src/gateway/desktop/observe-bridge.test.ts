@@ -151,6 +151,11 @@ async function readSocketBytes(socket: Duplex, byteLength: number): Promise<Buff
 }
 
 const expectUnauthorizedObserver = (url: string) => expectUnauthorizedUpgrade(url, cleanup);
+function expectUnauthorizedToken(url: string, token: string) {
+  const observerUrl = new URL(url);
+  observerUrl.searchParams.set("token", token);
+  return expectUnauthorizedObserver(observerUrl.toString());
+}
 
 describe.runIf(process.platform !== "win32")("worker desktop observer proxy", () => {
   it.each([
@@ -250,12 +255,8 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
     const harness = await createProxyHarness();
     await expectUnauthorizedObserver(harness.observerUrl);
 
-    const expired = mintUnused({ nowMs: 0 });
-    const observerUrl = new URL(harness.observerUrl);
-    observerUrl.searchParams.set("token", expired.token);
-    await expectUnauthorizedObserver(observerUrl.toString());
-    observerUrl.searchParams.set("token", "0".repeat(48));
-    await expectUnauthorizedObserver(observerUrl.toString());
+    await expectUnauthorizedToken(harness.observerUrl, mintUnused({ nowMs: 0 }).token);
+    await expectUnauthorizedToken(harness.observerUrl, "0".repeat(48));
   });
 
   it.each([
@@ -284,9 +285,7 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
       invalidated = true;
       expect(controller.signal.aborted).toBe(revocation.startsWith("abort-"));
       expect(minted.expiresAtMs).toBeGreaterThan(Date.now());
-      const observerUrl = new URL(harness.observerUrl);
-      observerUrl.searchParams.set("token", minted.token);
-      await expectUnauthorizedObserver(observerUrl.toString());
+      await expectUnauthorizedToken(harness.observerUrl, minted.token);
     },
   );
 
@@ -463,9 +462,7 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
     expect(vi.getTimerCount()).toBe(0);
     // Only token expiry uses virtual time; socket rejection and teardown use real timers.
     vi.useRealTimers();
-    const observerUrl = new URL(harness.observerUrl);
-    observerUrl.searchParams.set("token", minted.token);
-    await expectUnauthorizedObserver(observerUrl.toString());
+    await expectUnauthorizedToken(harness.observerUrl, minted.token);
   });
 
   it("pauses and resumes unix-socket reads around websocket backpressure", async () => {

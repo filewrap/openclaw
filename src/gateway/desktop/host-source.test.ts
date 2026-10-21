@@ -1,11 +1,11 @@
 import fs from "node:fs/promises";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { DesktopHostConfig } from "../../config/types.desktop.js";
 import { isSecretValueRegisteredForRedaction } from "../../logging/secret-redaction-registry.js";
+import { createSocketServer, listenLoopback } from "./desktop.test-support.js";
 import {
   createHostDesktopService,
   createHostDesktopSource,
@@ -27,10 +27,8 @@ afterEach(async () => {
 });
 
 async function listenRfb(params?: { banner?: string; securityTypes?: number[] }) {
-  const sockets = new Set<net.Socket>();
-  const server = net.createServer((socket) => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
+  const shutdown = params ? cleanups : [];
+  const { server } = createSocketServer(shutdown, (socket) => {
     socket.write(Buffer.from(params?.banner ?? "RFB 003.008\n", "ascii"));
     if (params?.securityTypes) {
       socket.once("data", () => {
@@ -38,27 +36,11 @@ async function listenRfb(params?: { banner?: string; securityTypes?: number[] })
       });
     }
   });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("expected RFB server address");
+  const port = await listenLoopback(server);
+  if (!params) {
+    await shutdown[0]!();
   }
-  const close = () =>
-    new Promise<void>((resolve) => {
-      for (const socket of sockets) {
-        socket.destroy();
-      }
-      server.close(() => resolve());
-    });
-  if (params) {
-    cleanups.push(close);
-  } else {
-    await close();
-  }
-  return address.port;
+  return port;
 }
 
 const managedAttachment = {
@@ -104,11 +86,7 @@ function hostService(
 ) {
   const registry = createDesktopSessionRegistry();
   cleanups.push(() => registry.stopAll());
-  const service = createHostDesktopService({
-    getConfig,
-    registry,
-    ...options,
-  });
+  const service = createHostDesktopService({ getConfig, registry, ...options });
   return { service, registry };
 }
 
@@ -153,9 +131,7 @@ describe("gateway host desktop source", () => {
 
   it("discovers managed setup without starting it and preserves attached-server precedence", async () => {
     const createManaged = vi.spyOn(managedLinux, "createManagedLinuxDesktop");
-    const probeRfb = vi
-      .spyOn(rfbProbe, "probeRfbServer")
-      .mockResolvedValue({ kind: "unreachable" });
+    const probeRfb = unreachable();
     const config = { enabled: false, managed: true };
     const inspect = (platform: NodeJS.Platform = "linux", port?: number) =>
       inspectHostDesktopSetup({ config: { ...config, port }, platform });

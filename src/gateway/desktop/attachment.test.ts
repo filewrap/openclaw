@@ -5,6 +5,7 @@ import { setImmediate } from "node:timers/promises";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { connectRfbAttachment } from "./attachment.js";
+import { closeServer, listenLoopback } from "./desktop.test-support.js";
 import { createDesktopSessionRegistry } from "./session-registry.js";
 
 const { cleanupWarning } = vi.hoisted(() => ({ cleanupWarning: vi.fn() }));
@@ -28,12 +29,7 @@ beforeEach(() => {
   cleanupWarning.mockClear();
 });
 function request(overrides: Partial<Parameters<Registry["acquire"]>[0]> = {}) {
-  return {
-    sourceKey: "node:one",
-    ownerEpoch: 1,
-    start,
-    ...overrides,
-  };
+  return { sourceKey: "node:one", ownerEpoch: 1, start, ...overrides };
 }
 
 function holdTeardown() {
@@ -60,28 +56,15 @@ afterEach(async () => {
   for (const socket of sockets.splice(0)) {
     socket.destroy();
   }
-  await Promise.all(
-    servers.splice(0).map(
-      (server) =>
-        new Promise<void>((resolve) => {
-          server.close(() => resolve());
-        }),
-    ),
-  );
+  await Promise.all(servers.splice(0).map(closeServer));
 });
 
 it("connects a loopback TCP attachment", async () => {
   const server = net.createServer((socket) => sockets.push(socket));
   servers.push(server);
   const accepted = once(server, "connection").then(() => undefined);
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("expected TCP test server address");
-  }
-
-  sockets.push(connectRfbAttachment({ kind: "tcp", host: "127.0.0.1", port: address.port }));
+  const port = await listenLoopback(server);
+  sockets.push(connectRfbAttachment({ kind: "tcp", host: "127.0.0.1", port }));
 
   await expect(accepted).resolves.toBeUndefined();
 });
@@ -124,7 +107,6 @@ it.each([false, true])("claims only its source's live stream (closed: %s)", asyn
 
 it.each(["acquire", "activate"] as const)("refreshes idle cleanup after %s", async (method) => {
   vi.useFakeTimers();
-  registry = createDesktopSessionRegistry();
   const params = request({ teardown });
   await registry[method](params);
   await vi.advanceTimersByTimeAsync(48_000);
@@ -195,7 +177,7 @@ it("bounds pending observer reservations before streams are started", async () =
 it.each([1, 2])("bounds repeated failed cleanup at epoch %s", async (ownerEpoch) => {
   const failure = new Error("transport still running");
   teardown.mockRejectedValue(failure);
-  const params = request({ start, teardown, dispose });
+  const params = request({ teardown, dispose });
   await registry.acquire(params);
   try {
     if (ownerEpoch === 1) {
@@ -275,7 +257,6 @@ it("retains failed resource disposal for a later cleanup retry", async () => {
 
 it("does not linger-stop a reservation when another observer disconnects", async () => {
   vi.useFakeTimers();
-  registry = createDesktopSessionRegistry();
   await registry.activate(request({ teardown }));
   const observer = observe(registry);
   const pending = createPendingStream(registry);
