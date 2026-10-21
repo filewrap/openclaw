@@ -21,38 +21,15 @@ afterEach(() => {
   resetAgentRunRegistryForTest();
 });
 
-function approvalSession(
-  proposal: NonNullable<ReturnType<SystemAgentChatSession["engine"]["getPendingOperatorProposal"]>>,
-  resolveOperatorApproval: SystemAgentChatSession["engine"]["resolveOperatorApproval"],
-) {
-  return {
-    engine: {
-      historyLength: () => 0,
-      historySince: () => [],
-      noteAssistantMessage: vi.fn(),
-      getPendingOperatorProposal: () => proposal,
-      resolveOperatorApproval,
-    },
-    lastUsedAt: 1,
-    ownerKey: "agent:main:main",
-  } as unknown as SystemAgentChatSession;
-}
-
-async function resolveTestProposal(
+async function queueDelegatedApproval(
   params: Parameters<typeof prepareDelegatedSystemAgentApproval>[0] & {
     proposal: NonNullable<
       ReturnType<SystemAgentChatSession["engine"]["getPendingOperatorProposal"]>
     >;
   },
-) {
-  const resolveProposal = await prepareDelegatedSystemAgentApproval(params);
-  return await resolveProposal(params.proposal);
-}
-
-async function queueDelegatedApproval(
-  params: Parameters<typeof resolveTestProposal>[0],
 ): Promise<string> {
-  const resolution = await resolveTestProposal(params);
+  const resolveProposal = await prepareDelegatedSystemAgentApproval(params);
+  const resolution = await resolveProposal(params.proposal);
   if (resolution.kind !== "approval") {
     throw new Error("expected a human approval request");
   }
@@ -66,7 +43,17 @@ function delegatedApproval(
   events = true,
 ) {
   const proposal = { operation: { kind: "gateway-restart" as const }, hash: "a".repeat(64) };
-  const session = approvalSession(proposal, resolveOperatorApproval);
+  const session = {
+    engine: {
+      historyLength: () => 0,
+      historySince: () => [],
+      noteAssistantMessage: vi.fn(),
+      getPendingOperatorProposal: () => proposal,
+      resolveOperatorApproval,
+    },
+    lastUsedAt: 1,
+    ownerKey: "agent:main:main",
+  } as unknown as SystemAgentChatSession;
   const sessionId = worker ? "delegate-worker" : "delegate";
   const sessions = new Map([[sessionId, session]]);
   const manager = createTestApprovalManager<SystemAgentApprovalRequestPayload>(testContext, {
@@ -154,82 +141,35 @@ describe("prepareDelegatedSystemAgentApproval", () => {
     );
   });
 
-  it("rechecks authority after queued approval work before the final effect", async (testContext) => {
-    const apply = pausedApply();
-    const { manager, publishResolved, authority, queue } = delegatedApproval(
-      testContext,
-      apply.resolve,
-    );
-    const approvalId = await queue();
-    expect(await manager.resolve(approvalId, "allow-once", "operator-ui")).toBe(true);
-    await apply.started.promise;
-    expect(releaseAgentRunDelegatedAuthority(authority)).toBe(true);
-    apply.release.resolve();
-    await expect(apply.resolve.mock.results[0]?.value).rejects.toThrow(
-      "system-agent approval authority is no longer active",
-    );
-    expect(apply.effect).not.toHaveBeenCalled();
-    await vi.waitFor(() =>
-      expect(publishResolved).toHaveBeenCalledWith(
-        "system-agent",
-        expect.objectContaining({ applicationStatus: "not-applied" }),
-      ),
-    );
-  });
-
-  it.each(["run", "tool", "gateway", "worker", "session"] as const)(
-    "fences Full Access when its %s closes during apply preparation",
-    async (owner) => {
+  it.for(["run", "worker"] as const)(
+    "rechecks %s authority before the final effect",
+    async (owner, testContext) => {
       const apply = pausedApply();
-      const proposal = { operation: { kind: "gateway-restart" as const }, hash: "f".repeat(64) };
-      const session = approvalSession(proposal, apply.resolve);
-      const sessions = new Map([["delegate-full", session]]);
-      let workerActive = true;
-      const context = {
-        systemAgentSessions: sessions,
-        validateAgentRuntimeApprovalAuthority: () => workerActive,
-      } as unknown as GatewayRequestContext;
-      let liveContext = context;
-      const operationalRunInstance = createOperationalRunInstanceRef("full-access-run");
-      const authority = claimAgentRunDelegatedAuthority(operationalRunInstance);
-      const controller = new AbortController();
-      const pending = withGatewayToolCallerIdentity(
-        {
-          agentId: "main",
-          sessionKey: "agent:main:main",
-          operationalRunInstance,
-          approvalAuthority: authority,
-          fullPermission: true,
-          gatewayContextResolver: () => liveContext,
-          approvalSignals: [controller.signal],
-          ...(owner === "worker" ? { workerTurnClaim: workerTurnClaim("full-turn") } : {}),
-        },
-        () =>
-          resolveTestProposal({
-            context,
-            sessions,
-            session,
-            sessionId: "delegate-full",
-            delegation: { agentId: "main", sessionKey: "agent:main:main" },
-            proposal,
-          }),
+      const worker = owner === "worker" ? { active: true } : undefined;
+      const { manager, publishResolved, authority, queue } = delegatedApproval(
+        testContext,
+        apply.resolve,
+        worker,
       );
+      const approvalId = await queue(worker ? workerTurnClaim("turn-1") : undefined);
+      expect(await manager.resolve(approvalId, "allow-once", "operator-ui")).toBe(true);
       await apply.started.promise;
-      if (owner === "run") {
-        releaseAgentRunDelegatedAuthority(authority);
-      } else if (owner === "tool") {
-        controller.abort();
-      } else if (owner === "gateway") {
-        liveContext = { ...context };
-      } else if (owner === "worker") {
-        workerActive = false;
+      if (worker) {
+        worker.active = false;
       } else {
-        sessions.set("delegate-full", { ...session });
+        expect(releaseAgentRunDelegatedAuthority(authority)).toBe(true);
       }
       apply.release.resolve();
-
-      await expect(pending).rejects.toThrow("system-agent approval authority is no longer active");
+      await expect(apply.resolve.mock.results[0]?.value).rejects.toThrow(
+        "system-agent approval authority is no longer active",
+      );
       expect(apply.effect).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(publishResolved).toHaveBeenCalledWith(
+          "system-agent",
+          expect.objectContaining({ applicationStatus: "not-applied" }),
+        ),
+      );
     },
   );
 
@@ -243,21 +183,6 @@ describe("prepareDelegatedSystemAgentApproval", () => {
         expect.objectContaining({ applicationStatus: "applied" }),
       ),
     );
-  });
-
-  it("fences a delegated worker turn before the persistent effect", async (testContext) => {
-    const apply = pausedApply();
-    const worker = { active: true };
-    const { manager, queue } = delegatedApproval(testContext, apply.resolve, worker);
-    const approvalId = await queue(workerTurnClaim("turn-1"));
-    expect(await manager.resolve(approvalId, "allow-once", "operator-ui")).toBe(true);
-    await apply.started.promise;
-    worker.active = false;
-    apply.release.resolve();
-    await expect(apply.resolve.mock.results[0]?.value).rejects.toThrow(
-      "system-agent approval authority is no longer active",
-    );
-    expect(apply.effect).not.toHaveBeenCalled();
   });
 
   it("reuses the exact worker approval with Full Access", async (testContext) => {

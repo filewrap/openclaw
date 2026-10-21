@@ -121,6 +121,12 @@ vi.mock("../../system-agent/overview.js", () => ({
   formatSystemAgentStartupMessage: vi.fn(() => "welcome text"),
 }));
 
+const invalidRequest = { ok: false, error: { code: "INVALID_REQUEST" } };
+const invalidSession = {
+  ok: false,
+  error: { code: "INVALID_REQUEST", details: { code: "system_agent_session_invalidated" } },
+};
+
 type RespondCall = { ok: boolean; payload?: unknown; error?: unknown };
 
 function makeClient(params: {
@@ -235,53 +241,20 @@ describe("openclaw.chat session ownership", () => {
     expect(sessions.get("owned-session")?.ownerKey).toBe("user:owner@example.com");
     const handle = expectDefined(createdEngines[0], "created system-agent engine").handle;
 
-    const turn = await callChat(
-      context,
-      { sessionId: "owned-session", message: "show status" },
-      attacker,
-    );
-    const approval = await callChat(
-      context,
-      { sessionId: "owned-session", message: "yes" },
-      attacker,
-    );
-    const reset = await callChat(context, { sessionId: "owned-session", reset: true }, attacker);
-    const cancel = await callChat(
-      context,
-      { sessionId: "owned-session", wizardCancel: { stepId: "channel" } },
-      attacker,
-    );
-
-    expect(turn).toMatchObject({
-      ok: false,
-      payload: undefined,
-      error: {
-        code: "INVALID_REQUEST",
-        details: { code: "system_agent_session_invalidated" },
-      },
-    });
-    expect(approval).toMatchObject({
-      ok: false,
-      payload: undefined,
-      error: { code: "INVALID_REQUEST" },
-    });
-    expect(reset).toMatchObject({
-      ok: false,
-      payload: undefined,
-      error: { code: "INVALID_REQUEST" },
-    });
-    expect(cancel).toMatchObject({
-      ok: false,
-      payload: undefined,
-      error: { code: "INVALID_REQUEST" },
-    });
-    expect(handle).not.toHaveBeenCalled();
-    expect(
-      expectDefined(createdEngines[0], "created system-agent engine").cancelWizard,
-    ).not.toHaveBeenCalled();
-    expect(
-      expectDefined(createdEngines[0], "created system-agent engine").dispose,
-    ).not.toHaveBeenCalled();
+    for (const [input, expected] of [
+      [{ message: "show status" }, invalidSession],
+      [{ message: "yes" }, invalidRequest],
+      [{ reset: true }, invalidRequest],
+      [{ wizardCancel: { stepId: "channel" } }, invalidRequest],
+    ] as const) {
+      expect(
+        await callChat(context, { sessionId: "owned-session", ...input }, attacker),
+      ).toMatchObject({ ...expected, payload: undefined });
+    }
+    const engine = expectDefined(createdEngines[0], "created system-agent engine");
+    for (const method of [handle, engine.cancelWizard, engine.dispose]) {
+      expect(method).not.toHaveBeenCalled();
+    }
   });
 
   it("preserves the live session and pending approval when reset persistence fails", async () => {
@@ -379,7 +352,7 @@ describe("openclaw.chat session ownership", () => {
   it("rejects non-delegated chat without a server-authenticated identity", async () => {
     const call = await callChat(makeContext(new Map()), { sessionId: "anonymous" }, null);
 
-    expect(call).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST" } });
+    expect(call).toMatchObject(invalidRequest);
   });
 
   it("keeps explicit delegation authoritative across connection identities", async () => {
@@ -442,41 +415,19 @@ describe("openclaw.chat session ownership", () => {
       delegation: { agentId: "main", sessionKey: "agent:main:main" },
     });
 
-    expect(delegated).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST" } });
+    expect(delegated).toMatchObject(invalidRequest);
     expect(engine.handle).not.toHaveBeenCalled();
   });
 });
 
 describe("openclaw.chat session responses", () => {
-  it("rejects a structured answer without an active chat session", async () => {
-    const call = await callChat(makeContext(new Map()), {
-      sessionId: "missing",
-      wizardAnswer: { stepId: "channel", value: "twitch" },
-    });
-
-    expect(call).toMatchObject({
-      ok: false,
-      error: {
-        code: "INVALID_REQUEST",
-        details: { code: "system_agent_session_invalidated" },
-      },
-    });
-    expect(inferenceFallbackMocks.verifySystemAgentInferenceWithFallback).not.toHaveBeenCalled();
-  });
-
-  it("rejects a structured cancel without an active chat session", async () => {
-    const call = await callChat(makeContext(new Map()), {
-      sessionId: "missing",
-      wizardCancel: { stepId: "channel" },
-    });
-
-    expect(call).toMatchObject({
-      ok: false,
-      error: {
-        code: "INVALID_REQUEST",
-        details: { code: "system_agent_session_invalidated" },
-      },
-    });
+  it.each([
+    { wizardAnswer: { stepId: "channel", value: "twitch" } },
+    { wizardCancel: { stepId: "channel" } },
+  ])("rejects structured input without an active chat session: %j", async (input) => {
+    expect(
+      await callChat(makeContext(new Map()), { sessionId: "missing", ...input }),
+    ).toMatchObject(invalidSession);
     expect(inferenceFallbackMocks.verifySystemAgentInferenceWithFallback).not.toHaveBeenCalled();
   });
 
@@ -503,7 +454,7 @@ describe("openclaw.chat session responses", () => {
       wizardAnswer: { stepId: "stale", value: "twitch" },
     });
 
-    expect(call).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST" } });
+    expect(call).toMatchObject(invalidRequest);
     expect(transcriptStoreMocks.appendTurn).not.toHaveBeenCalled();
   });
 
@@ -521,43 +472,36 @@ describe("openclaw.chat session responses", () => {
     expect(call.payload).toMatchObject({ sensitive: true });
   });
 
-  it("maps the TUI handoff to an open-agent action", async () => {
-    const engine = makeEngine();
-    engine.handle.mockResolvedValue({
-      text: "",
-      action: "open-tui",
-      handoff: { kind: "open-tui" },
-    });
-    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
-
-    const call = await callChat(makeContext(sessions), {
-      sessionId: "s1",
-      message: "talk to agent",
-    });
-
-    expect(call.payload).toMatchObject({ action: "open-agent" });
-    expect(call.payload).not.toHaveProperty("agentDraft");
-    expect((call.payload as { reply: string }).reply).toContain("continue with your agent");
-  });
-
-  it("forwards the hatch draft intent with an agent handoff", async () => {
-    const engine = makeEngine();
-    engine.handle.mockResolvedValue({
+  it.each([
+    { text: "", agentDraft: undefined, agentId: undefined, reply: "continue with your agent" },
+    {
       text: "Your agent is hatching.",
-      action: "open-tui",
-      agentDraft: "hatch",
-      handoff: { kind: "open-tui", agentId: "researcher" },
-    });
-    const sessions = new Map<string, SystemAgentChatSession>([["s1", seededSession({ engine })]]);
-
-    const call = await callChat(makeContext(sessions), { sessionId: "s1", message: "yes" });
-
-    expect(call.payload).toMatchObject({
-      action: "open-agent",
-      agentDraft: "hatch",
+      agentDraft: "hatch" as const,
       agentId: "researcher",
-    });
-  });
+      reply: "Your agent is hatching.",
+    },
+  ])(
+    "projects an agent handoff with draft $agentDraft",
+    async ({ text, agentDraft, agentId, reply }) => {
+      const engine = makeEngine();
+      engine.handle.mockResolvedValue({
+        text,
+        action: "open-tui",
+        ...(agentDraft ? { agentDraft } : {}),
+        handoff: { kind: "open-tui", ...(agentId ? { agentId } : {}) },
+      });
+      const sessions = new Map([["s1", seededSession({ engine })]]);
+      const call = await callChat(makeContext(sessions), { sessionId: "s1", message: "yes" });
+      expect(call.payload).toMatchObject({
+        action: "open-agent",
+        reply: expect.stringContaining(reply),
+        ...(agentDraft ? { agentDraft, agentId } : {}),
+      });
+      if (!agentDraft) {
+        expect(call.payload).not.toHaveProperty("agentDraft");
+      }
+    },
+  );
 });
 
 function fullSessions(oldest: SystemAgentChatSession) {

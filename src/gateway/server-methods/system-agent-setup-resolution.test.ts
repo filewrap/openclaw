@@ -14,7 +14,6 @@ import {
   callWizardNext,
   invoke,
   makeContext,
-  startActivation,
 } from "./system-agent-setup.test-support.js";
 
 const mocks = vi.hoisted(() => ({
@@ -59,6 +58,18 @@ describe("openclaw.setup provider resolution", () => {
   const sessionId = "setup-resolution";
   let context: ReturnType<typeof makeContext>["context"];
   let wizardSessions: ReturnType<typeof makeContext>["wizardSessions"];
+  async function startWizard(
+    kind = "activate",
+    params: Record<string, unknown> = { kind: "codex-cli", modelRef: "example/model" },
+  ) {
+    const calls = await invoke(`openclaw.setup.${kind}.start`, context, { sessionId, ...params });
+    expect(calls[0]).toMatchObject({
+      ok: true,
+      payload: { sessionId, done: false, status: "running" },
+    });
+    return { calls, session: expectDefined(wizardSessions.get(sessionId), "setup wizard session") };
+  }
+  const next = () => callWizardNext(context, { sessionId });
   beforeEach(() => {
     ({ context, wizardSessions } = makeContext());
     mocks.readConfig.mockResolvedValue({
@@ -123,13 +134,8 @@ describe("openclaw.setup provider resolution", () => {
         return { ...activated(), gatewayRestartRequired: true };
       });
 
-      const calls = await startActivation(context, sessionId);
-      expect(calls[0]).toMatchObject({
-        ok: true,
-        payload: { sessionId, done: false, status: "running" },
-      });
-      const session = expectDefined(wizardSessions.get(sessionId), "activation wizard session");
-      const note = await callWizardNext(context, { sessionId });
+      const { session } = await startWizard();
+      const note = await next();
       expect(note.step).toMatchObject({ type: "note", title: "Plugin capabilities" });
       expect(JSON.stringify(note)).not.toContain(review.reviewToken);
       const confirmation = await answerWizard(context, sessionId, note);
@@ -179,15 +185,17 @@ describe("openclaw.setup provider resolution", () => {
       return activated("openai/gpt-5.6-luna");
     });
     try {
-      await startActivation(context, sessionId, "openai/gpt-5.6-luna");
-      const session = expectDefined(wizardSessions.get(sessionId), "activation wizard session");
-      const codeStep = await callWizardNext(context, { sessionId });
+      const { session } = await startWizard("activate", {
+        kind: "codex-cli",
+        modelRef: "openai/gpt-5.6-luna",
+      });
+      const codeStep = await next();
       expect(codeStep.step).toMatchObject({ deviceCode: { expiresInMinutes: 15 } });
       await vi.advanceTimersByTimeAsync(10 * 60 * 1_000);
       expect(session.getStatus()).toBe("running");
       expect(session.signal.aborted).toBe(false);
       signedIn.resolve();
-      expect(await callWizardNext(context, { sessionId })).toMatchObject({
+      expect(await next()).toMatchObject({
         done: true,
         status: "done",
         modelActivation: { modelRef: "openai/gpt-5.6-luna" },
@@ -212,8 +220,8 @@ describe("openclaw.setup provider resolution", () => {
       await installReleased;
       return activated();
     });
-    await startActivation(context, sessionId);
-    const confirmation = await callWizardNext(context, { sessionId });
+    await startWizard();
+    const confirmation = await next();
     const terminal = answerWizard(context, sessionId, confirmation, true);
     await locked;
 
@@ -251,11 +259,6 @@ describe("openclaw.setup provider resolution", () => {
     let installed = false;
     let cleaningUp = false;
     let session: WizardSession | undefined;
-    let statusAtCheckpoint: string | undefined;
-    let abortedAtCheckpoint: boolean | undefined;
-    let offeredStepType: string | undefined;
-    let submittedBeforeCleanup = false;
-    let cancelResult: unknown;
     activate.mockImplementationOnce(async (params: ActivateSetupInferenceParams) => {
       const prompter = expectDefined(params.prompter, "provider auth prompter");
       const accepted = await prompter.confirm({
@@ -297,15 +300,11 @@ describe("openclaw.setup provider resolution", () => {
       return calls[0]?.payload;
     };
     try {
-      await invoke("openclaw.setup.auth.start", context, {
-        sessionId,
-        authChoice: "fixture-provider",
-      });
-      session = expectDefined(wizardSessions.get(sessionId), "provider auth wizard");
-      const confirmation = await callWizardNext(context, { sessionId });
+      ({ session } = await startWizard("auth", { authChoice: "fixture-provider" }));
+      const confirmation = await next();
       await session.answer(expectDefined(confirmation.step, "install confirmation").id, true);
       await installStarted.promise;
-      const progress = await callWizardNext(context, { sessionId });
+      const progress = await next();
       expect(progress.step?.type).toBe("progress");
       // A legacy client's progress acknowledgement cannot release the artifact fence.
       await session.answer(expectDefined(progress.step, "install progress").id, undefined);
@@ -316,18 +315,19 @@ describe("openclaw.setup provider resolution", () => {
         expect(session.getStatus()).toBe("running");
         expect(session.signal.aborted).toBe(false);
       }
-      const next = callWizardNext(context, { sessionId });
+      const pending = next();
       finishInstall.resolve();
-      const checkpoint = await next;
-      offeredStepType = checkpoint.step?.type;
+      const checkpoint = await pending;
       if (action.startsWith("cancel")) {
-        cancelResult = await cancel();
+        expect(await cancel()).toMatchObject({ status: finalCommit ? "running" : "cancelled" });
       } else if (!expiresDuringInstall) {
         await vi.advanceTimersByTimeAsync(25 * 60 * 1_000);
       }
-      statusAtCheckpoint = session.getStatus();
-      abortedAtCheckpoint = session.signal.aborted;
-      submittedBeforeCleanup = persistCredentials.mock.calls.length !== 0;
+      expect(installed).toBe(true);
+      expect(persistCredentials).not.toHaveBeenCalled();
+      expect(checkpoint.step?.type).toBe(expiresDuringInstall ? undefined : "text");
+      expect(session.getStatus()).toBe(finalCommit ? "running" : "cancelled");
+      expect(session.signal.aborted).toBe(!finalCommit);
     } finally {
       cleaningUp = true;
       finishInstall.resolve();
@@ -344,16 +344,8 @@ describe("openclaw.setup provider resolution", () => {
       }
       vi.useRealTimers();
     }
-    expect(installed).toBe(true);
-    expect(submittedBeforeCleanup).toBe(false);
     expect(mocks.writeConfig).not.toHaveBeenCalled();
-    expect(offeredStepType).toBe(expiresDuringInstall ? undefined : "text");
     expect(promoteModel).not.toHaveBeenCalled();
-    expect(statusAtCheckpoint).toBe(finalCommit ? "running" : "cancelled");
-    expect(abortedAtCheckpoint).toBe(!finalCommit);
-    if (action.startsWith("cancel")) {
-      expect(cancelResult).toMatchObject({ status: finalCommit ? "running" : "cancelled" });
-    }
     if (!finalCommit) {
       expect(persistCredentials).not.toHaveBeenCalled();
       expect(await session?.next()).not.toHaveProperty("modelActivation");
@@ -365,8 +357,6 @@ describe("openclaw.setup provider resolution", () => {
     const finishProbe = createDeferredCore();
     const promoteModel = vi.fn();
     let installed = false;
-    let cancelResult: unknown;
-    let abortedAfterCancel = false;
     activate.mockImplementationOnce(async (params: ActivateSetupInferenceParams) => {
       await params.beforePersistentEffect?.();
       installed = true;
@@ -379,24 +369,24 @@ describe("openclaw.setup provider resolution", () => {
       promoteModel();
       return activated("fixture/demo-model");
     });
-    await startActivation(context, sessionId, "fixture/demo-model");
-    const session = expectDefined(wizardSessions.get(sessionId), "verification wizard");
+    const { session } = await startWizard("activate", {
+      kind: "codex-cli",
+      modelRef: "fixture/demo-model",
+    });
     try {
-      const progress = await callWizardNext(context, { sessionId });
+      const progress = await next();
       expect(progress.step?.type).toBe("progress");
       await probeStarted.promise;
 
       const calls = await invoke("wizard.cancel", context, { sessionId });
-      cancelResult = calls[0]?.payload;
-      abortedAfterCancel = session.signal.aborted;
+      expect(calls[0]?.payload).toMatchObject({ status: "cancelled" });
+      expect(session.signal.aborted).toBe(true);
       expect(wizardSessions.has(sessionId)).toBe(true);
     } finally {
       finishProbe.resolve();
       await whenAdmittedWizardSessionSettled(session);
     }
     expect(installed).toBe(true);
-    expect(cancelResult).toMatchObject({ status: "cancelled" });
-    expect(abortedAfterCancel).toBe(true);
     expect(promoteModel).not.toHaveBeenCalled();
     expect(await session.next()).not.toHaveProperty("modelActivation");
     expect(wizardSessions.has(sessionId)).toBe(false);
@@ -405,12 +395,7 @@ describe("openclaw.setup provider resolution", () => {
   it("returns actionable doctor guidance when provider setup is retryable", async () => {
     const result = { config, retrySelection: true, authProfiles: [], persistAuthProfiles: vi.fn() };
     mocks.prepareProvider.mockImplementationOnce(async (_params, consume) => consume(result));
-    await invoke("openclaw.setup.prepare.start", context, {
-      sessionId,
-      authChoice: "ollama",
-    });
-
-    const session = expectDefined(wizardSessions.get(sessionId), "prepare wizard session");
+    const { session } = await startWizard("prepare", { authChoice: "ollama" });
     await expect(session.next()).resolves.toMatchObject({
       done: true,
       status: "error",
@@ -431,20 +416,14 @@ describe("openclaw.setup provider resolution", () => {
       };
     });
 
-    const calls = await invoke("openclaw.setup.auth.start", context, {
-      sessionId,
+    const { calls, session } = await startWizard("auth", {
       agentId: "research",
       authChoice: "github-copilot",
       modelTarget: "utility",
     });
 
-    expect(calls[0]).toMatchObject({
-      ok: true,
-      payload: { sessionId, done: false, status: "running" },
-    });
     expect(calls[0]?.payload).not.toHaveProperty("modelActivation");
-    const session = expectDefined(wizardSessions.get(sessionId), "auth wizard session");
-    const first = await callWizardNext(context, { sessionId });
+    const first = await next();
     expect(activate).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "provider-auth",
@@ -496,14 +475,9 @@ describe("openclaw.setup provider resolution", () => {
       }
     });
 
-    const calls = await startActivation(context, sessionId);
-    expect(calls[0]).toMatchObject({
-      ok: true,
-      payload: { sessionId, done: false, status: "running" },
-    });
-    const session = expectDefined(wizardSessions.get(sessionId), "activation wizard session");
+    const { calls, session } = await startWizard();
     try {
-      const reviewStep = await callWizardNext(context, { sessionId });
+      const reviewStep = await next();
       expect(reviewStep.step).toMatchObject({ type: "note", title: "Plugin capabilities" });
       const confirmation = await answerWizard(context, sessionId, reviewStep);
       expect(confirmation.step).toMatchObject({ type: "confirm" });
@@ -520,7 +494,7 @@ describe("openclaw.setup provider resolution", () => {
       }
       expect(session.isSettled()).toBe(false);
       const published = vi.fn();
-      const terminal = callWizardNext(context, { sessionId });
+      const terminal = next();
       const observed = terminal.then(published, published);
       try {
         await Promise.resolve();
@@ -564,15 +538,17 @@ describe("openclaw.setup provider resolution", () => {
         }
         return activated("fixture/demo-model");
       });
-      await startActivation(context, sessionId, "fixture/demo-model");
-      const session = expectDefined(wizardSessions.get(sessionId), "activation wizard");
+      const { session } = await startWizard("activate", {
+        kind: "codex-cli",
+        modelRef: "fixture/demo-model",
+      });
       try {
         await activationStarted.promise;
         session.close(new Error(shutdownMessage));
         expect(session.signal.aborted).toBe(!committed);
         finishActivation.resolve();
         await whenAdmittedWizardSessionSettled(session);
-        const done = await callWizardNext(context, { sessionId });
+        const done = await next();
         if (committed) {
           expect(done).toMatchObject({
             done: true,
@@ -609,11 +585,10 @@ describe("openclaw.setup provider resolution", () => {
         disposition: "rejected-before-promotion",
       };
     });
-    await startActivation(context, sessionId);
-    const session = expectDefined(wizardSessions.get(sessionId), "activation wizard session");
+    const { session } = await startWizard();
     await whenAdmittedWizardSessionSettled(session);
 
-    const done = await callWizardNext(context, { sessionId });
+    const done = await next();
     expect(done).toEqual({
       done: true,
       status: "error",
@@ -659,12 +634,8 @@ describe("openclaw.setup provider resolution", () => {
           ...(outcome === "rejected" ? { disposition: "rejected-before-promotion" } : {}),
         };
       });
-      await invoke("openclaw.setup.auth.start", context, {
-        sessionId,
-        authChoice: "github-copilot",
-      });
-      const session = expectDefined(wizardSessions.get(sessionId), "auth wizard session");
-      const first = await callWizardNext(context, { sessionId });
+      const { session } = await startWizard("auth", { authChoice: "github-copilot" });
+      const first = await next();
       if (outcome === "cancelled") {
         const calls = await invoke("wizard.cancel", context, { sessionId });
         expect(calls[0]).toEqual({
@@ -737,12 +708,8 @@ describe("openclaw.setup provider resolution", () => {
         });
       });
       try {
-        await invoke("openclaw.setup.prepare.start", context, {
-          sessionId,
-          authChoice: "fixture-provider",
-        });
-        session = expectDefined(wizardSessions.get(sessionId), "provider preparation wizard");
-        const confirmation = await callWizardNext(context, { sessionId });
+        ({ session } = await startWizard("prepare", { authChoice: "fixture-provider" }));
+        const confirmation = await next();
         const terminal = answerWizard(context, sessionId, confirmation, true);
         await preparationStarted.promise;
         if (beforeCredentials) {

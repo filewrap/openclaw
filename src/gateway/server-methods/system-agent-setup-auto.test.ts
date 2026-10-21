@@ -94,6 +94,8 @@ const chatGptSignIn = {
   featured: true,
 };
 const separateSignIn = { authOptionId: chatGptSignIn.id, label: chatGptSignIn.label };
+const activated = (modelRef = codex.modelRef) => ({ ok: true, modelRef, latencyMs: 1, lines: [] });
+const catalog = (enabled: boolean) => ({ config: { sessionCatalog: { enabled } } });
 
 function detection(
   candidates: SetupInferenceCandidate[] = [],
@@ -126,12 +128,7 @@ function context(): GatewayRequestContext {
 beforeEach(() => {
   vi.stubEnv("OPENCLAW_STATE_DIR", tempDirs.make("setup-auto-admission-"));
   fixture.detect.mockResolvedValue(detection());
-  fixture.activate.mockResolvedValue({
-    ok: true,
-    modelRef: codex.modelRef,
-    latencyMs: 1,
-    lines: [],
-  });
+  fixture.activate.mockResolvedValue(activated());
   fixture.readConfig.mockResolvedValue({ config: {}, runtimeConfig: {}, sourceConfig: {} });
   fixture.prepare.mockResolvedValue({ error: "Could not install the official Codex plugin." });
   fixture.audit.mockResolvedValue(undefined);
@@ -172,41 +169,28 @@ describe("Gateway automatic inference setup", () => {
     },
   );
 
-  it.each(["rate_limit", "billing", "format", "timeout", "unknown"] as const)(
-    "can select Ollama after an ordinary Codex model failure: %s",
+  it.each(["rate_limit", "billing", "format", "timeout", "unknown", "absent"] as const)(
+    "can select Ollama when Codex is %s",
     async (status) => {
-      fixture.detect.mockResolvedValueOnce(detection([ollama, codex]));
-      fixture.activate
-        .mockResolvedValueOnce({ ok: false, status, error: "Model request failed." })
-        .mockResolvedValueOnce({ ok: true, modelRef: ollama.modelRef, latencyMs: 1, lines: [] });
-
+      const absent = status === "absent";
+      fixture.detect.mockResolvedValueOnce(detection(absent ? [ollama] : [ollama, codex]));
+      if (!absent) {
+        fixture.activate.mockResolvedValueOnce({
+          ok: false,
+          status,
+          error: "Model request failed.",
+        });
+      }
+      fixture.activate.mockResolvedValueOnce(activated(ollama.modelRef));
       expect(await runSetup()).toMatchObject({
         status: "activated",
         selected: { kind: ollama.kind, modelRef: ollama.modelRef },
-        attempts: [{ kind: "codex-cli", error: "Model request failed." }],
+        attempts: absent ? [] : [{ kind: "codex-cli", error: "Model request failed." }],
       });
-      expect(fixture.activate).toHaveBeenCalledTimes(2);
+      expect(fixture.activate).toHaveBeenCalledTimes(absent ? 1 : 2);
       expect(fixture.prepare).not.toHaveBeenCalled();
     },
   );
-
-  it("can select Ollama when Codex is genuinely absent", async () => {
-    fixture.detect.mockResolvedValueOnce(detection([{ ...ollama }]));
-    fixture.activate.mockResolvedValueOnce({
-      ok: true,
-      modelRef: "ollama/fixture",
-      latencyMs: 1,
-      lines: [],
-    });
-
-    expect(await runSetup()).toMatchObject({
-      status: "activated",
-      selected: { kind: "provider-auto:ollama-local", modelRef: "ollama/fixture" },
-      attempts: [],
-    });
-    expect(fixture.activate).toHaveBeenCalledOnce();
-    expect(fixture.prepare).not.toHaveBeenCalled();
-  });
 
   it("returns an existing model and ranked alternatives without starting a write", async () => {
     const current: SetupInferenceCandidate = {
@@ -376,28 +360,15 @@ describe("Gateway automatic inference setup", () => {
       const prepared: OpenClawConfig = {
         plugins: {
           entries: {
-            codex: {
-              enabled: true,
-              ...(auditFails ? { config: { sessionCatalog: { enabled: true } } } : {}),
-            },
-            ...(auditFails
-              ? { anthropic: { config: { sessionCatalog: { enabled: false } } } }
-              : {}),
+            codex: { enabled: true, ...(auditFails ? catalog(true) : {}) },
+            ...(auditFails ? { anthropic: catalog(false) } : {}),
           },
         },
       };
       fixture.prepare.mockResolvedValue({ ok: true, config: prepared });
       fixture.detect.mockResolvedValueOnce(detection()).mockResolvedValueOnce(
         detection([], {
-          authOptions: [
-            {
-              id: "openai-codex",
-              brandId: "openai",
-              label: "ChatGPT",
-              kind: "oauth",
-              featured: true,
-            },
-          ],
+          authOptions: [{ ...chatGptSignIn, id: "openai-codex", kind: "oauth" }],
         }),
       );
 
@@ -415,8 +386,8 @@ describe("Gateway automatic inference setup", () => {
           config: {
             plugins: {
               entries: {
-                codex: { enabled: true, config: { sessionCatalog: { enabled: auditFails } } },
-                anthropic: { config: { sessionCatalog: { enabled: false } } },
+                codex: { enabled: true, ...catalog(auditFails) },
+                anthropic: catalog(false),
               },
             },
           },

@@ -249,6 +249,18 @@ describe("Full Access delegated chat", () => {
       broadcast,
       callChat,
       requested,
+      pendingApproval: async () =>
+        expectDefined((await manager.listPendingRecords())[0], "pending approval"),
+      decide: async (
+        id: string,
+        decision: "allow-once" | "deny",
+        actor = "operator",
+        accepted = true,
+      ) => expect(await manager.resolve(id, decision, actor)).toBe(accepted),
+      expectRetired: async () => {
+        expect(engine.getPendingOperatorProposal()).toBeNull();
+        expect(await manager.listPendingRecords()).toEqual([]);
+      },
       readApproval: (id: string) =>
         getOperatorApprovalDetailed({ id, databaseOptions: { path: approvalDatabasePath } }),
       expectRequests: (count: number) =>
@@ -297,10 +309,7 @@ describe("Full Access delegated chat", () => {
       });
     try {
       await fixture.requested.promise;
-      const original = expectDefined(
-        (await fixture.manager.listPendingRecords())[0],
-        "original approval",
-      );
+      const original = await fixture.pendingApproval();
       const correctionRequested = createDeferred();
       fixture.broadcast.mockImplementation((event) => {
         if (event === "openclaw.approval.requested") {
@@ -308,11 +317,10 @@ describe("Full Access delegated chat", () => {
         }
       });
       expect(fixture.runConfigSet).not.toHaveBeenCalled();
-      expect(await fixture.manager.resolve(original.id, "allow-once", "operator")).toBe(true);
+      await fixture.decide(original.id, "allow-once");
       if (outcome === "closed-before") {
         await pending;
-        expect(await fixture.manager.listPendingRecords()).toEqual([]);
-        expect(fixture.engine.getPendingOperatorProposal()).toBeNull();
+        await fixture.expectRetired();
         expect(fixture.runConfigSet).toHaveBeenCalledOnce();
         fixture.expectRequests(1);
         return;
@@ -323,19 +331,14 @@ describe("Full Access delegated chat", () => {
           pending.then(() => "completed"),
         ]),
       ).toBe("requested");
-      const correction = expectDefined(
-        (await fixture.manager.listPendingRecords())[0],
-        "corrective approval",
-      );
+      const correction = await fixture.pendingApproval();
       fixture.expectRequests(2);
       expect(correction.id).not.toBe(original.id);
       expect(correction.request.proposalHash).not.toBe(original.request.proposalHash);
       await runSystemAgentGatewayTask(async () => undefined);
       expect(settled).toBe(false);
       expect(fixture.runConfigSet).toHaveBeenCalledOnce();
-      expect(await fixture.manager.resolve(original.id, "allow-once", "stale-operator")).toBe(
-        false,
-      );
+      await fixture.decide(original.id, "allow-once", "stale-operator", false);
       if (outcome === "closed-after" || outcome === "tool-cancelled" || outcome === "denied") {
         if (outcome === "closed-after") {
           releaseAgentRunDelegatedAuthority(fixture.authority);
@@ -343,17 +346,14 @@ describe("Full Access delegated chat", () => {
         } else if (outcome === "tool-cancelled") {
           controller.abort();
         } else {
-          expect(await fixture.manager.resolve(correction.id, "deny", "operator")).toBe(true);
+          await fixture.decide(correction.id, "deny");
         }
-        expect((await pending).payload).toMatchObject({
-          reply: expect.stringContaining(outcome === "denied" ? "Denied" : "cancelled"),
-        });
+        expectReplyParts((await pending).payload, outcome === "denied" ? "Denied" : "cancelled");
         expect(fixture.runConfigSet).toHaveBeenCalledOnce();
-        expect(fixture.engine.getPendingOperatorProposal()).toBeNull();
-        expect(await fixture.manager.listPendingRecords()).toEqual([]);
+        await fixture.expectRetired();
         return;
       }
-      expect(await fixture.manager.resolve(correction.id, "allow-once", "operator")).toBe(true);
+      await fixture.decide(correction.id, "allow-once");
       const result = await pending;
       expectReplyParts(result.payload, "gateway.port: Invalid input");
       if (outcome === "failed-correction") {
@@ -392,13 +392,11 @@ describe("Full Access delegated chat", () => {
         fullPermission: true,
       });
       expect(fixture.runConfigSet).toHaveBeenCalledTimes(2);
-      expect(await fixture.manager.listPendingRecords()).toEqual([]);
-      expect(fixture.engine.getPendingOperatorProposal()).toBeNull();
-      expect(reply.payload).toMatchObject({
-        reply: expect.stringContaining(
-          fails ? "stopped after one corrective attempt" : "[openclaw] done: config.set",
-        ),
-      });
+      await fixture.expectRetired();
+      expectReplyParts(
+        reply.payload,
+        fails ? "stopped after one corrective attempt" : "[openclaw] done: config.set",
+      );
     },
   );
 
@@ -459,10 +457,7 @@ describe("Full Access delegated chat", () => {
         });
       try {
         await fixture.requested.promise;
-        const record = expectDefined(
-          (await fixture.manager.listPendingRecords())[0],
-          "pending approval",
-        );
+        const record = await fixture.pendingApproval();
         await runSystemAgentGatewayTask(async () => undefined);
         expect.soft(settled).toBe(false);
         expect(fixture.runConfigSet).not.toHaveBeenCalled();
@@ -507,13 +502,11 @@ describe("Full Access delegated chat", () => {
           if (queued) {
             await applyStarted.promise;
           }
-          expect(
-            await fixture.manager.resolve(
-              record.id,
-              outcome === "deny" ? "deny" : "allow-once",
-              "operator-ui",
-            ),
-          ).toBe(true);
+          await fixture.decide(
+            record.id,
+            outcome === "deny" ? "deny" : "allow-once",
+            "operator-ui",
+          );
           if (queued || outcome === "precommit-cancelled" || outcome === "afterDecision-failed") {
             await applyStarted.promise;
             if (outcome !== "afterDecision-failed") {
@@ -541,9 +534,7 @@ describe("Full Access delegated chat", () => {
             outcome: "found",
             record: { decision: "allow-once", status: "allowed" },
           });
-          expect(await fixture.manager.resolve(record.id, "allow-once", "late-operator")).toBe(
-            false,
-          );
+          await fixture.decide(record.id, "allow-once", "late-operator", false);
         }
         expect.soft(result.payload).toMatchObject({ reply: expect.stringContaining(expected) });
         expectReplyParts(result.payload, ...guidance);
@@ -578,15 +569,17 @@ describe("Full Access delegated chat", () => {
   );
 
   it.each([
-    ...(["typed", "model tool"] as const).flatMap((source) =>
-      (["closed", "live", "live-restricted"] as const).map((previousRun) => ({
-        source,
-        previousRun,
-      })),
-    ),
-    { source: "typed" as const, previousRun: "storage-failure" as const },
-    { source: "typed" as const, previousRun: "unregistered-closed" as const },
-    { source: "typed" as const, previousRun: "registration-failure" as const },
+    ...(
+      [
+        "closed",
+        "live",
+        "live-restricted",
+        "storage-failure",
+        "unregistered-closed",
+        "registration-failure",
+      ] as const
+    ).map((previousRun) => ({ source: "typed" as const, previousRun })),
+    { source: "model tool" as const, previousRun: "live" as const },
   ])(
     "applies Full Access via $source without inheriting a $previousRun proposal",
     async ({ source, previousRun }) => {
@@ -609,9 +602,8 @@ describe("Full Access delegated chat", () => {
       expect(fixture.runConfigSet).toHaveBeenCalledOnce();
       expect(call.payload).not.toHaveProperty("needsApproval");
       expect(call.payload).not.toHaveProperty("proposalId");
-      expect(await fixture.manager.listPendingRecords()).toEqual([]);
+      await fixture.expectRetired();
       expect(fixture.broadcast).not.toHaveBeenCalled();
-      expect(fixture.engine.getPendingOperatorProposal()).toBeNull();
       expect(readLastSystemAgentAuditEntry()).toMatchObject({
         operation: "config.set",
         summary: "Set config logging.level",
@@ -695,12 +687,9 @@ describe("Full Access delegated chat", () => {
       expect(readOnlyReply.error).toBeUndefined();
       expect.soft(fixture.runConfigSet).toHaveBeenCalledOnce();
       expectReplyParts(readOnlyReply.payload, "logging.level: not set");
-      expect(fixture.engine.getPendingOperatorProposal()).toBeNull();
-      expect(await fixture.manager.listPendingRecords()).toEqual([]);
+      await fixture.expectRetired();
       if (pending) {
-        expect(await fixture.manager.resolve(pending.id, "allow-once", "late-operator")).toBe(
-          false,
-        );
+        await fixture.decide(pending.id, "allow-once", "late-operator", false);
         expectReplyParts((await proposalCall).payload, "cancelled");
       }
       expect(validateAgentRunDelegatedAuthority(fixture.authority)).toBe(previousAuthorityActive);

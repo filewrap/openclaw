@@ -19,9 +19,9 @@ import { SystemAgentInferenceUnavailableError } from "../../system-agent/inferen
 import { detectSetupInference } from "../../system-agent/setup-inference-detect.js";
 import type { ActivateSetupInferenceParams } from "../../system-agent/setup-inference.js";
 import type { WizardPrompter } from "../../wizard/prompts.js";
-import type { WizardSession } from "../../wizard/session.js";
 import * as setupAdmission from "./setup-admission.js";
 import { activateGatewaySetupInference } from "./system-agent-execution.js";
+import { makeContext as makeWizardContext } from "./system-agent-setup.test-support.js";
 import type { SystemAgentChatSession } from "./system-agent.js";
 import {
   callChat,
@@ -38,7 +38,6 @@ import {
   useSystemAgentGatewayTestFixture,
   verifiedConfig,
 } from "./system-agent.test-support.js";
-import type { GatewayRequestContext } from "./types.js";
 
 const {
   systemAgentTempDirs,
@@ -53,18 +52,6 @@ function mockChat(text = "Ready.") {
   const handle = vi.spyOn(engine, "handle").mockResolvedValue({ text, action: "none" });
   const context = makeContext(new Map([["s1", seededSession({ engine })]]));
   return { handle, context };
-}
-
-function makeWizardContext() {
-  const wizardSessions = new Map<string, WizardSession>();
-  return {
-    wizardSessions,
-    context: {
-      wizardSessions,
-      findRunningWizard: () => undefined,
-      purgeWizardSession: (id: string) => wizardSessions.delete(id),
-    } as unknown as GatewayRequestContext,
-  };
 }
 
 const waitOneTask = () =>
@@ -674,90 +661,57 @@ describe("openclaw.chat", () => {
     expect(call.ok).toBe(false);
   });
 
-  it("trims, canonicalizes, and forwards valid UI context for a user turn", async () => {
-    const { handle, context } = mockChat("Everything is healthy.");
-
-    const call = await callChat(context, {
-      sessionId: "s1",
-      message: "What about this page?",
-      context: {
+  const pluginRef = { id: "example", name: "Example" };
+  const setting = { path: ["accounts", "name.with.dots"], label: "Account" };
+  it.each([
+    {
+      name: "trims valid UI context and strips private plugin fields",
+      input: {
         page: "  /settings/channels  ",
         source: "client",
         plugin: {
-          id: "example",
-          name: "Example",
+          ...pluginRef,
           config: { apiKey: "never forwarded" },
-          setting: {
-            path: ["accounts", "name.with.dots"],
-            label: "Account",
-            value: "never forwarded",
-          },
+          setting: { ...setting, value: "never forwarded" },
         },
       },
-    });
-
-    expect(call.ok).toBe(true);
-    expect(handle).toHaveBeenCalledWith("What about this page?", {
-      uiContext: {
-        page: "/settings/channels",
-        plugin: {
-          id: "example",
-          name: "Example",
-          setting: { path: ["accounts", "name.with.dots"], label: "Account" },
-        },
-      },
-    });
-  });
-
-  it.each([{ name: "a Unicode case-folding character", page: "\u212A" }])(
-    "drops UI context with $name without rejecting the turn",
-    async ({ page }) => {
-      const { handle, context } = mockChat("Everything is healthy.");
-
-      const call = await callChat(context, {
-        sessionId: "s1",
-        message: "Status please.",
-        context: { page },
-      });
-
-      expect(call.ok).toBe(true);
-      expect(handle).toHaveBeenCalledWith("Status please.");
+      expected: { page: "/settings/channels", plugin: { ...pluginRef, setting } },
     },
-  );
-
-  it.each([
-    { id: "bad?id", name: "Example" },
-    { id: "example", name: "n".repeat(97) },
-  ])("drops an invalid plugin reference while keeping the human turn", async (plugin) => {
+    { name: "drops a Unicode case-folding page", input: { page: "\u212A" }, expected: undefined },
+    {
+      name: "drops an invalid plugin id",
+      input: { page: "plugin-settings", plugin: { ...pluginRef, id: "bad?id" } },
+      expected: { page: "plugin-settings" },
+    },
+    {
+      name: "drops an overlong plugin name",
+      input: { page: "plugin-settings", plugin: { ...pluginRef, name: "n".repeat(97) } },
+      expected: { page: "plugin-settings" },
+    },
+    {
+      name: "bounds escaped plugin setting data",
+      input: {
+        page: "plugin-settings",
+        plugin: {
+          ...pluginRef,
+          setting: { path: Array(16).fill("\u0000".repeat(64)), label: "Large" },
+        },
+      },
+      expected: { page: "plugin-settings", plugin: pluginRef },
+    },
+  ])("$name without rejecting the human turn", async ({ input, expected }) => {
     const { handle, context } = mockChat();
     const call = await callChat(context, {
       sessionId: "s1",
       message: "Help with this",
-      context: { page: "plugin-settings", plugin },
+      context: input,
     });
     expect(call.ok).toBe(true);
-    expect(handle).toHaveBeenCalledWith("Help with this", {
-      uiContext: { page: "plugin-settings" },
-    });
-  });
-
-  it("bounds escaped plugin reference data before forwarding it", async () => {
-    const { handle, context } = mockChat();
-    await callChat(context, {
-      sessionId: "s1",
-      message: "Help with this",
-      context: {
-        page: "plugin-settings",
-        plugin: {
-          id: "example",
-          name: "Example",
-          setting: { path: Array(16).fill("\u0000".repeat(64)), label: "Large" },
-        },
-      },
-    });
-    expect(handle).toHaveBeenCalledWith("Help with this", {
-      uiContext: { page: "plugin-settings", plugin: { id: "example", name: "Example" } },
-    });
+    if (expected) {
+      expect(handle).toHaveBeenCalledWith("Help with this", { uiContext: expected });
+    } else {
+      expect(handle).toHaveBeenCalledWith("Help with this");
+    }
   });
 
   it("persists completed turns from the engine's sanitized history", async () => {

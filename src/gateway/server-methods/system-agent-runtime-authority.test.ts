@@ -167,35 +167,42 @@ function fixture() {
 async function withStartedRuntime(
   run: (request: ReturnType<typeof fixture>, session: WizardSession) => Promise<void>,
 ) {
+  await withRuntime(async (request) => {
+    await request.start();
+    const session = startedSession(request);
+    await Promise.race([
+      request.loaded.promise,
+      session.whenSettled().then(() => {
+        throw new Error("Runtime setup settled before plugin generation preparation");
+      }),
+    ]);
+    request.source.release();
+    expect(request.source.isCurrent()).toBe(true);
+    expect(request.unsubscribe).not.toHaveBeenCalled();
+    await run(request, session);
+    expect(request.source.isCurrent()).toBe(false);
+    expect(request.unsubscribe).toHaveBeenCalledOnce();
+  });
+}
+
+async function withRuntime(run: (request: ReturnType<typeof fixture>) => Promise<void>) {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const request = fixture();
     try {
-      await request.start();
-      expect(request.respond).toHaveBeenCalledWith(
-        true,
-        { sessionId: request.sessionId, done: false, status: "running" },
-        undefined,
-      );
-      const session = expectDefined(
-        request.context.wizardSessions.get(request.sessionId),
-        "runtime wizard",
-      );
-      await Promise.race([
-        request.loaded.promise,
-        session.whenSettled().then(() => {
-          throw new Error("Runtime setup settled before plugin generation preparation");
-        }),
-      ]);
-      request.source.release();
-      expect(request.source.isCurrent()).toBe(true);
-      expect(request.unsubscribe).not.toHaveBeenCalled();
-      await run(request, session);
-      expect(request.source.isCurrent()).toBe(false);
-      expect(request.unsubscribe).toHaveBeenCalledOnce();
+      await run(request);
     } finally {
       await request.cleanup();
     }
   });
+}
+
+function startedSession(request: ReturnType<typeof fixture>) {
+  expect(request.respond).toHaveBeenCalledWith(
+    true,
+    { sessionId: request.sessionId, done: false, status: "running" },
+    undefined,
+  );
+  return expectDefined(request.context.wizardSessions.get(request.sessionId), "runtime wizard");
 }
 
 async function expectRevokedRuntime(request: ReturnType<typeof fixture>, session: WizardSession) {
@@ -221,43 +228,30 @@ it("keeps the runtime effect under its retained grant after start", async () => 
   });
 });
 
-it("rejects the runtime effect after device revocation", async () => {
-  await withStartedRuntime(async (request, session) => {
-    invalidateGatewayDeviceRevocation(request.context, "runtime-device", "operator");
-    await expectRevokedRuntime(request, session);
-  });
-});
-
-it("rejects the runtime effect after operator scope revocation", async () => {
-  await withStartedRuntime(async (request, session) => {
-    request.client.connect.scopes = ["operator.read"];
-    await expectRevokedRuntime(request, session);
-  });
-});
+it.each(["device", "operator scope"])(
+  "rejects the runtime effect after %s revocation",
+  async (kind) => {
+    await withStartedRuntime(async (request, session) => {
+      if (kind === "device") {
+        invalidateGatewayDeviceRevocation(request.context, "runtime-device", "operator");
+      } else {
+        request.client.connect.scopes = ["operator.read"];
+      }
+      await expectRevokedRuntime(request, session);
+    });
+  },
+);
 
 it("publishes a runtime wizard that completed before its start reply", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const request = fixture();
+  await withRuntime(async (request) => {
     io.settleBeforePublication = true;
     request.continueSetup.resolve();
-    try {
-      await request.start();
-      expect(request.respond).toHaveBeenCalledWith(
-        true,
-        { sessionId: request.sessionId, done: false, status: "running" },
-        undefined,
-      );
-      const session = expectDefined(
-        request.context.wizardSessions.get(request.sessionId),
-        "completed runtime wizard",
-      );
-      expect(await session.next()).toMatchObject({ done: true, status: "done" });
-      expect(io.write).toHaveBeenCalledOnce();
-      request.source.release();
-      expect(request.unsubscribe).toHaveBeenCalledOnce();
-    } finally {
-      await request.cleanup();
-    }
+    await request.start();
+    const session = startedSession(request);
+    expect(await session.next()).toMatchObject({ done: true, status: "done" });
+    expect(io.write).toHaveBeenCalledOnce();
+    request.source.release();
+    expect(request.unsubscribe).toHaveBeenCalledOnce();
   });
 });
 
@@ -271,8 +265,7 @@ function expectSetupNotStarted(request: ReturnType<typeof fixture>) {
 }
 
 it("does not begin runtime setup when admission is busy", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const request = fixture();
+  await withRuntime(async (request) => {
     const finishOther = createDeferredCore();
     const other = expectDefined(
       await createAdmittedWizardSession(() => new WizardSession(async () => finishOther.promise)),
@@ -292,20 +285,14 @@ it("does not begin runtime setup when admission is busy", async () => {
     } finally {
       finishOther.resolve();
       await whenAdmittedWizardSessionSettled(other);
-      await request.cleanup();
     }
   });
 });
 
 it("does not begin runtime setup when disconnected before admission", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const request = fixture();
-    try {
-      request.connection.abort(new Error("Connection closed before admission"));
-      await expect(request.start()).rejects.toThrow("Connection closed before admission");
-      expectSetupNotStarted(request);
-    } finally {
-      await request.cleanup();
-    }
+  await withRuntime(async (request) => {
+    request.connection.abort(new Error("Connection closed before admission"));
+    await expect(request.start()).rejects.toThrow("Connection closed before admission");
+    expectSetupNotStarted(request);
   });
 });

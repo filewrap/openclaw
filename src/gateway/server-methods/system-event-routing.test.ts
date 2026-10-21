@@ -67,6 +67,28 @@ function createRequest(params: Record<string, unknown>, cfg = mainConfig) {
   return { options, respond, publishPresence };
 }
 
+function expectNoAdmission(sessionKey: string) {
+  expect(peekSystemEvents(sessionKey)).toEqual([]);
+  expect(mocks.captureTarget).not.toHaveBeenCalled();
+  expect(mocks.enqueueEvent).not.toHaveBeenCalled();
+}
+
+function expectResponse(request: ReturnType<typeof createRequest>, message?: string) {
+  expect(request.respond).toHaveBeenCalledExactlyOnceWith(
+    !message,
+    message ? undefined : { ok: true },
+    message ? expect.objectContaining({ message }) : undefined,
+  );
+}
+
+async function rejectWake(sessionKey: string, message: string, extra = {}) {
+  const request = createRequest({ text: "Wake.", sessionKey, wake: true, ...extra });
+  await systemEvent(request.options);
+  expectNoAdmission(sessionKey);
+  expectResponse(request, message);
+  return request;
+}
+
 beforeAll(async () => {
   state = await createOpenClawTestState({ label: "system-event-routing", layout: "state-only" });
   mainConfig = { agents: { entries: { main: {} } } };
@@ -177,43 +199,29 @@ describe("system-event routing", () => {
     if (!binding) {
       throw new Error("Memory session fixture was not acquired");
     }
+    const commit = async (mutation: Parameters<typeof binding.actor.storage.mutate>[0]) => {
+      expect(await binding.actor.storage.mutate(mutation, authority)).toMatchObject({
+        kind: "committed",
+      });
+    };
     try {
-      expect(
-        await binding.actor.storage.mutate(
-          {
-            type: "session.entry.create",
-            input: {
-              entry: { sessionId: "memory-wake", updatedAt: 1, incognito: true },
-            },
-          },
-          authority,
-        ),
-      ).toMatchObject({ kind: "committed" });
-      const respond = vi.fn();
-      const request = {
-        params: { text: "Synthetic memory wake", sessionKey, wake: true },
-        respond,
-        context: {
-          publishPresence: vi.fn(),
-          getRuntimeConfig: () => mainConfig,
-        },
-      } as unknown as GatewayRequestHandlerOptions;
-      const handler = expectDefined(systemHandlers["system-event"], "system-event handler missing");
-      await handler(request);
+      await commit({
+        type: "session.entry.create",
+        input: { entry: { sessionId: "memory-wake", updatedAt: 1, incognito: true } },
+      });
+      const { options, respond } = createRequest({
+        text: "Synthetic memory wake",
+        sessionKey,
+        wake: true,
+      });
+      await systemEvent(options);
       expect(respond).toHaveBeenLastCalledWith(true, { ok: true }, undefined);
       expect(mocks.enqueueEvent).toHaveBeenCalledTimes(1);
-      expect(
-        await binding.actor.storage.mutate(
-          {
-            type: "session.entry.patch",
-            input: {
-              operation: { kind: "fields", patch: { archivedAt: 2 } },
-            },
-          },
-          authority,
-        ),
-      ).toMatchObject({ kind: "committed" });
-      await handler(request);
+      await commit({
+        type: "session.entry.patch",
+        input: { operation: { kind: "fields", patch: { archivedAt: 2 } } },
+      });
+      await systemEvent(options);
       expect(respond).toHaveBeenLastCalledWith(
         false,
         undefined,
@@ -253,7 +261,7 @@ describe("system-event routing", () => {
       },
     });
     expect(peekSystemEvents(sessionKey)).toEqual([]);
-    expect(request.respond).toHaveBeenCalledExactlyOnceWith(true, { ok: true }, undefined);
+    expectResponse(request);
   });
 
   it.each([false, true])(
@@ -288,23 +296,12 @@ describe("system-event routing", () => {
         expect(peekSystemEvents("agent:main:global")).toEqual(["System owner notice."]);
       }
       expect(peekSystemEvents("agent:main:main")).toEqual([]);
-      expect(request.respond).toHaveBeenCalledExactlyOnceWith(true, { ok: true }, undefined);
+      expectResponse(request);
     },
   );
 
   it("rejects immediate wakes for unconfigured agents", async () => {
-    const request = createRequest({ text: "Wake.", sessionKey: "agent:bogus:main", wake: true });
-
-    await systemEvent(request.options);
-
-    expect(peekSystemEvents("agent:bogus:main")).toEqual([]);
-    expect(mocks.captureTarget).not.toHaveBeenCalled();
-    expect(mocks.enqueueEvent).not.toHaveBeenCalled();
-    expect(request.respond).toHaveBeenCalledExactlyOnceWith(
-      false,
-      undefined,
-      expect.objectContaining({ message: 'Unknown agent id "bogus"' }),
-    );
+    await rejectWake("agent:bogus:main", 'Unknown agent id "bogus"');
   });
 
   it.each([undefined, 0, 1])(
@@ -312,19 +309,8 @@ describe("system-event routing", () => {
     async (archivedAt) => {
       const sessionKey =
         archivedAt === undefined ? "agent:main:missing" : `agent:main:archived-${archivedAt}`;
-      const request = createRequest({ text: "Wake.", sessionKey, wake: true });
-
-      await systemEvent(request.options);
-
-      expect(peekSystemEvents(sessionKey)).toEqual([]);
-      expect(mocks.captureTarget).not.toHaveBeenCalled();
-      expect(mocks.enqueueEvent).not.toHaveBeenCalled();
+      const request = await rejectWake(sessionKey, `Unknown or archived session "${sessionKey}"`);
       expect(request.publishPresence).not.toHaveBeenCalled();
-      expect(request.respond).toHaveBeenCalledExactlyOnceWith(
-        false,
-        undefined,
-        expect.objectContaining({ message: `Unknown or archived session "${sessionKey}"` }),
-      );
       const entry = loadSessionEntryReadOnly({ agentId: "main", sessionKey });
       if (archivedAt === undefined) {
         expect(entry).toBeUndefined();
@@ -336,24 +322,11 @@ describe("system-event routing", () => {
 
   it("rejects wake requests mixed with node presence events before admission", async () => {
     const sessionKey = "agent:main:main";
-    const request = createRequest({
+    const request = await rejectWake(sessionKey, "wake is not supported for node presence events", {
       text: "Node: Operator Mac",
       deviceId: "device-1",
-      sessionKey,
-      wake: true,
     });
-
-    await systemEvent(request.options);
-
-    expect(peekSystemEvents(sessionKey)).toEqual([]);
-    expect(mocks.captureTarget).not.toHaveBeenCalled();
-    expect(mocks.enqueueEvent).not.toHaveBeenCalled();
     expect(request.publishPresence).not.toHaveBeenCalled();
-    expect(request.respond).toHaveBeenCalledExactlyOnceWith(
-      false,
-      undefined,
-      expect.objectContaining({ message: "wake is not supported for node presence events" }),
-    );
   });
 
   it("rechecks requester authority after asynchronous target capture", async () => {
@@ -406,40 +379,33 @@ describe("system-event routing", () => {
   });
 
   it.each([
-    { kind: "macOS beacon", clientId: "openclaw-macos", text: "Node: Operator Mac", own: true },
-    {
-      kind: "explicit device",
-      clientId: "openclaw-macos",
-      text: "Node: Other Mac",
-      explicit: true,
-    },
-    { kind: "ordinary event", clientId: "openclaw-macos", text: "Update complete" },
-    { kind: "other client", clientId: "cli", text: "Node: Other Mac" },
-    {
-      kind: "device-less client",
-      clientId: "openclaw-macos",
-      text: "Node: Operator Mac",
-      noDevice: true,
-    },
-  ] as const)("preserves the intended presence identity for $kind", async (scenario) => {
-    const instanceId = `presence-device-${randomUUID()}`;
-    const deviceId = `device-${randomUUID()}`;
-    const explicitDeviceId = "explicit" in scenario ? `remote-${randomUUID()}` : undefined;
-    const request = createRequest({ text: scenario.text, instanceId, deviceId: explicitDeviceId });
-    request.options.client = {
-      connect: {
-        client: { id: scenario.clientId },
-        ...("noDevice" in scenario ? {} : { device: { id: deviceId } }),
-      },
-    } as NonNullable<GatewayRequestHandlerOptions["client"]>;
-    await systemEvent(request.options);
+    ["macOS beacon", "openclaw-macos", "Node: Operator Mac", "own"],
+    ["explicit device", "openclaw-macos", "Node: Other Mac", "explicit"],
+    ["ordinary event", "openclaw-macos", "Update complete", "none"],
+    ["other client", "cli", "Node: Other Mac", "none"],
+    ["device-less client", "openclaw-macos", "Node: Operator Mac", "no-device"],
+  ] as const)(
+    "preserves the intended presence identity for %s",
+    async (_kind, clientId, text, identity) => {
+      const instanceId = `presence-device-${randomUUID()}`;
+      const deviceId = `device-${randomUUID()}`;
+      const explicitDeviceId = identity === "explicit" ? `remote-${randomUUID()}` : undefined;
+      const request = createRequest({ text, instanceId, deviceId: explicitDeviceId });
+      request.options.client = {
+        connect: {
+          client: { id: clientId },
+          ...(identity === "no-device" ? {} : { device: { id: deviceId } }),
+        },
+      } as NonNullable<GatewayRequestHandlerOptions["client"]>;
+      await systemEvent(request.options);
 
-    const entry = expectDefined(
-      listSystemPresence().find((candidate) => candidate.instanceId === instanceId),
-      "system-event presence entry",
-    );
-    expect(entry.deviceId).toBe(explicitDeviceId ?? ("own" in scenario ? deviceId : undefined));
-  });
+      const entry = expectDefined(
+        listSystemPresence().find((candidate) => candidate.instanceId === instanceId),
+        "system-event presence entry",
+      );
+      expect(entry.deviceId).toBe(explicitDeviceId ?? (identity === "own" ? deviceId : undefined));
+    },
+  );
 });
 
 describe("set-heartbeats compatibility authority", () => {
