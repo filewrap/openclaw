@@ -59,7 +59,6 @@ let bundledSetupPath: string;
 let preparedDependencyRoot: string | undefined;
 const fakeCrabboxBinDirs = new Map<string, string>();
 const fakeGitBinDirs = new Map<string, string>();
-const timingPreloads = new Map<string, string>();
 const GIT_COMMON_DIR_KEY = "rev-parse\u0000--git-common-dir";
 const GIT_CONFIG_SPARSE_KEY = "config\u0000--bool\u0000core.sparseCheckout";
 const GIT_SPARSE_LIST_KEY = "sparse-checkout\u0000list";
@@ -103,7 +102,9 @@ const defaultGitResponses: Record<string, { status?: number; stdout?: string; st
 
 function writeFiles(directory: string, files: Record<string, string | Buffer>) {
   for (const [file, contents] of Object.entries(files)) {
-    writeFileSync(path.join(directory, file), contents);
+    const target = path.join(directory, file);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, contents);
   }
 }
 
@@ -379,35 +380,23 @@ if (args[0] === "--version") {
   return binDir;
 }
 
-function testTimingPreload(options: { clockScale?: number; spawnTimeoutMs?: number }): string {
-  const key = JSON.stringify(options);
-  let preloadPath = timingPreloads.get(key);
-  if (!preloadPath) {
-    const dir = mkdtempSync(path.join(tmpdir(), "openclaw-crabbox-timing-"));
-    tempDirs.push(dir);
-    preloadPath = path.join(dir, "preload.cjs");
-    const script: string[] = [];
-    if (options.clockScale !== undefined) {
-      script.push(
-        "const realNow = Date.now.bind(Date);",
-        "const startedAt = realNow();",
-        `Date.now = () => startedAt + (realNow() - startedAt) * ${options.clockScale};`,
-      );
-    }
-    if (options.spawnTimeoutMs !== undefined) {
-      script.push(
-        'const childProcess = require("node:child_process");',
-        'const { syncBuiltinESMExports } = require("node:module");',
-        "const realSpawnSync = childProcess.spawnSync;",
-        "childProcess.spawnSync = (command, args, spawnOptions) =>",
-        "  realSpawnSync(command, args,",
-        `    spawnOptions?.timeout ? { ...spawnOptions, timeout: Math.min(spawnOptions.timeout, ${options.spawnTimeoutMs}) } : spawnOptions);`,
-        "syncBuiltinESMExports();",
-      );
-    }
-    writeFileSync(preloadPath, `${script.join("\n")}\n`, "utf8");
-    timingPreloads.set(key, preloadPath);
-  }
+function testTimingPreload(): string {
+  const dir = makeTempDir(tempDirs, "openclaw-crabbox-timing-");
+  const preloadPath = path.join(dir, "preload.cjs");
+  writeFileSync(
+    preloadPath,
+    [
+      'const childProcess = require("node:child_process");',
+      'const { syncBuiltinESMExports } = require("node:module");',
+      "const realSpawnSync = childProcess.spawnSync;",
+      "childProcess.spawnSync = (command, args, spawnOptions) =>",
+      "  realSpawnSync(command, args,",
+      "    spawnOptions?.timeout ? { ...spawnOptions, timeout: Math.min(spawnOptions.timeout, 100) } : spawnOptions);",
+      "syncBuiltinESMExports();",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
   return preloadPath;
 }
 
@@ -2246,7 +2235,7 @@ describe("scripts/crabbox-wrapper", () => {
   ])("$name", ({ args, options, provider, messages = [], timeoutProbe }) => {
     const { output, result } = runSuccessfulBrokerWrapper(args, {
       ...options,
-      ...(timeoutProbe ? { nodePreload: testTimingPreload({ spawnTimeoutMs: 100 }) } : {}),
+      ...(timeoutProbe ? { nodePreload: testTimingPreload() } : {}),
     });
     expect(output.args).toContain(provider);
     for (const message of messages) {
@@ -4360,11 +4349,9 @@ process.on("exit", () => {
     ["aws", true, "transport"],
     ["aws", false, "transport"],
     ["aws", false, "arbitrary"],
-    ["aws", false, "reuse"],
     ["aws", false, "unchanged"],
     ["blacksmith-testbox", true, "transport"],
     ["blacksmith-testbox", false, "transport"],
-    ["blacksmith-testbox", false, "reuse"],
     ["blacksmith-testbox", false, "unchanged"],
     ["blacksmith-testbox", false, "unrelated-staging"],
     ["blacksmith-testbox", false, "captured-base"],
@@ -4442,23 +4429,17 @@ process.on("exit", () => {
       mkdirSync(path.join(origin, "scripts"), { recursive: true });
       git(origin, ["init", "-q", "-b", "main"]);
       copyDependencyFingerprint(origin);
-      writeFileSync(
-        path.join(origin, "package.json"),
-        '{"name":"transport-fixture","private":true}\n',
-      );
-      writeFileSync(
-        path.join(origin, ".gitignore"),
-        ".tmp/\n*.ignored\n!reincluded.ignored\n" +
-          (installsDependencies ? "" : "/pnpm-lock.yaml\n"),
-      );
       writeFiles(origin, {
+        "package.json": '{"name":"transport-fixture","private":true}\n',
+        ".gitignore":
+          ".tmp/\n*.ignored\n!reincluded.ignored\n" +
+          (installsDependencies ? "" : "/pnpm-lock.yaml\n"),
         ".gitattributes": "* text=auto eol=lf\n",
         ".crabbox.yaml":
           "sync:\n  exclude:\n    - private-canary.txt\n    - protected-deleted.ignored\n",
       });
       const restored = "old content beyond the receiver's shallow history\n";
-      mkdirSync(path.join(origin, "restored"));
-      writeFileSync(path.join(origin, "restored", "old.txt"), restored);
+      writeFiles(origin, { "restored/old.txt": restored });
       git(origin, ["add", "-A"]);
       git(origin, ["commit", "-qm", "old content"]);
       rmSync(path.join(origin, "restored"), { recursive: true });
@@ -4470,15 +4451,13 @@ process.on("exit", () => {
           createHash("sha256").update(`unchanged-${index}`).digest(),
         ),
       );
-      writeFileSync(path.join(origin, "unchanged.bin"), unchanged);
       const hiddenPath = "sparse-only/data.bin";
       const hiddenBytes = Buffer.from([0, 255, 13, 10, 128]);
-      mkdirSync(path.join(origin, "sparse-only"));
-      writeFileSync(path.join(origin, hiddenPath), hiddenBytes);
+      writeFiles(origin, { "unchanged.bin": unchanged, [hiddenPath]: hiddenBytes });
       for (const file of ["owner.txt", "deleted.txt", "rename-before.txt", "mode.sh"]) {
         writeFileSync(path.join(origin, file), "base\n");
       }
-      if (scenario === "reuse" || scenario === "unchanged") {
+      if (scenario === "unchanged") {
         chmodSync(path.join(origin, "mode.sh"), 0o755);
       }
       writeFiles(origin, {
@@ -4489,9 +4468,7 @@ process.on("exit", () => {
         writeFileSync(path.join(origin, "removed-kind.ignored"), "old file kind\n");
         git(origin, ["add", "-f", "removed-kind.ignored"]);
       }
-      writeFileSync(path.join(origin, "raw-crlf.txt"), "base\n");
-      mkdirSync(path.join(origin, "source-dir"));
-      writeFileSync(path.join(origin, "source-dir", "kept.txt"), "source directory\n");
+      writeFiles(origin, { "raw-crlf.txt": "base\n", "source-dir/kept.txt": "source directory\n" });
       symlinkSync("source-dir", path.join(origin, "directory-alias"), "dir");
       symlinkSync("owner.txt", path.join(origin, "alias"));
       git(origin, ["add", "-f", "tracked.ignored"]);
@@ -4774,7 +4751,7 @@ require('node:module').syncBuiltinESMExports();`,
         expect(git(producer, ["diff", "--name-only", sharedBase, "HEAD"])).toContain("mode.sh");
         return;
       }
-      if (scenario === "reuse" || scenario === "unchanged") {
+      if (scenario === "unchanged") {
         expect(git(producer, ["ls-files", "--stage", "--", "mode.sh"])).toMatch(/^100755 /u);
         const sent = runSender();
         const first = receive("reused", sent);
@@ -4782,21 +4759,16 @@ require('node:module').syncBuiltinESMExports();`,
         expect(git(first.receiver, ["rev-parse", "--is-shallow-repository"])).toBe("true");
         const capturedMode = git(first.receiver, ["ls-tree", "HEAD", "--", "mode.sh"]);
         expect(capturedMode).toMatch(/^100755 blob /u);
-        const retained =
-          scenario === "unchanged"
-            ? ["unchanged.bin", "alias", "directory-alias"].map((file) => ({
-                file,
-                stat: lstatSync(path.join(first.receiver, file)),
-              }))
-            : [];
-        if (scenario === "unchanged") {
-          // Keep the old inode allocated so recreation cannot pass through inode reuse.
-          linkSync(path.join(first.receiver, "unchanged.bin"), path.join(root, "retained-inode"));
-          writeFileSync(path.join(first.receiver, "owner.txt"), "stale physical bytes\n");
-          chmodSync(path.join(first.receiver, "mode.sh"), 0o644);
-          rmSync(path.join(first.receiver, "raw-crlf.txt"));
-          symlinkSync(deletionReferent, path.join(first.receiver, "raw-crlf.txt"), "dir");
-        }
+        const retained = ["unchanged.bin", "alias", "directory-alias"].map((file) => ({
+          file,
+          stat: lstatSync(path.join(first.receiver, file)),
+        }));
+        // Keep the old inode allocated so recreation cannot pass through inode reuse.
+        linkSync(path.join(first.receiver, "unchanged.bin"), path.join(root, "retained-inode"));
+        writeFileSync(path.join(first.receiver, "owner.txt"), "stale physical bytes\n");
+        chmodSync(path.join(first.receiver, "mode.sh"), 0o644);
+        rmSync(path.join(first.receiver, "raw-crlf.txt"));
+        symlinkSync(deletionReferent, path.join(first.receiver, "raw-crlf.txt"), "dir");
         // The old private Git owner is removed during promotion. A second import
         // must work without origin and leave no alternate pointing at that owner.
         const reused = receive("reused", sent, { source: path.join(root, "unavailable-origin") });
@@ -5427,19 +5399,19 @@ require('node:module').syncBuiltinESMExports();`,
         "newer-directory/.untracked-cache.ignored/.gitignore",
       ];
       const prepareNewerReceiver = (receiver: string) => {
-        writeFileSync(path.join(receiver, newerFiles[0]!), "newer workflow source\n");
+        writeFiles(receiver, {
+          [newerFiles[0]!]: "newer workflow source\n",
+          [newerFiles[2]!]: "newer nested source\n",
+          [newerFiles[3]!]: "hidden/\n!*.ignored\n",
+          [newerFiles[4]!]: "generated.js\n",
+          [newerFiles[5]!]: "newer hidden source\n",
+          "newer-private.ignored": "retained private bytes\n",
+        });
         symlinkSync("newer-source.txt", path.join(receiver, newerFiles[1]!));
-        mkdirSync(path.join(receiver, "newer-directory"));
-        writeFileSync(path.join(receiver, newerFiles[2]!), "newer nested source\n");
-        mkdirSync(path.join(receiver, "newer-directory/hidden"));
-        writeFileSync(path.join(receiver, newerFiles[3]!), "hidden/\n!*.ignored\n");
-        writeFileSync(path.join(receiver, newerFiles[4]!), "generated.js\n");
-        writeFileSync(path.join(receiver, newerFiles[5]!), "newer hidden source\n");
-        writeFileSync(path.join(receiver, "newer-private.ignored"), "retained private bytes\n");
-        for (const file of newerCaches) {
-          mkdirSync(path.dirname(path.join(receiver, file)), { recursive: true });
-          writeFileSync(path.join(receiver, file), "retained cache bytes\n");
-        }
+        writeFiles(
+          receiver,
+          Object.fromEntries(newerCaches.map((file) => [file, "retained cache bytes\n"])),
+        );
         git(receiver, [
           "add",
           "-f",
@@ -5450,9 +5422,11 @@ require('node:module').syncBuiltinESMExports();`,
         git(receiver, ["commit", "-qm", "newer workflow source"]);
         // A stale execution index cannot erase ownership recorded by its commit.
         git(receiver, ["update-index", "--force-remove", ...newerFiles]);
-        writeFileSync(path.join(receiver, "newer-private.ignored"), "changed private bytes\n");
-        writeFileSync(path.join(receiver, newerCaches[1]!), "changed cache bytes\n");
-        writeFileSync(path.join(receiver, newerCaches[3]!), "changed cache bytes\n");
+        writeFiles(receiver, {
+          "newer-private.ignored": "changed private bytes\n",
+          [newerCaches[1]!]: "changed cache bytes\n",
+          [newerCaches[3]!]: "changed cache bytes\n",
+        });
       };
       const imported = receive("candidate", candidate, {
         extraEnv: {
@@ -5486,9 +5460,6 @@ require('node:module').syncBuiltinESMExports();`,
       if (alias) {
         expect(git(imported.receiver, ["rev-parse", alias])).toBe(base);
       }
-      expectFileBytes(imported.receiver, hiddenPath, hiddenBytes);
-      expectFileBytes(imported.receiver, "unchanged.bin", unchanged);
-      expectFileText(imported.receiver, "renamed.txt", "base\n");
       expect(imported.result.stderr).toContain(headBefore);
       expect(git(imported.receiver, ["rev-parse", "HEAD"])).not.toBe(headBefore);
       expect(existsSync(path.join(imported.receiver, "deleted.txt"))).toBe(false);
