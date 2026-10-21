@@ -1,5 +1,16 @@
 import type { JSX as SolidJSX } from "@solidjs/web";
-import { createMemo, For, onCleanup, Show, untrack } from "solid-js";
+import {
+  type Accessor,
+  createMemo,
+  Errored,
+  For,
+  isPending,
+  latest,
+  Loading,
+  onCleanup,
+  Show,
+  untrack,
+} from "solid-js";
 import {
   pathForAgentPanel,
   pathForPluginCatalogEntry,
@@ -219,9 +230,20 @@ function PaletteHint(props: { shortcut: SolidJSX.Element; label: string }) {
 
 function PaletteSearch(props: {
   readProps: () => CommandPaletteProps;
+  catalogRead: Accessor<void | undefined>;
+  modelRead: Accessor<unknown>;
   optionElements: Map<string, HTMLDivElement>;
 }) {
   const current = () => props.readProps();
+  const catalogSearchPending = () =>
+    Boolean(current().searchQuery.trim()) &&
+    !current().promptMode &&
+    (isPending(props.catalogRead) || isPending(props.modelRead));
+  const readCatalog = () => {
+    latest(props.catalogRead);
+    latest(props.modelRead);
+    return null;
+  };
   const results = createMemo(() => resolvePaletteResults(current()));
   const notices = () =>
     [
@@ -242,7 +264,7 @@ function PaletteSearch(props: {
   const searchSettled = () =>
     Boolean(current().searchQuery.trim()) &&
     !current().sessionSearchPending &&
-    !current().catalogSearchPending &&
+    !catalogSearchPending() &&
     !current().remoteSearchOffline &&
     !current().modelSearchError &&
     !current().sessionSearchFailed &&
@@ -251,6 +273,8 @@ function PaletteSearch(props: {
     current().archivedTranscriptsExcluded === 0;
   return (
     <>
+      {/* A cold catalog read must not hide already available commands. */}
+      <Loading>{readCatalog()}</Loading>
       <Show when={current().searchQuery.trim() && current().onSelectSession}>
         <div class="cmd-palette__filters" role="group" aria-label={t("palette.filterLabel")}>
           <For each={["all", "sessions", "messages"] as const}>
@@ -270,7 +294,7 @@ function PaletteSearch(props: {
           </For>
         </div>
       </Show>
-      <Show when={current().sessionSearchPending || current().catalogSearchPending}>
+      <Show when={current().sessionSearchPending || catalogSearchPending()}>
         <div class="cmd-palette__empty" role="status">
           {t(
             current().sessionSearchPending
@@ -286,9 +310,7 @@ function PaletteSearch(props: {
         role="listbox"
         aria-label={t("palette.placeholder")}
         aria-busy={
-          current().searchDebouncing ||
-          current().sessionSearchPending ||
-          current().catalogSearchPending
+          current().searchDebouncing || current().sessionSearchPending || catalogSearchPending()
             ? "true"
             : "false"
         }
@@ -407,6 +429,10 @@ export function CommandPaletteView(props: { readProps: () => CommandPaletteProps
   const hideSearch = () => results().hideSearch;
   // The collapsing search remains mounted with its last presented projection.
   const search = createParkedProjection(current, () => !hideSearch());
+  const catalogRequest = createMemo(() => search().catalogSearchRead);
+  const catalogRead = createMemo(() => catalogRequest()?.promise);
+  const modelRequest = createMemo(() => search().modelSearchRead);
+  const modelRead = createMemo(() => modelRequest()?.promise);
   const optionElements = new Map<string, HTMLDivElement>();
   const activeElement = () => {
     const item = results().items[results().activeIndex];
@@ -542,7 +568,28 @@ export function CommandPaletteView(props: { readProps: () => CommandPaletteProps
             aria-hidden={hideSearch() ? "true" : undefined}
           >
             <div class="cmd-palette__search-content">
-              <PaletteSearch readProps={search} optionElements={optionElements} />
+              <Errored
+                fallback={() => (
+                  <div class="cmd-palette__source-error" role="status">
+                    {t("palette.modelSearchFailed")}
+                  </div>
+                )}
+              >
+                <Loading
+                  fallback={
+                    <div class="cmd-palette__empty" role="status">
+                      {t("palette.searchingCommands")}
+                    </div>
+                  }
+                >
+                  <PaletteSearch
+                    readProps={search}
+                    catalogRead={catalogRead}
+                    modelRead={modelRead}
+                    optionElements={optionElements}
+                  />
+                </Loading>
+              </Errored>
             </div>
           </div>
           <Show when={error()}>
