@@ -99,24 +99,15 @@ describe("requester call delivery", () => {
     text: string,
     id = text,
   ) {
-    await manager.processEvent(
-      speaker === "bot"
-        ? {
-            id,
-            callId: call.callId,
-            timestamp: Date.now(),
-            type: "call.assistant-speech",
-            transcript: text,
-          }
-        : {
-            id,
-            callId: call.callId,
-            timestamp: Date.now(),
-            type: "call.speech",
-            transcript: text,
-            isFinal: true,
-          },
-    );
+    await manager.processEvent({
+      id,
+      callId: call.callId,
+      timestamp: Date.now(),
+      transcript: text,
+      ...(speaker === "bot"
+        ? { type: "call.assistant-speech" as const }
+        : { type: "call.speech" as const, isFinal: true }),
+    });
   }
 
   async function end(manager: Awaited<ReturnType<typeof setup>>["manager"], call: CallRecord) {
