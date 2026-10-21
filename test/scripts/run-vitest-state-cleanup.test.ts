@@ -822,11 +822,12 @@ posixIt.each([
   "missing owner",
   "missing registry",
   "missing parent registry",
-])("requires positive nested release evidence: %s", async (mode) => {
+  "group verification failure",
+])("requires positive process and nested release evidence: %s", async (mode) => {
   const root = tempDirs.make("oc-vt-receipt-");
   const parent = createVitestResourceOwner(root);
   const receipt = path.join(root, "namespace");
-  const { completion } = spawnOwnedVitestProcess({
+  const { child, completion } = spawnOwnedVitestProcess({
     command: testNodeExecPath,
     args: [
       "--input-type=module",
@@ -838,11 +839,11 @@ posixIt.each([
       import { findVitestResourceOwner } from ${JSON.stringify(path.join(repoRoot, "scripts/lib/vitest-resource-ownership.mts"))};
       const root = os.tmpdir(), mode = ${JSON.stringify(mode)};
       fs.writeFileSync(${JSON.stringify(receipt)}, root);
-      const release = findVitestResourceOwner().claim();
+      const release = mode === 'group verification failure' ? undefined : findVitestResourceOwner().claim();
       const metadata = path.join(root, '.vitest-resource-owner');
       const claims = path.join(metadata, 'claims');
-      const released = path.join(claims, fs.readdirSync(claims)[0], 'released');
-      if (mode !== 'pending') release();
+      const released = release && path.join(claims, fs.readdirSync(claims)[0], 'released');
+      if (mode !== 'pending') release?.();
       if (mode === 'missing receipt' || mode === 'unreadable receipt') fs.unlinkSync(released);
       if (mode === 'unreadable receipt') fs.mkdirSync(released);
       if (mode === 'corrupt receipt') fs.writeFileSync(released, 'not a completion receipt');
@@ -853,20 +854,48 @@ posixIt.each([
     ],
     options: { env: { TMPDIR: root }, stdio: "ignore" },
   });
-  if (mode === "released") {
-    await expect(completion).resolves.toMatchObject({ code: 0 });
-    expect(() => parent.assertReleased()).not.toThrow();
-  } else {
-    await expect(completion).rejects.toThrow("retained temporary namespace");
-    if (mode === "missing parent registry") {
-      await expect(completion).rejects.toThrow(`retained temporary namespace ${root};`);
-      expect(() => parent.assertReleased()).toThrow(/ENOENT/);
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+  });
+  const nativeKill = process.kill.bind(process);
+  const failure = Object.assign(new Error("injected group probe failure"), { code: "EIO" });
+  const kill =
+    mode === "group verification failure"
+      ? vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+          if (pid === -child.pid! && signal === 0) {
+            throw failure;
+          }
+          return nativeKill(pid, signal);
+        })
+      : undefined;
+  try {
+    if (mode === "group verification failure") {
+      await expect(completion).rejects.toMatchObject({
+        message: expect.stringContaining(
+          "Stop the remaining writers before removing this exact directory",
+        ),
+        cause: failure,
+      });
+      await closed;
+      expect(path.dirname(fs.readFileSync(receipt, "utf8"))).toBe(root);
+    } else if (mode === "released") {
+      await expect(completion).resolves.toMatchObject({ code: 0 });
+      expect(() => parent.assertReleased()).not.toThrow();
     } else {
-      expect(() => parent.assertReleased()).toThrow("Unreleased Vitest resource claim");
+      await expect(completion).rejects.toThrow("retained temporary namespace");
+      if (mode === "missing parent registry") {
+        await expect(completion).rejects.toThrow(`retained temporary namespace ${root};`);
+        expect(() => parent.assertReleased()).toThrow(/ENOENT/);
+      } else {
+        expect(() => parent.assertReleased()).toThrow("Unreleased Vitest resource claim");
+      }
     }
+    const namespace = fs.readFileSync(receipt, "utf8");
+    expect(fs.existsSync(namespace)).toBe(!["released", "missing parent registry"].includes(mode));
+  } finally {
+    kill?.mockRestore();
+    await closed;
   }
-  const namespace = fs.readFileSync(receipt, "utf8");
-  expect(fs.existsSync(namespace)).toBe(!["released", "missing parent registry"].includes(mode));
 });
 
 posixIt("rejects resource registration before allocating inputs or launching work", async () => {
@@ -898,46 +927,3 @@ posixIt("rejects resource registration before allocating inputs or launching wor
     vi.unstubAllEnvs();
   }
 });
-
-posixIt(
-  "retains the exact namespace with recovery guidance when group verification fails",
-  async () => {
-    const root = tempDirs.make("oc-vt-unverified-");
-    createVitestResourceOwner(root);
-    const receipt = path.join(root, "namespace");
-    const { child, completion } = spawnOwnedVitestProcess({
-      command: testNodeExecPath,
-      args: [
-        "-e",
-        `require("node:fs").writeFileSync(${JSON.stringify(receipt)}, require("node:os").tmpdir())`,
-      ],
-      options: { env: { TMPDIR: root }, stdio: "ignore" },
-    });
-    const closed = new Promise<void>((resolve) => {
-      child.once("close", () => resolve());
-    });
-    const nativeKill = process.kill.bind(process);
-    const failure = Object.assign(new Error("injected group probe failure"), { code: "EIO" });
-    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
-      if (pid === -child.pid! && signal === 0) {
-        throw failure;
-      }
-      return nativeKill(pid, signal);
-    });
-    try {
-      await expect(completion).rejects.toMatchObject({
-        message: expect.stringContaining(
-          "Stop the remaining writers before removing this exact directory",
-        ),
-        cause: failure,
-      });
-      await closed;
-      const namespace = fs.readFileSync(receipt, "utf8");
-      expect(path.dirname(namespace)).toBe(root);
-      expect(fs.existsSync(namespace)).toBe(true);
-    } finally {
-      kill.mockRestore();
-      await closed;
-    }
-  },
-);

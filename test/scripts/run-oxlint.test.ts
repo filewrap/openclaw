@@ -33,6 +33,10 @@ import {
 import { waitForDead } from "../helpers/process-wait.js";
 import { startProcessWatchdogFixture } from "../helpers/process-watchdog.js";
 import { withinTest } from "../helpers/promise.js";
+import {
+  fixtureReadyBeforeSettlement,
+  isProcessPresent as isProcessAlive,
+} from "./run-process.test-support.js";
 import { createScriptTestHarness } from "./test-helpers.js";
 
 const { createTempDir } = createScriptTestHarness();
@@ -44,26 +48,13 @@ afterAll(async () => {
   await receipts.close();
 });
 
-async function fixtureEventBeforeSettlement(
-  file: string,
-  operation: PromiseLike<unknown>,
-  message = `timeout waiting for ${file}`,
-) {
-  // Record writes precede notification; the independent receipt pipe may drain after completion.
-  const recorded = () => existsSync(file) && readFileSync(file, "utf8").length > 0;
-  const settled = Promise.resolve(operation).then(
-    () => {
-      if (!recorded()) {
-        throw new Error(message);
-      }
-    },
-    (error: unknown) => {
-      if (!recorded()) {
-        throw error;
-      }
-    },
+function fixtureEventBeforeSettlement(file: string, operation: PromiseLike<unknown>) {
+  return fixtureReadyBeforeSettlement(
+    receipts,
+    file,
+    operation,
+    () => existsSync(file) && readFileSync(file, "utf8").length > 0,
   );
-  await Promise.race([receipts.waitFor(file, "ready"), settled]);
 }
 const CONSTRAINED_HOST = { totalMemoryBytes: 8 * 1024 ** 3, logicalCpuCount: 4 };
 const ROOMY_HOST = { totalMemoryBytes: 64 * 1024 ** 3, logicalCpuCount: 16 };
@@ -229,15 +220,6 @@ async function runParentTerminationScenario(signal: AbortSignal) {
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function oxlintShard(
   name: string,
   config: "core" | "extensions" | "scripts",
@@ -383,14 +365,7 @@ describe("run-oxlint", () => {
         ).resolves.toBe(124),
       );
       try {
-        await withinTest(
-          fixtureEventBeforeSettlement(
-            childPidPath,
-            completion,
-            `timeout waiting for pid in ${childPidPath}`,
-          ),
-          signal,
-        );
+        await withinTest(fixtureEventBeforeSettlement(childPidPath, completion), signal);
         const childPid = Number(readFileSync(childPidPath, "utf8"));
         expect(isProcessAlive(childPid)).toBe(true);
         await withinTest(releaseAndWait(), signal);

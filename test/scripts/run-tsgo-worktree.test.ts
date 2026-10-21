@@ -23,7 +23,6 @@ import {
 } from "../helpers/fixture-receipts.js";
 import { isProcessAlive, waitForDead } from "../helpers/process-wait.js";
 import { withinTest } from "../helpers/promise.js";
-import { createTempDirTracker } from "../helpers/temp-dir.js";
 import { createNestedGitEnv } from "../helpers/temp-repo.js";
 import {
   materializeNativeCompiler,
@@ -392,23 +391,20 @@ child.once("message", () => process.exit(0));
     { timeout: 20_000 },
     (phase, { signal }) =>
       fixture.run(async () => {
-        const fixtureDirs = createTempDirTracker();
         // Retain detached-compiler diagnostics until wrapper and compiler join.
         const artifacts = path.resolve(".artifacts/tsgo-signal");
         fs.mkdirSync(artifacts, { recursive: true });
-        const cwd = fixtureDirs.make("fixture-", fs.realpathSync(artifacts));
-        let retainFixture = false;
-        try {
-          const pidFile = path.join(cwd, "fake-tsgo.pid");
-          // Own the artifact lock rather than borrowing the enclosing checkout's.
-          write(cwd, "package.json", '{"private":true,"type":"module"}\n');
-          write(cwd, "tsconfig.extensions.json", "{}\n");
-          const readyPipe = path.join(cwd, "compiler-ready.pipe");
-          if (phase === "spawn") {
-            expect(spawnSync("mkfifo", [readyPipe]).status).toBe(0);
-          }
-          writeFakeTsgo(
-            `#!/usr/bin/env node
+        const cwd = fixture.createTempDir("fixture-", fs.realpathSync(artifacts));
+        const pidFile = path.join(cwd, "fake-tsgo.pid");
+        // Own the artifact lock rather than borrowing the enclosing checkout's.
+        write(cwd, "package.json", '{"private":true,"type":"module"}\n');
+        write(cwd, "tsconfig.extensions.json", "{}\n");
+        const readyPipe = path.join(cwd, "compiler-ready.pipe");
+        if (phase === "spawn") {
+          expect(spawnSync("mkfifo", [readyPipe]).status).toBe(0);
+        }
+        writeFakeTsgo(
+          `#!/usr/bin/env node
 import fs from "node:fs";
 ${fixtureReceiptClientSource(receipts.endpoint)}
 for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) process.on(signal, () => {});
@@ -417,14 +413,14 @@ sendReceipt(${JSON.stringify(pidFile)}, "ready");
 ${phase === "spawn" ? 'fs.writeSync(Number(process.env.OPENCLAW_TEST_TSGO_READY_FD), "R");' : ""}
 setInterval(() => {}, 1000);
 `,
-            cwd,
-          );
-          const preloadPath = path.join(cwd, "signal-during-spawn.mjs");
-          // Block spawn before child registration; async IPC cannot wake this boundary.
-          write(
-            cwd,
-            "signal-during-spawn.mjs",
-            `
+          cwd,
+        );
+        const preloadPath = path.join(cwd, "signal-during-spawn.mjs");
+        // Block spawn before child registration; async IPC cannot wake this boundary.
+        write(
+          cwd,
+          "signal-during-spawn.mjs",
+          `
 import childProcess from "node:child_process";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -451,57 +447,55 @@ childProcess.spawn = (...args) => {
 };
 syncBuiltinESMExports();
 `,
+        );
+        const wrapper = spawn(
+          process.execPath,
+          [path.resolve("scripts/run-tsgo.mjs"), "-p", "tsconfig.extensions.json"],
+          {
+            cwd,
+            stdio: ["ignore", "ignore", "pipe"],
+            env: withSupervisorClock(cwd, process.env, phase === "spawn" ? [preloadPath] : []),
+          },
+        );
+        const stderr = createBoundedChildOutput();
+        wrapper.stderr.on("data", (chunk) => stderr.append(chunk));
+        wrapper.once("error", (error) => stderr.append(`wrapper spawn error: ${error.message}\n`));
+        // Keep completion available after cancellation starts teardown.
+        const wrapperClose = new Promise<{
+          code: number | null;
+          signal: NodeJS.Signals | null;
+        }>((resolve) => {
+          wrapper.once("close", (code, exitSignal) => resolve({ code, signal: exitSignal }));
+        });
+        const errors: unknown[] = [];
+        try {
+          // PID precedes the receipt; separate pipes can deliver wrapper exit first.
+          await withinTest(
+            fixtureReadyBeforeSettlement(
+              receipts,
+              pidFile,
+              wrapperClose,
+              () => readFakeTsgoPid(cwd) !== undefined,
+            ),
+            signal,
           );
-          const wrapper = spawn(
-            process.execPath,
-            [path.resolve("scripts/run-tsgo.mjs"), "-p", "tsconfig.extensions.json"],
-            {
-              cwd,
-              stdio: ["ignore", "ignore", "pipe"],
-              env: withSupervisorClock(cwd, process.env, phase === "spawn" ? [preloadPath] : []),
-            },
-          );
-          retainFixture = true;
-          const stderr = createBoundedChildOutput();
-          wrapper.stderr.on("data", (chunk) => stderr.append(chunk));
-          wrapper.once("error", (error) =>
-            stderr.append(`wrapper spawn error: ${error.message}\n`),
-          );
-          // Keep completion available after cancellation starts teardown.
-          const wrapperClose = new Promise<{
-            code: number | null;
-            signal: NodeJS.Signals | null;
-          }>((resolve) => {
-            wrapper.once("close", (code, exitSignal) => resolve({ code, signal: exitSignal }));
-          });
-          const errors: unknown[] = [];
-          try {
-            // PID precedes the receipt; separate pipes can deliver wrapper exit first.
-            await withinTest(
-              fixtureReadyBeforeSettlement(
-                receipts,
-                pidFile,
-                wrapperClose,
-                () => readFakeTsgoPid(cwd) !== undefined,
-              ),
-              signal,
-            );
-            const compilerPid = readFakeTsgoPid(cwd)!;
-            if (phase === "wrapper") {
-              wrapper.kill("SIGTERM");
-            }
+          const compilerPid = readFakeTsgoPid(cwd)!;
+          if (phase === "wrapper") {
+            wrapper.kill("SIGTERM");
+          }
 
-            const wrapperResult = await withinTest(wrapperClose, signal);
-            expect([
-              { code: 143, signal: null },
-              { code: null, signal: "SIGTERM" },
-            ]).toContainEqual(wrapperResult);
-            // CLI completion must follow compiler-tree exit.
-            expect(isProcessAlive(compilerPid)).toBe(false);
-          } catch (error) {
-            errors.push(error);
-          } finally {
-            try {
+          const wrapperResult = await withinTest(wrapperClose, signal);
+          expect([
+            { code: 143, signal: null },
+            { code: null, signal: "SIGTERM" },
+          ]).toContainEqual(wrapperResult);
+          // CLI completion must follow compiler-tree exit.
+          expect(isProcessAlive(compilerPid)).toBe(false);
+        } catch (error) {
+          errors.push(error);
+        } finally {
+          try {
+            await fixture.verifyCleanup(async () => {
               if (wrapper.exitCode === null && wrapper.signalCode === null) {
                 wrapper.kill("SIGTERM");
                 if (phase === "spawn") {
@@ -520,23 +514,17 @@ syncBuiltinESMExports();
               if (compilerPid !== undefined) {
                 await waitForDead(compilerPid, signal);
               }
-              retainFixture = false;
-            } catch (error) {
-              errors.push(error);
-            }
+            });
+          } catch (error) {
+            errors.push(error);
           }
-          if (errors.length > 0) {
-            const cause = errors.length === 1 ? errors[0] : new AggregateError(errors);
-            const retained = retainFixture ? `\nfixture retained at ${cwd}` : "";
-            throw new Error(
-              `${errors.map(String).join("\n")}\nwrapper exitCode=${wrapper.exitCode}, signalCode=${wrapper.signalCode}${retained}\n${stderr.text()}`,
-              { cause },
-            );
-          }
-        } finally {
-          if (!retainFixture) {
-            fixtureDirs.cleanup();
-          }
+        }
+        if (errors.length > 0) {
+          const cause = errors.length === 1 ? errors[0] : new AggregateError(errors);
+          throw new Error(
+            `${errors.map(String).join("\n")}\nwrapper exitCode=${wrapper.exitCode}, signalCode=${wrapper.signalCode}\nfixture at ${cwd}\n${stderr.text()}`,
+            { cause },
+          );
         }
       }),
   );

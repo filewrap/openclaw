@@ -59,6 +59,9 @@ const require = createRequire(import.meta.url);
 ${source}`;
 }
 
+const groupPresent = (group: { pid?: number }) =>
+  inspectManagedProcessGroup(group, { errorPolicy: "indeterminate" }) !== "dead";
+
 function spawnWrapperFixture(
   tempDir: string,
   assignments: string[],
@@ -124,10 +127,7 @@ function spawnWrapperFixture(
       // a second wall-clock grace period before stopping the owned groups.
       // The wrapper owns tsx helper processes in its group; the wrapped command
       // creates a separate group whose identity is recorded by the fixture.
-      if (
-        wrapper.pid &&
-        inspectManagedProcessGroup(wrapper, { errorPolicy: "indeterminate" }) !== "dead"
-      ) {
+      if (wrapper.pid && groupPresent(wrapper)) {
         terminateManagedChild(wrapper, "SIGKILL", { processGroupFallback: "never" });
       }
       await Promise.race([receipts.waitFor(pidFile, "ready"), completion]);
@@ -139,7 +139,7 @@ function spawnWrapperFixture(
         }
         const group = { pid };
         wrappedGroup = group;
-        if (inspectManagedProcessGroup(group, { errorPolicy: "indeterminate" }) !== "dead") {
+        if (groupPresent(group)) {
           try {
             process.kill(-pid, "SIGKILL");
           } catch (error) {
@@ -153,14 +153,14 @@ function spawnWrapperFixture(
       if (wrappedGroup) {
         const group = wrappedGroup;
         await waitForFixtureExit(
-          () => inspectManagedProcessGroup(group, { errorPolicy: "indeterminate" }) === "dead",
+          () => !groupPresent(group),
           `wrapped group exit before removing fixture: ${tempDir}`,
           testSignal,
         );
       }
       if (wrapper.pid) {
         await waitForFixtureExit(
-          () => inspectManagedProcessGroup(wrapper, { errorPolicy: "indeterminate" }) === "dead",
+          () => !groupPresent(wrapper),
           `wrapper group exit before removing fixture: ${tempDir}`,
           testSignal,
         );
@@ -264,31 +264,23 @@ describe("run-with-env", () => {
     ).toBe(false);
   });
 
-  it("uses the current Node executable for bare Node command names", () => {
+  it.each([
+    ["linux", "node", "/usr/bin/node"],
+    ["win32", "node", "C:\\Node24\\node.exe"],
+    ["win32", "NODE", "C:\\Node24\\node.exe"],
+    ["win32", "node.exe", "C:\\Node24\\node.exe"],
+    ["win32", "Node.Exe", "C:\\Node24\\node.exe"],
+    ["linux", "NODE", "NODE"],
+    ["linux", "node.exe", "node.exe"],
+    ["linux", "C:\\Tools\\node.exe", "C:\\Tools\\node.exe"],
+    ["win32", "C:\\Tools\\node.exe", "C:\\Tools\\node.exe"],
+  ] as const)("resolves %s command %s to %s", (platform, command, expected) => {
     const args = ["scripts/run-vitest.mjs"];
-    expect(resolveSpawnCommand("node", args, "/usr/bin/node", "linux")).toEqual({
-      command: "/usr/bin/node",
+    const execPath = platform === "win32" ? "C:\\Node24\\node.exe" : "/usr/bin/node";
+    expect(resolveSpawnCommand(command, args, execPath, platform)).toEqual({
+      command: expected,
       args,
     });
-    for (const command of ["node", "NODE", "node.exe", "Node.Exe"]) {
-      expect(resolveSpawnCommand(command, args, "C:\\Node24\\node.exe", "win32")).toEqual({
-        command: "C:\\Node24\\node.exe",
-        args,
-      });
-    }
-  });
-
-  it("preserves platform-specific and explicitly pathed commands", () => {
-    const args = ["scripts/run-vitest.mjs"];
-    for (const command of ["NODE", "node.exe", "C:\\Tools\\node.exe"]) {
-      expect(resolveSpawnCommand(command, args, "/usr/bin/node", "linux")).toEqual({
-        command,
-        args,
-      });
-    }
-    expect(
-      resolveSpawnCommand("C:\\Tools\\node.exe", args, "C:\\Node24\\node.exe", "win32"),
-    ).toEqual({ command: "C:\\Tools\\node.exe", args });
   });
 
   it("rejects malformed force-kill grace configuration before spawning", () => {
