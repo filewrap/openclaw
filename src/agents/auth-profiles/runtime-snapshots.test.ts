@@ -45,6 +45,7 @@ afterEach(() => {
   clearSnapshots();
 });
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const agentDir = "/tmp/openclaw-auth-snapshot-agent";
 const track = (cleanup: () => void) => cleanups.push(cleanup);
 function observeMaterializations(
   listener: NonNullable<typeof runtimeAuthMaterializationChanges.onChange>,
@@ -80,31 +81,31 @@ describe("runtime auth profile snapshots", () => {
   beforeEach(() => void prepareSharedAuthStoreOwnershipForNative());
 
   it("retires only the changed owner's reader until the runtime closes", () => {
-    const agentDir = tempDirs.make("auth-snapshot-readers-");
-    const databasePath = resolveAuthProfileDatabasePath(agentDir);
+    const readerDir = tempDirs.make("auth-snapshot-readers-");
+    const databasePath = resolveAuthProfileDatabasePath(readerDir);
     {
       using database = openNodeSqliteDatabase(databasePath);
       database.exec(
         "CREATE TABLE reader_fixture (value TEXT); INSERT INTO reader_fixture VALUES ('available')",
       );
     }
-    setSnapshot(createStore("reader-owner"), agentDir);
+    setSnapshot(createStore("reader-owner"), readerDir);
     const reader = acquireAuthProfileReadDatabase(databasePath, openSqliteReadOnlyDatabase);
     expect(reader.status).toBe("readable");
     if (reader.status !== "readable") {
       throw new Error("Expected a pooled auth reader");
     }
-    const revision = getSnapshotRevision(agentDir);
-    setUsage(createStore("reader-owner"), agentDir, { "openai:default": { lastUsed: 2 } });
-    expect(getSnapshotRevision(agentDir)).not.toBe(revision);
+    const revision = getSnapshotRevision(readerDir);
+    setUsage(createStore("reader-owner"), readerDir, { "openai:default": { lastUsed: 2 } });
+    expect(getSnapshotRevision(readerDir)).not.toBe(revision);
     expect(reader.db.isOpen).toBe(true);
-    clearSnapshot(path.join(agentDir, "unrelated"));
+    clearSnapshot(path.join(readerDir, "unrelated"));
     expect(reader.db.isOpen).toBe(true);
     expect(reader.db.prepare("SELECT value FROM reader_fixture").get()).toEqual({
       value: "available",
     });
 
-    clearSnapshot(agentDir);
+    clearSnapshot(readerDir);
     expect(reader.db.isOpen).toBe(false);
     const replacement = acquireAuthProfileReadDatabase(databasePath, openSqliteReadOnlyDatabase);
     expect(replacement.status).toBe("readable");
@@ -123,7 +124,6 @@ describe("runtime auth profile snapshots", () => {
   });
 
   it("publishes model auth facts without impersonating credential rotation", () => {
-    const agentDir = "/tmp/openclaw-auth-runtime-materialized";
     const pluginStoreListener = vi.fn();
     const materializationListener = vi.fn();
     setSnapshot(createStore("materialized"), agentDir);
@@ -153,7 +153,6 @@ describe("runtime auth profile snapshots", () => {
   });
 
   it("keeps metadata stable while replace publishes bookkeeping for rollback readers", () => {
-    const agentDir = "/tmp/openclaw-auth-metadata-revision";
     const store = createStore("metadata");
     setSnapshot(store, agentDir);
     const metadataRevision = getMetadataRevision(agentDir);
@@ -274,7 +273,6 @@ describe("runtime auth profile snapshots", () => {
   });
 
   it("refreshes only owned usage while keeping frozen worker credentials and references", () => {
-    const agentDir = "/tmp/openclaw-auth-catalog-usage";
     const descriptor = {
       type: "token" as const,
       provider: "acme",
@@ -318,7 +316,6 @@ describe("runtime auth profile snapshots", () => {
   });
 
   it("keeps usage with the captured physical owner and matching credential", () => {
-    const agentDir = "/tmp/openclaw-auth-catalog-owned";
     const siblingDir = "/tmp/openclaw-auth-catalog-sibling";
     const original = apiStore("owned-not-real");
     setSnapshot(original, agentDir);
@@ -346,7 +343,6 @@ describe("runtime auth profile snapshots", () => {
 
   it("refreshes inherited usage without crossing an agent-local profile override", () => {
     const inheritedAuthDir = "/tmp/openclaw-auth-catalog-inherited";
-    const agentDir = "/tmp/openclaw-auth-catalog-local";
     const inherited = {
       ...apiStore("inherited-not-real"),
       profiles: {
@@ -375,7 +371,6 @@ describe("runtime auth profile snapshots", () => {
 
   it("merges inherited and agent prepared stores without persisted fallback", () => {
     const inheritedAuthDir = "/tmp/openclaw-auth-runtime-inherited";
-    const agentDir = "/tmp/openclaw-auth-runtime-agent";
     setSnapshot(
       {
         ...createStore("inherited"),
@@ -404,7 +399,6 @@ describe("runtime auth profile snapshots", () => {
 
   it("does not attribute shared order to an agent without its own snapshot", () => {
     const inheritedAuthDir = "/tmp/openclaw-auth-order-inherited";
-    const agentDir = "/tmp/openclaw-auth-order-missing-agent";
     const inherited = {
       ...createStore("inherited-order"),
       runtimeLocalOrderProviderIds: ["openai"],
@@ -420,7 +414,6 @@ describe("runtime auth profile snapshots", () => {
   });
 
   it("copies a prepared same-owner snapshot only once and keeps the result isolated", () => {
-    const agentDir = "/tmp/openclaw-auth-prepared-same-owner";
     const store = createStore("prepared");
     setSnapshot(store, agentDir);
     const clone = vi.spyOn(authProfileClone, "cloneAuthProfileStore");

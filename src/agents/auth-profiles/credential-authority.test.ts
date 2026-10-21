@@ -846,40 +846,34 @@ it.each(["commit", "rollback"])(
         }
         return result;
       });
-    const { port1, port2 } = new MessageChannel();
-    const owner: SqliteWorkerOperationContext = { port: port1 };
     try {
-      const transact = () =>
-        currentSqliteWorkerOperationAdmission.run({ active: true, port: port1, owner }, () =>
-          runWithSqliteWorkerStateContext(current.context, () =>
-            machineStateOperations["machineState.write"](
-              { key: "authProfiles.store", value: next },
-              {
-                open: () => database,
-                stateOptions: () => ({ path: database.path, env: current.env }),
-                write,
-                writeAdmitted: write,
-              },
-            ),
-          ),
-        );
-      if (outcome === "rollback") {
-        expect(transact).toThrow("synthetic rollback");
-        expect(owner.committed).toBeUndefined();
-        expect(current.read()).toEqual(credential("original"));
-      } else {
-        transact();
-        expect(owner.committed).toMatchObject({
-          facts: {
-            authCredentials: { facts: new Map([["store", { kind: "postimage", value: next }]]) },
-          },
-        });
-        expect(current.read()).toEqual(credential("worker-anchored"));
-      }
+      withWorker(current.context, (owner) => {
+        const transact = () =>
+          machineStateOperations["machineState.write"](
+            { key: "authProfiles.store", value: next },
+            {
+              open: () => database,
+              stateOptions: () => ({ path: database.path, env: current.env }),
+              write,
+              writeAdmitted: write,
+            },
+          );
+        if (outcome === "rollback") {
+          expect(transact).toThrow("synthetic rollback");
+          expect(owner.committed).toBeUndefined();
+          expect(current.read()).toEqual(credential("original"));
+        } else {
+          transact();
+          expect(owner.committed).toMatchObject({
+            facts: {
+              authCredentials: { facts: new Map([["store", { kind: "postimage", value: next }]]) },
+            },
+          });
+          expect(current.read()).toEqual(credential("worker-anchored"));
+        }
+      });
     } finally {
       writer.mockRestore();
-      port1.close();
-      port2.close();
     }
   },
 );

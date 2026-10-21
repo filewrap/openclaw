@@ -382,14 +382,6 @@ it("keeps an absent database readable as missing after fallback revalidation", a
   expect(() => captured.assertCurrent()).not.toThrow();
 });
 
-it("retires observations with the database owner", async () => {
-  const { databasePath } = fixture({ existing: true });
-  const captured = captureAuthProfileFileIdentity(databasePath);
-  await closeFiles([databasePath]);
-  expect(() => captured.assertCurrent()).toThrow("database file identity changed");
-  expect(() => captureAuthProfileFileIdentity(databasePath).assertCurrent()).not.toThrow();
-});
-
 it("keeps physical file authority through logical snapshot reset", async () => {
   const { databasePath } = fixture({ existing: true });
   const captured = captureAuthProfileFileIdentity(databasePath);
@@ -415,6 +407,7 @@ it("keeps sibling file authority when another database is replaced or retired", 
   await closeFiles([first, second], [first]);
   expect(() => retained.assertCurrent()).not.toThrow();
   expect(() => retired.assertCurrent()).toThrow("database file identity changed");
+  expect(() => captureAuthProfileFileIdentity(second).assertCurrent()).not.toThrow();
 });
 
 it("retires legacy source observations when their agent database closes", async () => {

@@ -114,6 +114,9 @@ function save(profiles: AuthProfileStore["profiles"], agentDir?: string) {
     syncExternalCli: false,
   });
 }
+function seed(profiles: AuthProfileStore["profiles"], agentDir?: string) {
+  saveAuthProfileStore({ version: 1, profiles }, agentDir);
+}
 function rotate(agentDir: string, profileId: string, credential: OAuthCredential) {
   return updateAuthProfileStoreWithLock({
     agentDir,
@@ -271,10 +274,7 @@ it("rejects pre-claim stale writes after the refresh fence settles", async () =>
     const siblingId = "openai:sibling";
     const sibling = { ...credential, refresh: "sibling-refresh" };
 
-    saveAuthProfileStore(
-      { version: 1, profiles: { [profileId]: credential, [siblingId]: sibling } },
-      agentDir,
-    );
+    seed({ [profileId]: credential, [siblingId]: sibling }, agentDir);
     let queuedWrite: Promise<void> | undefined;
     await withOAuthProfileLock({ profileId, provider: credential.provider }, async () => {
       queuedWrite = persistAuthProfileBatch({
@@ -304,7 +304,7 @@ it("rejects stale nonportable OAuth batches admitted after a newer generation se
     const profileId = "openai:default";
     const consumed = oauth("consumed-access", "consumed-refresh", Date.now() - 60_000);
     const rotated = oauth("rotated-access", "rotated-refresh");
-    saveAuthProfileStore({ version: 1, profiles: { [profileId]: rotated } }, agentDir);
+    seed({ [profileId]: rotated }, agentDir);
 
     await expect(persist(agentDir, profileId, consumed)).rejects.toThrow(
       "Refused to restore fenced OAuth refresh generation",
@@ -327,10 +327,7 @@ it.each(["rotated", "appeared"] as const)(
         mode === "rotated"
           ? oauth("rotated-access", "rotated-refresh")
           : { ...credential, access: "fresh-login-access", refresh: "fresh-login-refresh" };
-      saveAuthProfileStore(
-        { version: 1, profiles: mode === "rotated" ? { [profileId]: credential } : {} },
-        mainAgentDir,
-      );
+      seed(mode === "rotated" ? { [profileId]: credential } : {}, mainAgentDir);
       let queuedWrite: Promise<void> | undefined;
       await withOAuthProfileLock({ profileId, provider: credential.provider }, async () => {
         queuedWrite = persist(peerAgentDir, profileId, credential, {
@@ -342,10 +339,7 @@ it.each(["rotated", "appeared"] as const)(
           await rotate(mainAgentDir, profileId, fence);
           await rotate(mainAgentDir, profileId, authoritative);
         } else {
-          saveAuthProfileStore(
-            { version: 1, profiles: { [profileId]: authoritative } },
-            mainAgentDir,
-          );
+          seed({ [profileId]: authoritative }, mainAgentDir);
         }
       });
 
@@ -369,11 +363,10 @@ it.each(["upsert", "batch"] as const)(
     const profileId = "openai:default";
     const current = oauth("current-access", "stable-refresh");
     const refreshed = { ...current, access: "refreshed-access", expires: Date.now() + 120_000 };
-    const store = { version: 1, profiles: { [profileId]: current } };
     // Upserts follow the scoped agent; batches without agentDir follow the scoped shared store.
     const targetDir = writer === "upsert" ? agentDir : undefined;
     await withEnvAsync({ OPENCLAW_STATE_DIR: scopedRoot }, async () => {
-      saveAuthProfileStore(store, targetDir);
+      seed({ [profileId]: current }, targetDir);
     });
     await withEnvAsync({ OPENCLAW_STATE_DIR: processRoot }, async () => {
       await withAuthProfileStoreAgentDir(agentDir, scopedRoot, async () => {
@@ -401,7 +394,7 @@ it("does not restore a nonportable OAuth generation during batch rollback", asyn
       access: "replacement-access",
       refresh: "replacement-refresh",
     };
-    saveAuthProfileStore({ version: 1, profiles: { [profileId]: previous } }, agentDir);
+    seed({ [profileId]: previous }, agentDir);
 
     const receipt = await persist(agentDir, profileId, replacement, {
       allowOAuthGenerationReplacement: true,
@@ -418,13 +411,13 @@ it("allows portable copies and distinct generations to replace an OAuth fence", 
     const profileId = "openai:default";
     const credential = oauth("expired-access", "single-use-refresh", Date.now() - 60_000);
     const fence = createOAuthRefreshFence({ profileId, credential });
-    saveAuthProfileStore({ version: 1, profiles: { [profileId]: fence } }, agentDir);
+    seed({ [profileId]: fence }, agentDir);
 
     const portable = { ...credential, copyToAgents: true } satisfies OAuthCredential;
     await persist(agentDir, profileId, portable);
     expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(portable);
 
-    saveAuthProfileStore({ version: 1, profiles: { [profileId]: fence } }, agentDir);
+    seed({ [profileId]: fence }, agentDir);
     const distinct = { ...credential, refresh: "distinct-refresh" } satisfies OAuthCredential;
     await persist(agentDir, profileId, distinct);
     expect(readPersistedStore(agentDir)?.profiles[profileId]).toEqual(distinct);

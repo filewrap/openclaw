@@ -6,9 +6,11 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { clearPluginMetadataLifecycleCaches } from "../../plugins/plugin-metadata-lifecycle.js";
 import { closeOpenClawAgentDatabasesAsync } from "../../state/openclaw-agent-db.js";
 import { isAmbientCredentialAllowedByProviderAuthPin } from "./ambient-auth.js";
+import { createBedrockAwsSdkConfig } from "./config-fixtures.test-support.js";
 import {
   createApiKeyCredential,
   createOAuthRefreshCredential as oauth,
+  createUnresolvedOAuthRefCredential,
 } from "./credential-fixtures.test-support.js";
 import { closeAuthProfileReadPool } from "./sqlite.js";
 import { saveAuthProfileStore } from "./store-runtime.js";
@@ -65,6 +67,20 @@ function storeWith(
   return { version: 1, profiles, ...rest };
 }
 
+const fixtureProvider = "fixture-provider";
+const key = (name: string) => createApiKeyCredential(fixtureProvider, `sk-${name}`);
+const fixtureProfileId = (name: string) => `${fixtureProvider}:${name}`;
+const keyStore = (names: string[], rest: Omit<Partial<AuthProfileStore>, "profiles"> = {}) =>
+  storeWith(Object.fromEntries(names.map((name) => [fixtureProfileId(name), key(name)])), rest);
+type OrderOptions = Omit<Parameters<typeof resolveAuthProfileOrder>[0], "provider" | "store">;
+const order = (store: AuthProfileStore, extra: OrderOptions = {}) =>
+  resolveAuthProfileOrder({ provider: fixtureProvider, store, ...extra });
+const metadata = (store: AuthProfileStore, extra: OrderOptions = {}) =>
+  resolveAuthProfileOrderWithMetadata({ provider: fixtureProvider, store, ...extra });
+const configuredOrder = (...ids: string[]): OpenClawConfig => ({
+  auth: { order: { [fixtureProvider]: ids.map(fixtureProfileId) } },
+});
+
 describe("resolveAuthProfileOrder", () => {
   beforeEach(() => {
     clearPluginMetadataLifecycleCaches();
@@ -120,22 +136,7 @@ describe("resolveAuthProfileOrder", () => {
   });
 
   it("keeps configured AWS SDK profiles eligible without stored credentials", () => {
-    const cfg = {
-      auth: {
-        profiles: {
-          "amazon-bedrock:default": { provider: "amazon-bedrock", mode: "aws-sdk" },
-        },
-      },
-      models: {
-        providers: {
-          "amazon-bedrock": {
-            auth: "aws-sdk",
-            baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
-            models: [],
-          },
-        },
-      },
-    } satisfies OpenClawConfig;
+    const cfg = createBedrockAwsSdkConfig();
     const store = storeWith({});
 
     expect(
@@ -154,16 +155,13 @@ describe("resolveAuthProfileOrder", () => {
   it("falls back to stored profiles when a stored order only has missing credentials", async () => {
     const store = storeWith(
       {
-        "fixture-provider:key": createApiKeyCredential("fixture-provider", "sk-primary"),
+        "fixture-provider:key": key("primary"),
         "fixture-provider:oauth": oauth({ provider: "fixture-provider" }),
       },
       { order: { "fixture-provider": ["fixture-provider:deleted"] } },
     );
 
-    expect(resolveAuthProfileOrder({ store, provider: "fixture-provider" })).toStrictEqual([
-      "fixture-provider:oauth",
-      "fixture-provider:key",
-    ]);
+    expect(order(store)).toStrictEqual(["fixture-provider:oauth", "fixture-provider:key"]);
   });
 
   it("prefers live OAuth before expired OAuth", () => {
@@ -190,61 +188,46 @@ describe("resolveAuthProfileOrder", () => {
   it.each(["read-only", "execution"] as const)(
     "orders expired and active cooldowns in %s mode without read-only housekeeping",
     (readinessMode) => {
+      const active = fixtureProfileId("active"),
+        expired = fixtureProfileId("expired"),
+        ready = fixtureProfileId("ready");
       const expiredAt = Date.now() - 60_000;
       const activeUntil = Date.now() + 600_000;
-      const store: AuthProfileStore = {
-        version: 1,
-        profiles: {
-          "fixture-provider:active": createApiKeyCredential("fixture-provider", "sk-active"),
-          "fixture-provider:expired": createApiKeyCredential("fixture-provider", "sk-expired"),
-          "fixture-provider:ready": createApiKeyCredential("fixture-provider", "sk-ready"),
-        },
+      const store = keyStore(["active", "expired", "ready"], {
         usageStats: {
-          "fixture-provider:active": { lastUsed: 0, cooldownUntil: activeUntil },
-          "fixture-provider:expired": {
+          [active]: { lastUsed: 0, cooldownUntil: activeUntil },
+          [expired]: {
             lastUsed: 20,
             cooldownUntil: expiredAt,
             cooldownReason: "timeout",
             errorCount: 3,
           },
-          "fixture-provider:ready": { lastUsed: 10 },
+          [ready]: { lastUsed: 10 },
         },
-      };
+      });
 
-      expect(
-        resolveAuthProfileOrderWithMetadata({ store, provider: "fixture-provider", readinessMode }),
-      ).toEqual({
-        profileIds: [
-          "fixture-provider:ready",
-          "fixture-provider:expired",
-          "fixture-provider:active",
-        ],
+      expect(metadata(store, { readinessMode })).toEqual({
+        profileIds: [ready, expired, active],
         hasExplicitOrder: false,
       });
       const { lastUsed, cooldownUntil, cooldownReason, errorCount } =
-        store.usageStats?.["fixture-provider:expired"] ?? {};
+        store.usageStats?.[expired] ?? {};
       expect({ lastUsed, cooldownUntil, cooldownReason, errorCount }).toEqual({
         lastUsed: 20,
         cooldownUntil: readinessMode === "read-only" ? expiredAt : undefined,
         cooldownReason: readinessMode === "read-only" ? "timeout" : undefined,
         errorCount: readinessMode === "read-only" ? 3 : 0,
       });
-      expect(store.usageStats?.["fixture-provider:active"]?.cooldownUntil).toBe(activeUntil);
+      expect(store.usageStats?.[active]?.cooldownUntil).toBe(activeUntil);
     },
   );
 
   it("does not fall back past an explicit configured auth order", async () => {
-    const store = storeWith({
-      "fixture-provider:primary": createApiKeyCredential("fixture-provider", "sk-primary"),
-    });
+    const store = keyStore(["primary"]);
 
-    const params = {
-      store,
-      provider: "fixture-provider",
-      cfg: { auth: { order: { "fixture-provider": ["fixture-provider:missing"] } } },
-    };
-    expect(resolveAuthProfileOrder(params)).toStrictEqual([]);
-    expect(resolveAuthProfileOrderWithMetadata(params)).toStrictEqual({
+    const cfg = configuredOrder("missing");
+    expect(order(store, { cfg })).toStrictEqual([]);
+    expect(metadata(store, { cfg })).toStrictEqual({
       profileIds: [],
       hasExplicitOrder: true,
     });
@@ -253,14 +236,11 @@ describe("resolveAuthProfileOrder", () => {
   it.each(["cooldown", "block"] as const)(
     "does not apply a %s scoped to another model when ordering profiles",
     (kind) => {
-      const store: AuthProfileStore = {
-        version: 1,
-        profiles: {
-          "fixture-provider:primary": createApiKeyCredential("fixture-provider", "sk-primary"),
-          "fixture-provider:backup": createApiKeyCredential("fixture-provider", "sk-backup"),
-        },
+      const primary = fixtureProfileId("primary"),
+        backup = fixtureProfileId("backup");
+      const store = keyStore(["primary", "backup"], {
         usageStats: {
-          "fixture-provider:primary":
+          [primary]:
             kind === "cooldown"
               ? {
                   cooldownUntil: Date.now() + 60_000,
@@ -274,46 +254,17 @@ describe("resolveAuthProfileOrder", () => {
                   blockedScope: "model",
                 },
         },
-      };
-      const cfg = {
-        auth: {
-          order: {
-            "fixture-provider": ["fixture-provider:primary", "fixture-provider:backup"],
-          },
-        },
-      } satisfies OpenClawConfig;
+      });
+      const cfg = configuredOrder("primary", "backup");
 
-      expect(
-        resolveAuthProfileOrder({
-          cfg,
-          store,
-          provider: "fixture-provider",
-          forModel: "model-b",
-        }),
-      ).toStrictEqual(["fixture-provider:primary", "fixture-provider:backup"]);
-      expect(
-        resolveAuthProfileOrder({
-          cfg,
-          store,
-          provider: "fixture-provider",
-          forModel: "model-a",
-        }),
-      ).toStrictEqual(["fixture-provider:backup", "fixture-provider:primary"]);
+      expect(order(store, { cfg, forModel: "model-b" })).toStrictEqual([primary, backup]);
+      expect(order(store, { cfg, forModel: "model-a" })).toStrictEqual([backup, primary]);
     },
   );
 
   it("keeps unresolved OAuth refs only in read-only profile ordering", () => {
     const store = storeWith({
-      "openai:legacy-ref": oauth({
-        access: "",
-        refresh: "",
-        expires: 0,
-        oauthRef: {
-          source: "openclaw-credentials",
-          provider: "openai-codex",
-          id: "00000000000000000000000000000000",
-        },
-      }),
+      "openai:legacy-ref": createUnresolvedOAuthRefCredential(),
     });
 
     expect(resolveAuthProfileOrderWithMetadata({ store, provider: "openai" })).toEqual({
@@ -352,21 +303,22 @@ describe("resolveAuthProfileOrder", () => {
   it("marks profile success with one canonical last-good and usage update", async () => {
     const agentDir = await mkdtemp(path.join(os.tmpdir(), "openclaw-auth-profile-success-"));
     try {
-      const store: AuthProfileStore = {
-        version: 1,
-        profiles: {
+      const store = storeWith(
+        {
           "fixture-provider:default": oauth({ provider: "fixture-provider" }),
         },
-        usageStats: {
-          "fixture-provider:default": {
-            errorCount: 3,
-            blockedUntil: Date.now() + 120_000,
-            blockedReason: "subscription_limit",
-            cooldownUntil: Date.now() + 60_000,
-            cooldownReason: "rate_limit",
+        {
+          usageStats: {
+            "fixture-provider:default": {
+              errorCount: 3,
+              blockedUntil: Date.now() + 120_000,
+              blockedReason: "subscription_limit",
+              cooldownUntil: Date.now() + 60_000,
+              cooldownReason: "rate_limit",
+            },
           },
         },
-      };
+      );
       saveAuthProfileStore(store, agentDir);
 
       const beforeSuccess = Date.now();
@@ -392,7 +344,6 @@ describe("resolveAuthProfileOrder", () => {
       });
       const lastUsed = store.usageStats?.["fixture-provider:default"]?.lastUsed;
       expect(typeof lastUsed).toBe("number");
-      expect(Number.isFinite(lastUsed)).toBe(true);
       expect(lastUsed).toBeGreaterThanOrEqual(beforeSuccess);
       expect(lastUsed).toBeLessThanOrEqual(afterSuccess);
     } finally {

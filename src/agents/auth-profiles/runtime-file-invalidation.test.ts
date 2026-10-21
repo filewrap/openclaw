@@ -2,10 +2,10 @@ import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { runtimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
 import {
-  clearRuntimeAuthProfileStoreSnapshots,
-  getRuntimeAuthProfileStoreSnapshotAtDatabasePath,
-  registerRuntimeAuthProfileExternalRefresh,
-  setRuntimeAuthProfileStoreSnapshotAtDatabasePath,
+  clearRuntimeAuthProfileStoreSnapshots as clearSnapshots,
+  getRuntimeAuthProfileStoreSnapshotAtDatabasePath as getSnapshot,
+  registerRuntimeAuthProfileExternalRefresh as onRefresh,
+  setRuntimeAuthProfileStoreSnapshotAtDatabasePath as publishSnapshot,
 } from "./runtime-snapshots.js";
 import type { AuthProfileStore } from "./types.js";
 
@@ -36,12 +36,11 @@ function publishAgent(key: string): void {
     version: 1,
     profiles: { example: { type: "api_key", provider: "example", key } },
   };
-  setRuntimeAuthProfileStoreSnapshotAtDatabasePath(
-    store,
-    agentDatabase,
-    path.dirname(agentDatabase),
-    { databasePath: agentDatabase, sharedDatabasePath: sharedDatabase, location: "legacy-main" },
-  );
+  publishSnapshot(store, agentDatabase, path.dirname(agentDatabase), {
+    databasePath: agentDatabase,
+    sharedDatabasePath: sharedDatabase,
+    location: "legacy-main",
+  });
 }
 
 function observeSharedReplacement(): void {
@@ -53,19 +52,19 @@ function observeSharedReplacement(): void {
   });
 }
 
-beforeEach(() => clearRuntimeAuthProfileStoreSnapshots());
-afterEach(() => clearRuntimeAuthProfileStoreSnapshots());
+beforeEach(clearSnapshots);
+afterEach(clearSnapshots);
 
 it("retires an inherited snapshot when its shared database changes without a shared snapshot", async () => {
   const refreshed = Promise.withResolvers<boolean>();
-  registerRuntimeAuthProfileExternalRefresh(() => refreshed.promise);
+  onRefresh(() => refreshed.promise);
   publishAgent("inherited");
-  expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(sharedDatabase)).toBeUndefined();
-  expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(agentDatabase)).toBeDefined();
+  expect(getSnapshot(sharedDatabase)).toBeUndefined();
+  expect(getSnapshot(agentDatabase)).toBeDefined();
 
   observeSharedReplacement();
 
-  expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(agentDatabase)).toBeUndefined();
+  expect(getSnapshot(agentDatabase)).toBeUndefined();
   refreshed.resolve(true);
   await refreshed.promise;
 });
@@ -80,7 +79,7 @@ it.each([
   async ({ outcome, reset }) => {
     const started = Promise.withResolvers<void>();
     const refreshed = Promise.withResolvers<boolean>();
-    registerRuntimeAuthProfileExternalRefresh(() => {
+    onRefresh(() => {
       started.resolve();
       return refreshed.promise;
     });
@@ -89,7 +88,7 @@ it.each([
     await started.promise;
 
     if (reset) {
-      clearRuntimeAuthProfileStoreSnapshots();
+      clearSnapshots();
     }
     publishAgent("replacement");
     if (outcome === "declined") {
@@ -99,9 +98,7 @@ it.each([
     }
     await refreshed.promise.catch(() => undefined);
 
-    expect(
-      getRuntimeAuthProfileStoreSnapshotAtDatabasePath(agentDatabase)?.profiles.example,
-    ).toEqual({
+    expect(getSnapshot(agentDatabase)?.profiles.example).toEqual({
       type: "api_key",
       provider: "example",
       key: "replacement",
@@ -112,7 +109,7 @@ it.each([
 it.each([false, true])(
   "retains first-file snapshots only with known source provenance: %s",
   async (knownSource) => {
-    registerRuntimeAuthProfileExternalRefresh(async () => true);
+    onRefresh(async () => true);
     publishAgent("inherited");
     if (knownSource) {
       runtimeAuthProfileRowsCache.recordSource(sharedDatabase, "absent", null);
@@ -123,8 +120,6 @@ it.each([false, true])(
       sourcesChanged: false,
       createdPaths: [sharedDatabase],
     });
-    expect(getRuntimeAuthProfileStoreSnapshotAtDatabasePath(agentDatabase) !== undefined).toBe(
-      knownSource,
-    );
+    expect(getSnapshot(agentDatabase) !== undefined).toBe(knownSource);
   },
 );

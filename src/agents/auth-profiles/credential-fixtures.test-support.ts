@@ -65,6 +65,19 @@ export function createOAuthRefreshCredential(
   };
 }
 
+export function createUnresolvedOAuthRefCredential(): OAuthCredential {
+  return createOAuthRefreshCredential({
+    access: "",
+    refresh: "",
+    expires: 0,
+    oauthRef: {
+      source: "openclaw-credentials",
+      provider: "openai-codex",
+      id: "00000000000000000000000000000000",
+    },
+  });
+}
+
 export function oauthRefreshReplacementCases() {
   const mismatch = oidcIdentity({ sub: "subject-b" });
   return (

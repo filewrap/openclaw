@@ -48,14 +48,12 @@ describe("persisted auth profile boundary", () => {
   );
 
   it("normalizes dead-account classification with permanent-auth reason", () => {
+    const expected = {
+      cooldownReason: "auth_permanent",
+      cooldownClassification: "wham_account_dead",
+    } as const;
     const state: Pick<AuthProfileStore, "usageStats"> = {
-      usageStats: {
-        "openai:default": {
-          cooldownUntil: 1_900_000_000_000,
-          cooldownReason: "auth_permanent",
-          cooldownClassification: "wham_account_dead",
-        },
-      },
+      usageStats: { "openai:default": { cooldownUntil: 1_900_000_000_000, ...expected } },
     };
     const normalizedStats = [
       coerceAuthProfileState(state).usageStats?.["openai:default"],
@@ -63,10 +61,7 @@ describe("persisted auth profile boundary", () => {
     ];
 
     for (const stats of normalizedStats) {
-      expect(stats).toMatchObject({
-        cooldownReason: "auth_permanent",
-        cooldownClassification: "wham_account_dead",
-      });
+      expect(stats).toMatchObject(expected);
     }
   });
 
@@ -336,26 +331,20 @@ describe("persisted auth profile boundary", () => {
   });
 
   it("keeps the winning external profile when stores are merged", () => {
-    const profileId = "openai:default";
-    const base: RuntimeAuthProfileStore = makeStore(
-      {
-        [profileId]: oauth("cli-access", "cli-refresh", 1),
-      },
-      { runtimeExternalProfileIds: [profileId] },
-    );
+    const external = (access: string, refresh: string, expires: number) =>
+      makeStore(
+        { "openai:default": oauth(access, refresh, expires) },
+        { runtimeExternalProfileIds: ["openai:default"] },
+      );
+    const base = external("cli-access", "cli-refresh", 1);
     const inherited = mergeAuthProfileStores(base, makeStore({}), {
       preserveBaseRuntimeExternalProfiles: true,
     });
     expect(inherited.profiles).toEqual(base.profiles);
 
-    const pluginOverride: RuntimeAuthProfileStore = makeStore(
-      {
-        [profileId]: oauth("plugin-access", "plugin-refresh", 2),
-      },
-      { runtimeExternalProfileIds: [profileId] },
-    );
+    const pluginOverride = external("plugin-access", "plugin-refresh", 2);
     const collided = mergeAuthProfileStores(base, pluginOverride);
-    expect(collided.profiles[profileId]).toMatchObject({ access: "plugin-access" });
+    expect(collided.profiles["openai:default"]).toMatchObject({ access: "plugin-access" });
   });
 });
 

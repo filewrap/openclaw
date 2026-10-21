@@ -9,6 +9,22 @@ import type { AuthProfileStore } from "./types.js";
 const cfg = { secrets: { providers: { vault: { source: "env" } } } } satisfies OpenClawConfig;
 const missingRef = (id: string) => ({ source: "env" as const, provider: "vault", id });
 type AvailabilityParams = Parameters<typeof resolveStoredCredentialReadOnlyAvailability>[0];
+const apiKey = (
+  keyRef: Extract<AvailabilityParams["credential"], { type: "api_key" }>["keyRef"],
+) => ({
+  type: "api_key" as const,
+  provider: "test",
+  key: "kept",
+  keyRef,
+});
+const token = (
+  overrides: Partial<Extract<AvailabilityParams["credential"], { type: "token" }>> = {},
+) => ({
+  type: "token" as const,
+  provider: "test",
+  token: "kept",
+  ...overrides,
+});
 function expectAvailability(
   credential: AvailabilityParams["credential"],
   options: Partial<Omit<AvailabilityParams, "credential">> = {},
@@ -22,7 +38,7 @@ describe("resolveAuthStoreReadOnlyValidUntil", () => {
   const store: AuthProfileStore = {
     version: 1,
     profiles: {
-      token: { type: "token", provider: "test", token: "synthetic-token", expires: 150 },
+      token: token({ expires: 150 }),
       oauth: {
         type: "oauth",
         provider: "test",
@@ -30,7 +46,7 @@ describe("resolveAuthStoreReadOnlyValidUntil", () => {
         refresh: "synthetic-refresh",
         expires: 125,
       },
-      undated: { type: "token", provider: "test", token: "synthetic-undated" },
+      undated: token(),
     },
     usageStats: {
       blocked: { blockedUntil: 200 },
@@ -53,23 +69,15 @@ describe("resolveStoredCredentialReadOnlyAvailability", () => {
     [true, true],
     [false, false],
   ])("preserves env availability under a file collision (selected=%s)", (selected, expected) => {
-    expectAvailability(
-      {
-        type: "api_key",
-        provider: "test",
-        key: "retained-inline-key",
-        keyRef: { source: "env", provider: "selected", id: "COLLISION_KEY" },
-      },
-      {
-        cfg: {
-          secrets: {
-            defaults: selected ? { env: "selected" } : undefined,
-            providers: { selected: { source: "file", path: "/unused" } },
-          },
+    expectAvailability(apiKey({ source: "env", provider: "selected", id: "COLLISION_KEY" }), {
+      cfg: {
+        secrets: {
+          defaults: selected ? { env: "selected" } : undefined,
+          providers: { selected: { source: "file", path: "/unused" } },
         },
-        env: { COLLISION_KEY: "synthetic-key" },
       },
-    ).toBe(expected);
+      env: { COLLISION_KEY: "synthetic-key" },
+    }).toBe(expected);
   });
 
   it.each([
@@ -79,12 +87,7 @@ describe("resolveStoredCredentialReadOnlyAvailability", () => {
     "classifies token store refs without resolving them (selected=%s)",
     (selected, expected) => {
       expectAvailability(
-        {
-          type: "token",
-          provider: "test",
-          token: "retained-inline",
-          tokenRef: { source: "store", provider: "shared", id: "STORED_API_KEY" },
-        },
+        token({ tokenRef: { source: "store", provider: "shared", id: "STORED_API_KEY" } }),
         {
           cfg: {
             secrets: {
@@ -98,41 +101,16 @@ describe("resolveStoredCredentialReadOnlyAvailability", () => {
   );
 
   it("prefers explicit secret refs over retained inline values", () => {
-    expectAvailability({
-      type: "api_key",
-      provider: "test",
-      key: "kept",
-      keyRef: missingRef("MISSING_KEY"),
-    }).toBeUndefined();
-    expectAvailability({
-      type: "token",
-      provider: "test",
-      token: "kept",
-      tokenRef: missingRef("MISSING_TOKEN"),
-    }).toBeUndefined();
+    expectAvailability(apiKey(missingRef("MISSING_KEY"))).toBeUndefined();
+    expectAvailability(token({ tokenRef: missingRef("MISSING_TOKEN") })).toBeUndefined();
   });
 
   it("rejects expired static tokens before checking their secret ref", () => {
     const now = Date.now();
-    expectAvailability(
-      {
-        type: "token",
-        provider: "test",
-        token: "kept",
-        tokenRef: missingRef("MISSING_TOKEN"),
-        expires: now,
-      },
-      { now },
-    ).toBe(false);
-    expectAvailability(
-      {
-        type: "token",
-        provider: "test",
-        token: "kept",
-        expires: "invalid" as never,
-      },
-      { now },
-    ).toBe(false);
+    expectAvailability(token({ tokenRef: missingRef("MISSING_TOKEN"), expires: now }), {
+      now,
+    }).toBe(false);
+    expectAvailability(token({ expires: "invalid" as never }), { now }).toBe(false);
   });
 
   it("requires an explicit provider refresh capability for refresh-only OAuth", () => {
