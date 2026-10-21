@@ -17,6 +17,8 @@ import type { ApplicationGateway, ApplicationGatewaySnapshot } from "./gateway.t
 import { autoPromptNotificationsOnSend } from "./notifications-auto-prompt.ts";
 import { createWebPushCapability } from "./web-push.ts";
 
+const idlePresentation = new Promise<void>(() => {});
+
 const originalServiceWorkerDescriptor = Object.getOwnPropertyDescriptor(
   Navigator.prototype,
   "serviceWorker",
@@ -201,7 +203,11 @@ describe("web push Gateway reconciliation", () => {
       expect(requestPermission).not.toHaveBeenCalled();
       expect(request).not.toHaveBeenCalled();
       const { container } = mountSolid(() => (
-        <NotificationsSection connected={true} webPush={capability.snapshot} />
+        <NotificationsSection
+          connected={true}
+          presentationRetired={() => idlePresentation}
+          webPush={capability.snapshot}
+        />
       ));
       expect(container.textContent).toContain("Unavailable");
       expect(container.textContent).toContain("Not requested");
@@ -271,6 +277,7 @@ describe("web push Gateway reconciliation", () => {
       const { container } = mountSolid(() => (
         <NotificationsSection
           connected={true}
+          presentationRetired={() => idlePresentation}
           webPush={capability.snapshot}
           onWebPushSetUserPreferences={changePreferences}
           onWebPushSetDevicePreferences={changePreferences}
@@ -986,6 +993,7 @@ describe("web push Gateway reconciliation", () => {
         () => (
           <NotificationsSection
             connected={true}
+            presentationRetired={() => idlePresentation}
             webPush={snapshot()}
             onWebPushSubscribe={() => capability.run({ kind: "enable" })}
             onWebPushUnsubscribe={() => capability.run({ kind: "disable" })}
