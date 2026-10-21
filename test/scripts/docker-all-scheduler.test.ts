@@ -227,7 +227,11 @@ function frozenSweepFixture(packagedIds: string[]) {
   const runner = path.join(root, "fake-pnpm");
   mkdirSync(target, { recursive: true });
   mkdirSync(packaged, { recursive: true });
-  const packageJson = { name: "openclaw", version: "2026.9.2", files: ["dist/"] };
+  const packageJson = {
+    name: "openclaw",
+    version: "2026.9.2",
+    files: ["dist/"],
+  };
   for (const base of [target, packaged]) {
     writeFileSync(path.join(base, "package.json"), JSON.stringify(packageJson));
   }

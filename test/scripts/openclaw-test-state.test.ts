@@ -146,24 +146,21 @@ describe("scripts/lib/openclaw-test-state", () => {
 
   it("renders a reusable Docker shell function", async () => {
     await renderSnippet("shell-function", {}, true);
-    const payload = await probe(
-      path.join(root, "function-tmp"),
-      'export OPENCLAW_AGENT_DIR=/tmp/outside-agent; openclaw_test_state_create "onboard case" minimal;',
-    );
-    expect(payload.home).toBe(`${payload.tmpDir}/${path.basename(payload.home)}`);
-    expect(payload.home).toContain("/openclaw-onboard-case-minimal-home.");
-    expect(payload).toMatchObject({ agentDir: null, workspace: `${payload.home}/workspace` });
-    expect(payload.config).toStrictEqual({});
-    const trailingTmpDir = path.join(root, "function-trailing-tmp");
-    const trailing = await probe(
-      `${trailingTmpDir}/`,
-      'openclaw_test_state_create "onboard case" minimal;',
-    );
-    expect(trailing).toMatchObject({
-      home: `${trailingTmpDir}/${path.basename(trailing.home)}`,
-      stateDir: `${trailing.home}/.openclaw`,
-      workspace: `${trailing.home}/workspace`,
-    });
+    const temp = path.join(root, "function-tmp");
+    for (const tmpDir of [temp, `${temp}/`]) {
+      const payload = await probe(
+        tmpDir,
+        'export OPENCLAW_AGENT_DIR=/tmp/outside-agent; openclaw_test_state_create "onboard case" minimal;',
+      );
+      expect(payload).toMatchObject({
+        home: `${temp}/${path.basename(payload.home)}`,
+        stateDir: `${payload.home}/.openclaw`,
+        workspace: `${payload.home}/workspace`,
+        agentDir: null,
+      });
+      expect(payload.home).toContain("/openclaw-onboard-case-minimal-home.");
+      expect(payload.config).toStrictEqual({});
+    }
     const existingHome = path.join(root, "existing-home");
     const existing = await probe(
       undefined,
