@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SystemChangeEntry } from "../../../packages/gateway-protocol/src/index.js";
 import {
   CONFIG_AUDIT_MAX_ENTRIES,
@@ -16,7 +16,7 @@ import {
   SYSTEM_AGENT_AUDIT_SCOPE,
   type SystemAgentAuditEntry,
 } from "../../system-agent/audit.js";
-import { withTestDir } from "../../test-helpers/temp-dir.js";
+import { createSuiteTempRootTracker } from "../../test-helpers/temp-dir.js";
 import { createDirectChatContext } from "../server-chat.agent-events.test-helpers.js";
 import {
   listSystemChanges,
@@ -43,6 +43,19 @@ function expectEntries(entries: SystemChangeEntry[], expected: Partial<SystemCha
   expect(entries).toEqual(expected.map((entry) => expect.objectContaining(entry)));
 }
 
+async function readPages(count = 3) {
+  const entries: SystemChangeEntry[] = [];
+  let beforeCursor: string | undefined;
+  for (let index = 0; index < count; index++) {
+    const page = await listSystemChanges({ limit: 1, beforeCursor });
+    expect(page.entries).toHaveLength(1);
+    entries.push(...page.entries);
+    beforeCursor = page.nextCursor;
+  }
+  expect(beforeCursor).toBeUndefined();
+  return entries;
+}
+
 function configRecord(
   value: Partial<Extract<ConfigAuditRecord, { event: "config.write" }>> & {
     ts: string;
@@ -59,32 +72,16 @@ function configRecord(
   } as unknown as ConfigAuditRecord;
 }
 
-function createAuditStores(env: NodeJS.ProcessEnv) {
-  return {
-    systemStore: createSqliteAuditRecordStore<SystemAgentAuditEntry>({
-      scope: SYSTEM_AGENT_AUDIT_SCOPE,
-      maxEntries: SYSTEM_AGENT_AUDIT_MAX_ENTRIES,
-      env,
-    }),
-    configStore: createSqliteAuditRecordStore<ConfigAuditRecord>({
-      scope: CONFIG_AUDIT_SCOPE,
-      maxEntries: CONFIG_AUDIT_MAX_ENTRIES,
-      env,
-    }),
-  };
+type AuditStore<T> = ReturnType<typeof createSqliteAuditRecordStore<T>>;
+function createStore<T>(scope: string, maxEntries: number): AuditStore<T> {
+  return createSqliteAuditRecordStore<T>({ scope, maxEntries, env: process.env });
 }
 
-function withAuditStores(
-  run: (fixture: ReturnType<typeof createAuditStores> & { stateDir: string }) => Promise<void>,
-) {
-  return withTestDir({ prefix: "openclaw-system-changes-" }, (stateDir) => {
-    vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-    return run({ ...createAuditStores(process.env), stateDir });
-  });
-}
+const temp = createSuiteTempRootTracker({ prefix: "openclaw-system-changes-" });
+let systemStore: AuditStore<SystemAgentAuditEntry>;
+let configStore: AuditStore<ConfigAuditRecord>;
 
 function writeConfigs(
-  store: ReturnType<typeof createAuditStores>["configStore"],
   ...records: Array<
     [
       key: string,
@@ -98,7 +95,7 @@ function writeConfigs(
   >
 ) {
   for (const [key, at, previousHash, nextHash, path, origin, extra] of records) {
-    store.upsert(
+    configStore.upsert(
       key,
       configRecord({
         ts: new Date(Date.UTC(2026, 6, 18, 12) + at).toISOString(),
@@ -113,12 +110,8 @@ function writeConfigs(
   }
 }
 
-function seedOperation(
-  store: ReturnType<typeof createAuditStores>["systemStore"],
-  summary: string,
-  [configHashBefore, configHashAfter] = ["a", "b"],
-) {
-  store.upsert(
+function seedOperation(summary: string, [configHashBefore, configHashAfter] = ["a", "b"]) {
+  systemStore.upsert(
     "operation",
     {
       timestamp: "2026-07-18T12:00:04.000Z",
@@ -132,376 +125,339 @@ function seedOperation(
 }
 
 describe("openclaw.changes.list", () => {
+  beforeEach(async () => {
+    await temp.setup();
+    vi.stubEnv("OPENCLAW_STATE_DIR", await temp.make());
+    systemStore = createStore<SystemAgentAuditEntry>(
+      SYSTEM_AGENT_AUDIT_SCOPE,
+      SYSTEM_AGENT_AUDIT_MAX_ENTRIES,
+    );
+    configStore = createStore<ConfigAuditRecord>(CONFIG_AUDIT_SCOPE, CONFIG_AUDIT_MAX_ENTRIES);
+  });
   afterEach(async () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     await closeOpenClawStateDatabaseAsync();
+    await temp.cleanup();
   });
 
   it.each(["revoked", "rejected"] as const)(
     "does not disclose a delayed %s read",
     async (outcome) => {
-      await withTestDir({ prefix: "openclaw-system-changes-delayed-" }, async (stateDir) => {
-        vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-        const read =
-          createDeferredCore<
-            Awaited<ReturnType<typeof stateReader.executeExistingOpenClawStateRead>>
-          >();
-        vi.spyOn(stateReader, "executeExistingOpenClawStateRead")
-          .mockReturnValueOnce(read.promise)
-          .mockResolvedValue({
-            ok: true,
-            sourceAdmitted: true,
-            type: "diagnostic.latest",
-            entries: [],
-          });
-        let current = true;
-        const { respond, pending } = requestChanges({
-          hasCurrentClientAuthority: () => current,
+      const read =
+        createDeferredCore<
+          Awaited<ReturnType<typeof stateReader.executeExistingOpenClawStateRead>>
+        >();
+      vi.spyOn(stateReader, "executeExistingOpenClawStateRead")
+        .mockReturnValueOnce(read.promise)
+        .mockResolvedValue({
+          ok: true,
+          sourceAdmitted: true,
+          type: "diagnostic.latest",
+          entries: [],
         });
-        expect(respond).not.toHaveBeenCalled();
-        if (outcome === "revoked") {
-          current = false;
-          read.resolve({ ok: true, sourceAdmitted: true, type: "diagnostic.latest", entries: [] });
-        } else {
-          read.reject(new Error("audit reader refused"));
-        }
-        await pending;
-        expect(respond).toHaveBeenCalledExactlyOnceWith(
-          false,
-          undefined,
-          expect.objectContaining({
-            message:
-              outcome === "revoked"
-                ? "Gateway requester authority changed"
-                : "audit reader refused",
-          }),
-        );
+      let current = true;
+      const { respond, pending } = requestChanges({
+        hasCurrentClientAuthority: () => current,
       });
+      expect(respond).not.toHaveBeenCalled();
+      if (outcome === "revoked") {
+        current = false;
+        read.resolve({ ok: true, sourceAdmitted: true, type: "diagnostic.latest", entries: [] });
+      } else {
+        read.reject(new Error("audit reader refused"));
+      }
+      await pending;
+      expect(respond).toHaveBeenCalledExactlyOnceWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          message:
+            outcome === "revoked" ? "Gateway requester authority changed" : "audit reader refused",
+        }),
+      );
     },
   );
 
   it("merges journals, collapses matching writes, and skips non-history records", async () => {
-    await withAuditStores(async ({ stateDir, systemStore, configStore }) => {
-      seedOperation(systemStore, "Set config gateway.port", ["hash-a", "hash-b"]);
-      configStore.upsert(
-        "external",
-        {
-          event: "config.external",
-          ts: "2026-07-18T12:00:01.000Z",
-          valid: false,
-          previousHash: "hash-c",
-          nextHash: "hash-d",
-          changedPaths: ["channels.telegram"],
-          opaqueChange: true,
-        } as unknown as ConfigAuditRecord,
-        1_000,
-      );
-      writeConfigs(
-        configStore,
-        ["doctor", 2_000, "hash-b", "hash-c", "agents.defaults.model", "doctor"],
-        ["match", 3_000, "hash-a", "hash-b", "gateway.port", "system-agent"],
-        [
-          "repeat",
-          2_000,
-          "hash-a",
-          "hash-b",
-          "gateway.bind",
-          "cli",
-          { ts: "2026-07-18T12:00:05.000Z" },
-        ],
-        [
-          "failed",
-          3_000,
-          "failed-a",
-          "failed-b",
-          undefined,
-          undefined,
-          { ts: "2026-07-18T12:00:05.500Z", result: "failed" },
-        ],
-      );
-      configStore.upsert(
-        "observe",
-        {
-          event: "config.observe",
-          ts: "2026-07-18T12:00:06.000Z",
-        } as unknown as ConfigAuditRecord,
-        6_000,
-      );
+    seedOperation("Set config gateway.port", ["hash-a", "hash-b"]);
+    configStore.upsert(
+      "external",
+      {
+        event: "config.external",
+        ts: "2026-07-18T12:00:01.000Z",
+        valid: false,
+        previousHash: "hash-c",
+        nextHash: "hash-d",
+        changedPaths: ["channels.telegram"],
+        opaqueChange: true,
+      } as unknown as ConfigAuditRecord,
+      1_000,
+    );
+    writeConfigs(
+      ["doctor", 2_000, "hash-b", "hash-c", "agents.defaults.model", "doctor"],
+      ["match", 3_000, "hash-a", "hash-b", "gateway.port", "system-agent"],
+      [
+        "repeat",
+        2_000,
+        "hash-a",
+        "hash-b",
+        "gateway.bind",
+        "cli",
+        { ts: "2026-07-18T12:00:05.000Z" },
+      ],
+      [
+        "failed",
+        3_000,
+        "failed-a",
+        "failed-b",
+        undefined,
+        undefined,
+        { ts: "2026-07-18T12:00:05.500Z", result: "failed" },
+      ],
+    );
+    configStore.upsert(
+      "observe",
+      {
+        event: "config.observe",
+        ts: "2026-07-18T12:00:06.000Z",
+      } as unknown as ConfigAuditRecord,
+      6_000,
+    );
 
-      vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
-      const queries = vi.spyOn(sqliteQueries, "executeSqliteQuerySync");
-      const singleQueries = vi.spyOn(sqliteQueries, "executeSqliteQueryTakeFirstSync");
-      const { respond, pending } = requestChanges({ params: { limit: 50 } });
-      await pending;
-      expect(queries).not.toHaveBeenCalled();
-      expect(singleQueries).not.toHaveBeenCalled();
-      expect(respond).toHaveBeenCalledExactlyOnceWith(true, {
-        entries: [
-          // Store insertion order wins over display timestamps.
-          expect.objectContaining({
-            kind: "operation",
-            source: "system-agent",
-            summary: "Set config gateway.port",
-            changedPaths: ["gateway.port"],
-          }),
-          expect.objectContaining({
-            kind: "config-write",
-            source: "cli",
-            changedPaths: ["gateway.bind"],
-          }),
-          expect.objectContaining({
-            kind: "config-write",
-            source: "doctor",
-            changedPaths: ["agents.defaults.model"],
-          }),
-          expect.objectContaining({
-            kind: "external-edit",
-            source: "external",
-            invalid: true,
-            opaqueChange: true,
-            changedPaths: ["channels.telegram"],
-          }),
-        ],
-      });
+    const queries = vi.spyOn(sqliteQueries, "executeSqliteQuerySync");
+    const singleQueries = vi.spyOn(sqliteQueries, "executeSqliteQueryTakeFirstSync");
+    const { respond, pending } = requestChanges({ params: { limit: 50 } });
+    await pending;
+    expect(queries).not.toHaveBeenCalled();
+    expect(singleQueries).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledExactlyOnceWith(true, {
+      entries: [
+        // Store insertion order wins over display timestamps.
+        expect.objectContaining({
+          kind: "operation",
+          source: "system-agent",
+          summary: "Set config gateway.port",
+          changedPaths: ["gateway.port"],
+        }),
+        expect.objectContaining({
+          kind: "config-write",
+          source: "cli",
+          changedPaths: ["gateway.bind"],
+        }),
+        expect.objectContaining({
+          kind: "config-write",
+          source: "doctor",
+          changedPaths: ["agents.defaults.model"],
+        }),
+        expect.objectContaining({
+          kind: "external-edit",
+          source: "external",
+          invalid: true,
+          opaqueChange: true,
+          changedPaths: ["channels.telegram"],
+        }),
+      ],
     });
   });
 
   it("classifies legacy redacted argv when origin is absent", async () => {
-    await withAuditStores(async ({ configStore: store }) => {
-      for (const [key, at, before, after, argv] of [
-        ["doctor", 3_000, "a", "b", ["doctor", "--fix"]],
-        ["config", 2_000, "b", "c", ["config", "set", "profile.name", "doctor"]],
-        ["unknown", 1_000, "c", "d", ["onboard"]],
-      ] as const) {
-        store.upsert(
-          key,
-          configRecord({
-            ts: new Date(Date.UTC(2026, 6, 18, 12) + at).toISOString(),
-            previousHash: before,
-            nextHash: after,
-            argv: ["node", "openclaw", ...argv],
-          }),
-        );
-      }
+    for (const [key, at, before, after, argv] of [
+      ["doctor", 3_000, "a", "b", ["doctor", "--fix"]],
+      ["config", 2_000, "b", "c", ["config", "set", "profile.name", "doctor"]],
+      ["unknown", 1_000, "c", "d", ["onboard"]],
+    ] as const) {
+      configStore.upsert(
+        key,
+        configRecord({
+          ts: new Date(Date.UTC(2026, 6, 18, 12) + at).toISOString(),
+          previousHash: before,
+          nextHash: after,
+          argv: ["node", "openclaw", ...argv],
+        }),
+      );
+    }
 
-      expect((await listSystemChanges({})).entries.map((entry) => entry.source)).toEqual([
-        "unknown",
-        "cli",
-        "doctor",
-      ]);
-    });
+    expect((await listSystemChanges({})).entries.map((entry) => entry.source)).toEqual([
+      "unknown",
+      "cli",
+      "doctor",
+    ]);
   });
 
   it("keeps pages newest-first while suppressing an older collapse partner", async () => {
-    await withAuditStores(async ({ systemStore, configStore }) => {
-      writeConfigs(
-        configStore,
-        ["match", 1_000, "a", "b", "gateway.port", "system-agent"],
-        ["one", 2_000, "b", "c", "gateway.bind", "cli"],
-        ["two", 3_000, "c", "d", "gateway.mode", "cli"],
-      );
-      seedOperation(systemStore, "Set config gateway.port");
+    writeConfigs(
+      ["match", 1_000, "a", "b", "gateway.port", "system-agent"],
+      ["one", 2_000, "b", "c", "gateway.bind", "cli"],
+      ["two", 3_000, "c", "d", "gateway.mode", "cli"],
+    );
+    seedOperation("Set config gateway.port");
 
-      const first = await listSystemChanges({ limit: 1 });
-      expectEntries(first.entries, [{ kind: "operation", summary: "Set config gateway.port" }]);
-      const second = await listSystemChanges({ limit: 1, beforeCursor: first.nextCursor });
-      expectEntries(second.entries, [{ changedPaths: ["gateway.mode"], source: "cli" }]);
-      const third = await listSystemChanges({ limit: 1, beforeCursor: second.nextCursor });
-      expectEntries(third.entries, [{ changedPaths: ["gateway.bind"], source: "cli" }]);
-      expect(third.nextCursor).toBeUndefined();
-      const entries = [...first.entries, ...second.entries, ...third.entries];
-      expect(entries.map((entry) => entry.at)).toEqual(
-        entries.map((entry) => entry.at).toSorted((left, right) => right - left),
-      );
-      expect(entries.map((entry) => entry.id)).toEqual([
-        ...new Set(entries.map((entry) => entry.id)),
-      ]);
-      expect(entries.some((entry) => entry.changedPaths?.includes("gateway.port"))).toBe(false);
-    });
+    const entries = await readPages();
+    expectEntries(entries, [
+      { kind: "operation", summary: "Set config gateway.port" },
+      { changedPaths: ["gateway.mode"], source: "cli" },
+      { changedPaths: ["gateway.bind"], source: "cli" },
+    ]);
+    expect(entries.map((entry) => entry.at)).toEqual(
+      entries.map((entry) => entry.at).toSorted((left, right) => right - left),
+    );
+    expect(entries.map((entry) => entry.id)).toEqual([
+      ...new Set(entries.map((entry) => entry.id)),
+    ]);
+    expect(entries.some((entry) => entry.changedPaths?.includes("gateway.port"))).toBe(false);
   });
 
   it("keeps an outside-window repeated transition on a later page", async () => {
-    await withAuditStores(async ({ systemStore, configStore }) => {
-      writeConfigs(
-        configStore,
-        ["old", 1_000, "a", "b", "old.path", "system-agent", { ts: "2026-07-18T11:58:00.000Z" }],
-        ["one", 2_000, "b", "c", "gateway.bind", "cli"],
-        ["two", 3_000, "c", "d", "gateway.mode", "cli"],
-      );
-      seedOperation(systemStore, "Set config gateway.port");
+    writeConfigs(
+      ["old", 1_000, "a", "b", "old.path", "system-agent", { ts: "2026-07-18T11:58:00.000Z" }],
+      ["one", 2_000, "b", "c", "gateway.bind", "cli"],
+      ["two", 3_000, "c", "d", "gateway.mode", "cli"],
+    );
+    seedOperation("Set config gateway.port");
 
-      const pages = [];
-      let cursor: string | undefined;
-      do {
-        const page = await listSystemChanges({
-          limit: 1,
-          ...(cursor ? { beforeCursor: cursor } : {}),
-        });
-        pages.push(...page.entries);
-        cursor = page.nextCursor;
-      } while (cursor);
+    const pages = await readPages(4);
 
-      expect(pages.map((entry) => entry.changedPaths?.[0])).toEqual([
-        undefined,
-        "gateway.mode",
-        "gateway.bind",
-        "old.path",
-      ]);
-      expect(pages.map((entry) => entry.id)).toEqual([...new Set(pages.map((entry) => entry.id))]);
-    });
+    expect(pages.map((entry) => entry.changedPaths?.[0])).toEqual([
+      undefined,
+      "gateway.mode",
+      "gateway.bind",
+      "old.path",
+    ]);
+    expect(pages.map((entry) => entry.id)).toEqual([...new Set(pages.map((entry) => entry.id))]);
   });
 
   it("prefers an in-window match over an older repeated transition", async () => {
-    await withAuditStores(async ({ systemStore, configStore }) => {
-      writeConfigs(
-        configStore,
-        ["old", 1_000, "a", "b", "old.path", "system-agent"],
-        ["current", 2_000, "a", "b", "current.path", "system-agent"],
-        ["newer", 3_000, "b", "c", "gateway.bind", "cli"],
-      );
-      seedOperation(systemStore, "Set current path");
+    writeConfigs(
+      ["old", 1_000, "a", "b", "old.path", "system-agent"],
+      ["current", 2_000, "a", "b", "current.path", "system-agent"],
+      ["newer", 3_000, "b", "c", "gateway.bind", "cli"],
+    );
+    seedOperation("Set current path");
 
-      const first = await listSystemChanges({ limit: 1 });
-      expectEntries(first.entries, [{ kind: "operation", changedPaths: ["current.path"] }]);
-      const second = await listSystemChanges({ limit: 1, beforeCursor: first.nextCursor });
-      expectEntries(second.entries, [{ source: "cli", changedPaths: ["gateway.bind"] }]);
-      const third = await listSystemChanges({ limit: 1, beforeCursor: second.nextCursor });
-      expectEntries(third.entries, [{ kind: "config-write", changedPaths: ["old.path"] }]);
-      expect(third.nextCursor).toBeUndefined();
-    });
+    expectEntries(await readPages(), [
+      { kind: "operation", changedPaths: ["current.path"] },
+      { source: "cli", changedPaths: ["gateway.bind"] },
+      { kind: "config-write", changedPaths: ["old.path"] },
+    ]);
   });
 
   it("paginates equal timestamps by per-scope sequence and freezes the scope heads", async () => {
-    await withAuditStores(async ({ configStore: store }) => {
-      for (const [key, before, after] of [
-        ["one", "a", "b"],
-        ["two", "b", "c"],
-        ["three", "c", "d"],
-      ] as const) {
-        writeConfigs(store, [
-          key,
-          1_000,
-          before,
-          after,
-          key,
-          "config-rpc",
-          { ts: "2026-07-18T12:00:00.000Z" },
-        ]);
-      }
-
-      const first = await listSystemChanges({ limit: 2 });
-      expect(first.entries.map((entry) => entry.changedPaths?.[0])).toEqual(["three", "two"]);
-      expect(first.nextCursor).toEqual(expect.any(String));
-
-      writeConfigs(store, [
-        "new",
-        2_000,
-        "d",
-        "e",
-        "new",
+    for (const [key, before, after] of [
+      ["one", "a", "b"],
+      ["two", "b", "c"],
+      ["three", "c", "d"],
+    ] as const) {
+      writeConfigs([
+        key,
+        1_000,
+        before,
+        after,
+        key,
         "config-rpc",
-        { ts: "2026-07-18T12:00:01.000Z" },
+        { ts: "2026-07-18T12:00:00.000Z" },
       ]);
-      const second = await listSystemChanges({ limit: 2, beforeCursor: first.nextCursor });
-      expect(second.entries.map((entry) => entry.changedPaths?.[0])).toEqual(["one"]);
-      expect(second.nextCursor).toBeUndefined();
-    });
+    }
+
+    const first = await listSystemChanges({ limit: 2 });
+    expect(first.entries.map((entry) => entry.changedPaths?.[0])).toEqual(["three", "two"]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    writeConfigs(["new", 2_000, "d", "e", "new", "config-rpc", { ts: "2026-07-18T12:00:01.000Z" }]);
+    const second = await listSystemChanges({ limit: 2, beforeCursor: first.nextCursor });
+    expect(second.entries.map((entry) => entry.changedPaths?.[0])).toEqual(["one"]);
+    expect(second.nextCursor).toBeUndefined();
   });
 
   it("freezes an untouched scope before the first page is emitted", async () => {
-    await withAuditStores(async ({ systemStore, configStore }) => {
-      for (const [key, at, summary] of [
-        ["older-operation", 1_000, "Repaired configuration"],
-        ["newer-operation", 2_000, "Updated configuration"],
-      ] as const) {
-        systemStore.upsert(
-          key,
-          {
-            timestamp: new Date(Date.UTC(2026, 6, 18, 12) + at).toISOString(),
-            operation: "doctor.fix",
-            summary,
-          },
-          at,
-        );
-      }
-
-      const first = await listSystemChanges({ limit: 1 });
-      expectEntries(first.entries, [{ summary: "Updated configuration" }]);
-      expect(first.nextCursor).toEqual(expect.any(String));
-
-      writeConfigs(configStore, ["inserted", 3_000, "a", "b", "gateway.port", "config-rpc"]);
-
-      const second = await listSystemChanges({ limit: 1, beforeCursor: first.nextCursor });
-      expectEntries(second.entries, [{ summary: "Repaired configuration" }]);
-      expect(second.entries.some((entry) => entry.changedPaths?.includes("gateway.port"))).toBe(
-        false,
+    for (const [key, at, summary] of [
+      ["older-operation", 1_000, "Repaired configuration"],
+      ["newer-operation", 2_000, "Updated configuration"],
+    ] as const) {
+      systemStore.upsert(
+        key,
+        {
+          timestamp: new Date(Date.UTC(2026, 6, 18, 12) + at).toISOString(),
+          operation: "doctor.fix",
+          summary,
+        },
+        at,
       );
-      expect((await listSystemChanges({ limit: 50 })).entries).toContainEqual(
-        expect.objectContaining({ changedPaths: ["gateway.port"] }),
-      );
-    });
+    }
+
+    const first = await listSystemChanges({ limit: 1 });
+    expectEntries(first.entries, [{ summary: "Updated configuration" }]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+
+    writeConfigs(["inserted", 3_000, "a", "b", "gateway.port", "config-rpc"]);
+
+    const second = await listSystemChanges({ limit: 1, beforeCursor: first.nextCursor });
+    expectEntries(second.entries, [{ summary: "Repaired configuration" }]);
+    expect(second.entries.some((entry) => entry.changedPaths?.includes("gateway.port"))).toBe(
+      false,
+    );
+    expect((await listSystemChanges({ limit: 50 })).entries).toContainEqual(
+      expect.objectContaining({ changedPaths: ["gateway.port"] }),
+    );
   });
 
   it("bounds filtered journal scans and resumes from the scanned frontier", async () => {
-    await withAuditStores(async ({ configStore }) => {
-      for (let index = 0; index < SYSTEM_CHANGE_MAX_RAW_SCAN_PER_SCOPE + 250; index += 1) {
-        configStore.upsert(
-          `ineligible-${index}`,
-          index % 2 === 0
-            ? ({ event: "config.observe", ts: "2026-07-18T12:00:00.000Z" } as ConfigAuditRecord)
-            : configRecord({
-                ts: "2026-07-18T12:00:00.000Z",
-                result: "failed",
-                previousHash: `before-${index}`,
-                nextHash: `after-${index}`,
-              }),
-          index,
-        );
-      }
+    for (let index = 0; index < SYSTEM_CHANGE_MAX_RAW_SCAN_PER_SCOPE + 250; index += 1) {
+      configStore.upsert(
+        `ineligible-${index}`,
+        index % 2 === 0
+          ? ({ event: "config.observe", ts: "2026-07-18T12:00:00.000Z" } as ConfigAuditRecord)
+          : configRecord({
+              ts: "2026-07-18T12:00:00.000Z",
+              result: "failed",
+              previousHash: `before-${index}`,
+              nextHash: `after-${index}`,
+            }),
+        index,
+      );
+    }
 
-      const createReader = auditReaders.createSqliteAuditRecordReader;
-      async function readPage(beforeCursor?: string) {
-        const calls: Array<{ limit: number; beforeSequence?: number }> = [];
-        let rawRows = 0;
-        vi.spyOn(auditReaders, "createSqliteAuditRecordReader").mockImplementation(function <T>(
-          options: Parameters<typeof createReader>[0],
-        ) {
-          const reader = createReader<T>(options);
-          if (options.scope === CONFIG_AUDIT_SCOPE) {
-            const latest = reader.latest.bind(reader);
-            vi.spyOn(reader, "latest").mockImplementation(async (params) => {
-              calls.push(params);
-              const entries = await latest(params);
-              rawRows += entries.length;
-              return entries;
-            });
-          }
-          return reader;
-        });
-        const page = await listSystemChanges({ limit: 50, beforeCursor });
-        return { page, calls, rawRows };
-      }
-      const { page: first, calls: firstCalls, rawRows: firstRawRows } = await readPage();
-      expect(first.entries).toEqual([]);
-      expect(first.nextCursor).toEqual(expect.any(String));
-      // The frozen-head lookup loads one extra row before the bounded scan.
-      expect(firstRawRows).toBeLessThanOrEqual(SYSTEM_CHANGE_MAX_RAW_SCAN_PER_SCOPE + 1);
+    const createReader = auditReaders.createSqliteAuditRecordReader;
+    async function readPage(beforeCursor?: string) {
+      const calls: Array<{ limit: number; beforeSequence?: number }> = [];
+      let rawRows = 0;
+      vi.spyOn(auditReaders, "createSqliteAuditRecordReader").mockImplementation(function <T>(
+        options: Parameters<typeof createReader>[0],
+      ) {
+        const reader = createReader<T>(options);
+        if (options.scope === CONFIG_AUDIT_SCOPE) {
+          const latest = reader.latest.bind(reader);
+          vi.spyOn(reader, "latest").mockImplementation(async (params) => {
+            calls.push(params);
+            const entries = await latest(params);
+            rawRows += entries.length;
+            return entries;
+          });
+        }
+        return reader;
+      });
+      const page = await listSystemChanges({ limit: 50, beforeCursor });
+      return { page, calls, rawRows };
+    }
+    const { page: first, calls: firstCalls, rawRows: firstRawRows } = await readPage();
+    expect(first.entries).toEqual([]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    // The frozen-head lookup loads one extra row before the bounded scan.
+    expect(firstRawRows).toBeLessThanOrEqual(SYSTEM_CHANGE_MAX_RAW_SCAN_PER_SCOPE + 1);
 
-      const firstCursor = JSON.parse(
-        Buffer.from(first.nextCursor!, "base64url").toString("utf8"),
-      ) as { configBefore: number };
-      expect(firstCalls.at(-1)?.beforeSequence).toBeGreaterThan(firstCursor.configBefore);
+    const firstCursor = JSON.parse(
+      Buffer.from(first.nextCursor!, "base64url").toString("utf8"),
+    ) as { configBefore: number };
+    expect(firstCalls.at(-1)?.beforeSequence).toBeGreaterThan(firstCursor.configBefore);
 
-      const {
-        page: second,
-        calls: secondCalls,
-        rawRows: secondRawRows,
-      } = await readPage(first.nextCursor);
-      expect(second.entries).toEqual([]);
-      expect(second.nextCursor).toBeUndefined();
-      expect(secondCalls[0]?.beforeSequence).toBe(firstCursor.configBefore);
-      expect(secondRawRows).toBeLessThanOrEqual(SYSTEM_CHANGE_MAX_RAW_SCAN_PER_SCOPE);
-    });
+    const {
+      page: second,
+      calls: secondCalls,
+      rawRows: secondRawRows,
+    } = await readPage(first.nextCursor);
+    expect(second.entries).toEqual([]);
+    expect(second.nextCursor).toBeUndefined();
+    expect(secondCalls[0]?.beforeSequence).toBe(firstCursor.configBefore);
+    expect(secondRawRows).toBeLessThanOrEqual(SYSTEM_CHANGE_MAX_RAW_SCAN_PER_SCOPE);
   });
 });

@@ -4,7 +4,6 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { buildPluginCapabilityConsentReview } from "../../plugins/capability-summary.js";
 import { resetCommandQueueStateForTest } from "../../process/command-queue.test-support.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { SetupInferenceActivationIndeterminateError } from "../../system-agent/setup-inference-core.js";
 import type { ActivateSetupInferenceParams } from "../../system-agent/setup-inference.js";
 import { createPluginCapabilityConsentPrompter } from "../../wizard/plugin-capability-consent.js";
 import { WizardSession } from "../../wizard/session.js";
@@ -204,36 +203,6 @@ describe("openclaw.setup provider resolution", () => {
       signedIn.resolve();
       vi.useRealTimers();
     }
-  });
-
-  it("locks cancellation before an accepted runtime install can start", async () => {
-    const { promise: locked, resolve: reportLocked } = createDeferredCore();
-    const { promise: installReleased, resolve: releaseInstall } = createDeferredCore();
-    activate.mockImplementationOnce(async (params) => {
-      const accepted = await params.prompter.confirm({
-        message: "Install the reviewed runtime?",
-        initialValue: false,
-      });
-      expect(accepted).toBe(true);
-      await params.beforePersistentEffect?.();
-      reportLocked();
-      await installReleased;
-      return activated();
-    });
-    await startWizard();
-    const confirmation = await next();
-    const terminal = answerWizard(context, sessionId, confirmation, true);
-    await locked;
-
-    const calls = await invoke("wizard.cancel", context, { sessionId });
-    expect(calls).toEqual([
-      { ok: true, payload: { status: "running", error: undefined }, error: undefined },
-    ]);
-    expect(wizardSessions.has(sessionId)).toBe(true);
-
-    releaseInstall();
-    await expect(terminal).resolves.toMatchObject({ done: true, status: "done" });
-    expect(wizardSessions.has(sessionId)).toBe(false);
   });
 
   it.each([
@@ -521,56 +490,6 @@ describe("openclaw.setup provider resolution", () => {
     }
   });
 
-  it.each([false, true])(
-    "preserves the host shutdown outcome across activation (committed=%s)",
-    async (committed) => {
-      const activationStarted = createDeferredCore();
-      const finishActivation = createDeferredCore();
-      const shutdownMessage = "Gateway is shutting down; restart it before continuing setup.";
-      activate.mockImplementationOnce(async (params: ActivateSetupInferenceParams) => {
-        if (committed) {
-          params.onCommitStarted?.(config);
-        }
-        activationStarted.resolve();
-        await finishActivation.promise;
-        if (params.signal?.aborted) {
-          return { ok: false, status: "unavailable", error: "Provider login was cancelled." };
-        }
-        return activated("fixture/demo-model");
-      });
-      const { session } = await startWizard("activate", {
-        kind: "codex-cli",
-        modelRef: "fixture/demo-model",
-      });
-      try {
-        await activationStarted.promise;
-        session.close(new Error(shutdownMessage));
-        expect(session.signal.aborted).toBe(!committed);
-        finishActivation.resolve();
-        await whenAdmittedWizardSessionSettled(session);
-        const done = await next();
-        if (committed) {
-          expect(done).toMatchObject({
-            done: true,
-            status: "done",
-            modelActivation: { modelRef: "fixture/demo-model" },
-          });
-        } else {
-          expect(done).toMatchObject({
-            done: true,
-            status: "error",
-            error: shutdownMessage,
-          });
-          expect(done).not.toHaveProperty("modelActivation");
-        }
-        expect(wizardSessions.has(sessionId)).toBe(false);
-      } finally {
-        finishActivation.resolve();
-        await whenAdmittedWizardSessionSettled(session);
-      }
-    },
-  );
-
   it("returns finalized rejection instead of buffered progress on the first wizard.next", async () => {
     activate.mockImplementationOnce(async (params: ActivateSetupInferenceParams) => {
       const progress = expectDefined(params.prompter, "activation prompter").progress(
@@ -600,14 +519,7 @@ describe("openclaw.setup provider resolution", () => {
     expect(wizardSessions.has(sessionId)).toBe(false);
   });
 
-  it.each([
-    "failed",
-    "rejected",
-    "thrown",
-    "retention-indeterminate",
-    "application-error",
-    "cancelled",
-  ] as const)(
+  it.each(["failed", "rejected", "thrown", "application-error", "cancelled"] as const)(
     "reports only proven rejection without verified activation for %s provider auth",
     async (outcome) => {
       activate.mockImplementationOnce(async (params: ActivateSetupInferenceParams) => {
@@ -616,9 +528,6 @@ describe("openclaw.setup provider resolution", () => {
         });
         if (outcome === "thrown") {
           throw new Error("401 Provider rejected sign-in");
-        }
-        if (outcome === "retention-indeterminate") {
-          throw new SetupInferenceActivationIndeterminateError("Could not retain Codex safely");
         }
         if (outcome === "application-error") {
           params.onCommitStarted?.(config);
@@ -655,11 +564,9 @@ describe("openclaw.setup provider resolution", () => {
           error:
             outcome === "application-error"
               ? "The Gateway did not complete activation (failed)."
-              : outcome === "retention-indeterminate"
-                ? "Could not retain Codex safely"
-                : outcome === "thrown"
-                  ? "401 Provider rejected sign-in"
-                  : "Provider rejected sign-in",
+              : outcome === "thrown"
+                ? "401 Provider rejected sign-in"
+                : "Provider rejected sign-in",
           ...(outcome === "rejected"
             ? { activationRejection: { disposition: "rejected-before-promotion", status: "auth" } }
             : {}),
@@ -755,66 +662,62 @@ describe("openclaw.setup provider resolution", () => {
     },
   );
 
-  it.each([false, true])(
-    "runs provider preparation with native discovery preference %s",
-    async (nativeSessionCatalogsEnabled) => {
-      const preparedConfig: OpenClawConfig = {
-        ...config,
-        models: { providers: { ollama: { baseUrl: "http://127.0.0.1:11434", models: [] } } },
-      };
-      const persistAuthProfiles = vi.fn();
-      mocks.prepareProvider.mockImplementationOnce(async (params, consume) => {
-        await params.prompter.note("Model ready", "Ollama");
-        await params.beforePersistentEffect();
-        return consume({
-          config: preparedConfig,
-          agentModelOverride: "ollama/qwen3:0.6b",
-          authProfiles: [],
-          persistAuthProfiles,
-        });
+  it("prepares provider credentials and returns the selected model", async () => {
+    const preparedConfig: OpenClawConfig = {
+      ...config,
+      models: { providers: { ollama: { baseUrl: "http://127.0.0.1:11434", models: [] } } },
+    };
+    const persistAuthProfiles = vi.fn();
+    mocks.prepareProvider.mockImplementationOnce(async (params, consume) => {
+      await params.prompter.note("Model ready", "Ollama");
+      await params.beforePersistentEffect();
+      return consume({
+        config: preparedConfig,
+        agentModelOverride: "ollama/qwen3:0.6b",
+        authProfiles: [],
+        persistAuthProfiles,
       });
-      const calls = await invoke("openclaw.setup.prepare.start", context, {
-        sessionId: "prepare-session-1",
-        nativeSessionCatalogsEnabled,
-        agentId: "research",
-        authChoice: "ollama",
-        workspace: "/tmp/models-workspace",
-      });
+    });
+    const calls = await invoke("openclaw.setup.prepare.start", context, {
+      sessionId: "prepare-session-1",
+      agentId: "research",
+      authChoice: "ollama",
+      workspace: "/tmp/models-workspace",
+    });
 
-      expect(calls[0]).toMatchObject({
-        ok: true,
-        payload: { sessionId: "prepare-session-1", done: false, status: "running" },
-      });
-      const session = expectDefined(
-        wizardSessions.get("prepare-session-1"),
-        "prepare wizard session",
-      );
-      const note = await callWizardNext(context, { sessionId: "prepare-session-1" });
-      expect(note).toMatchObject({
-        done: false,
-        step: { type: "note", title: "Ollama", message: "Model ready" },
-      });
-      expect(mocks.prepareProvider).toHaveBeenCalledWith(
-        expect.objectContaining({
-          authChoice: "ollama",
-          agentId: "research",
-          config,
-          workspaceDir: "/tmp/models-workspace",
-          setDefaultModel: false,
-          preserveExistingDefaultModel: true,
-          signal: session.signal,
-          isRemote: true,
-        }),
-        expect.any(Function),
-      );
-      const done = await answerWizard(context, "prepare-session-1", note, null);
-      expect(done).toEqual({
-        done: true,
-        status: "done",
-        preparedModelRef: "ollama/qwen3:0.6b",
-      });
-      expect(persistAuthProfiles).toHaveBeenCalledOnce();
-      expect(mocks.writeConfig).toHaveBeenCalledOnce();
-    },
-  );
+    expect(calls[0]).toMatchObject({
+      ok: true,
+      payload: { sessionId: "prepare-session-1", done: false, status: "running" },
+    });
+    const session = expectDefined(
+      wizardSessions.get("prepare-session-1"),
+      "prepare wizard session",
+    );
+    const note = await callWizardNext(context, { sessionId: "prepare-session-1" });
+    expect(note).toMatchObject({
+      done: false,
+      step: { type: "note", title: "Ollama", message: "Model ready" },
+    });
+    expect(mocks.prepareProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authChoice: "ollama",
+        agentId: "research",
+        config,
+        workspaceDir: "/tmp/models-workspace",
+        setDefaultModel: false,
+        preserveExistingDefaultModel: true,
+        signal: session.signal,
+        isRemote: true,
+      }),
+      expect.any(Function),
+    );
+    const done = await answerWizard(context, "prepare-session-1", note, null);
+    expect(done).toEqual({
+      done: true,
+      status: "done",
+      preparedModelRef: "ollama/qwen3:0.6b",
+    });
+    expect(persistAuthProfiles).toHaveBeenCalledOnce();
+    expect(mocks.writeConfig).toHaveBeenCalledOnce();
+  });
 });

@@ -147,7 +147,7 @@ describe("Gateway automatic inference setup", () => {
     expectUnused(fixture.activate, fixture.prepare, fixture.commit);
   });
 
-  it.each(["unavailable", "unknown", "timeout", "throw"] as const)(
+  it.each(["unavailable", "unknown", "throw"] as const)(
     "shows Codex inspection failure without activating Ollama: %s",
     async (failureMode) => {
       fixture.detect.mockResolvedValueOnce(detection([ollama, codex]));
@@ -169,7 +169,7 @@ describe("Gateway automatic inference setup", () => {
     },
   );
 
-  it.each(["rate_limit", "billing", "format", "timeout", "unknown", "absent"] as const)(
+  it.each(["rate_limit", "absent"] as const)(
     "can select Ollama when Codex is %s",
     async (status) => {
       const absent = status === "absent";

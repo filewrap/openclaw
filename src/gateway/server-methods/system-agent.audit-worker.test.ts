@@ -10,7 +10,10 @@ import {
   closeOpenClawStateDatabaseAsync,
 } from "../../state/openclaw-state-db.js";
 import { createSystemAgentOverviewFixture } from "../../system-agent/overview.fixture.test-support.js";
-import { readTranscriptTailAsync } from "../../system-agent/transcript-store.js";
+import {
+  createSystemAgentTranscriptStore,
+  readTranscriptTailAsync,
+} from "../../system-agent/transcript-store.js";
 import { withTestDir } from "../../test-helpers/temp-dir.js";
 import { systemAgentHandlers, type SystemAgentChatSession } from "./system-agent.js";
 import type { GatewayClient } from "./types.js";
@@ -111,7 +114,7 @@ function chatRequest(current?: () => boolean) {
 it("persists real chat, greeting, and reset flows through the audit owner", async () => {
   await withAuditState(async (transcript) => {
     transcript.upsert("seed", { role: "user", text: "Earlier question", at: 1 }, 1);
-    const { chat, respond } = chatRequest();
+    const { chat, respond, sessions } = chatRequest();
     const callChat = async (params: SystemAgentChatParams) => {
       await chat(params);
       expect(respond).toHaveBeenLastCalledWith(true, expect.any(Object), undefined);
@@ -141,6 +144,7 @@ it("persists real chat, greeting, and reset flows through the audit owner", asyn
     expect(engines[2]?.planGreeting).not.toHaveBeenCalled();
     await callChat({ sessionId: "conversation", reset: true });
     expect(engines[0]?.dispose).toHaveBeenCalledOnce();
+    expect(sessions.get("conversation")?.engine.handle).not.toBe(engines[0]?.handle);
     expect(engines[3]?.seedHistory).not.toHaveBeenCalled();
     const persisted = await readTranscriptTailAsync(30);
     expect(persisted.map(({ text }) => text)).toEqual([
@@ -150,6 +154,16 @@ it("persists real chat, greeting, and reset flows through the audit owner", asyn
       "Recorded answer",
     ]);
     expect(await readTranscriptTailAsync(30, { afterLastReset: true })).toEqual([]);
+    const turns = [
+      { role: "user", text: "After reset" },
+      { role: "assistant", text: "Fresh answer" },
+    ] as const;
+    for (const [at, turn] of turns.entries()) {
+      await createSystemAgentTranscriptStore().appendTurn({ ...turn, at });
+    }
+    await callChat({ sessionId: "fresh-after-reset" });
+    expect(engines.at(-1)?.seedHistory).toHaveBeenCalledWith(turns);
+    expect(engines[0]?.handle).toHaveBeenCalledOnce();
     expect(sql).toEqual([]);
   });
 });
