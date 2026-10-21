@@ -7,9 +7,11 @@ import type {
   RealtimeTranscriptionSessionCreateRequest,
 } from "openclaw/plugin-sdk/realtime-transcription";
 import * as realtimeVoiceSdk from "openclaw/plugin-sdk/realtime-voice";
+import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
+import { rawDataToString } from "openclaw/plugin-sdk/webhook-ingress";
 import { WebSocket } from "openclaw/plugin-sdk/websocket-runtime";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { MediaStreamHandler } from "./media-stream.js";
+import { MediaStreamHandler, type MediaStreamConfig } from "./media-stream.js";
 import {
   createHandler,
   createStubSession,
@@ -63,6 +65,26 @@ async function closeWs(...sockets: WebSocket[]) {
 
 function sendMedia(ws: WebSocket, payload: string, streamSid?: string) {
   ws.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
+}
+
+function createAcceptedHandler(
+  session: RealtimeTranscriptionSession,
+  options: Partial<MediaStreamConfig> = {},
+) {
+  return createHandler({
+    transcriptionProvider: createStubSttProvider(() => session),
+    shouldAcceptStream: () => true,
+    ...options,
+  });
+}
+
+function observeTalk(callSid: string, streamSid: string) {
+  const spy = vi.spyOn(realtimeVoiceSdk, "recordTalkObservabilityEvent");
+  onTestFinished(() => spy.mockRestore());
+  return () =>
+    spy.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.sessionId === `voice-call:${callSid}:${streamSid}`);
 }
 
 describe("MediaStreamHandler security hardening", () => {
@@ -119,14 +141,7 @@ describe("MediaStreamHandler security hardening", () => {
         sentAudio.push(Buffer.from(audio));
       },
     };
-    const talkEventSpy = vi.spyOn(realtimeVoiceSdk, "recordTalkObservabilityEvent");
-    onTestFinished(() => {
-      talkEventSpy.mockRestore();
-    });
-    const talkEvents = () =>
-      talkEventSpy.mock.calls
-        .map(([event]) => event)
-        .filter((event) => event.sessionId === "voice-call:CA-talk:MZ-talk");
+    const talkEvents = observeTalk("CA-talk", "MZ-talk");
     const handler = createHandler({
       transcriptionProvider: createStubSttProvider((request) => {
         callbacks = request;
@@ -147,15 +162,26 @@ describe("MediaStreamHandler security hardening", () => {
       callbacks?.onPartial?.("hel");
       callbacks?.onTranscript?.("hello there");
 
+      const outboundAudio = nextWsMessage(ws);
       await handler.queueTts("MZ-talk", async () => {
         handler.sendAudio("MZ-talk", Buffer.alloc(160, 0xff));
       });
+      await withTimeout(outboundAudio);
 
+      const outboundMark = nextWsMessage(ws);
       const activePlayback = handler.queueTts("MZ-talk", async (signal) => {
-        await waitForAbort(signal);
+        await Promise.all([
+          handler.sendMarkAndWait("MZ-talk", "tts-cleared", 100, signal),
+          waitForAbort(signal),
+        ]);
+      });
+      expect(await withTimeout(outboundMark)).toMatchObject({
+        event: "mark",
+        mark: { name: "tts-cleared" },
       });
       handler.clearTtsQueue("MZ-talk", "barge-in");
       await activePlayback;
+      echoMark(ws, "MZ-talk", "tts-cleared");
 
       await closeWs(ws);
       await vi.waitFor(() =>
@@ -501,9 +527,7 @@ describe("MediaStreamHandler security hardening", () => {
       isConnected: () => false,
     };
 
-    const handler = createHandler({
-      transcriptionProvider: createStubSttProvider(() => session),
-      shouldAcceptStream: () => true,
+    const handler = createAcceptedHandler(session, {
       onConnect,
       onTranscriptionReady,
     });
@@ -559,9 +583,7 @@ describe("MediaStreamHandler security hardening", () => {
       isConnected: () => false,
     };
 
-    const handler = createHandler({
-      transcriptionProvider: createStubSttProvider(() => session),
-      shouldAcceptStream: () => true,
+    const handler = createAcceptedHandler(session, {
       onConnect,
       onTranscriptionReady,
       onDisconnect,
@@ -602,10 +624,7 @@ describe("MediaStreamHandler security hardening", () => {
       ...createStubSession(),
       sendAudio: (audio) => sentAudio.push(Buffer.from(audio)),
     };
-    const handler = createHandler({
-      transcriptionProvider: createStubSttProvider(() => session),
-      shouldAcceptStream: () => true,
-    });
+    const handler = createAcceptedHandler(session);
     await withConnection(handler, async (ws) => {
       sendStart(ws, "MZ-base64", "CA-base64");
       for (const payload of ["!!!not-valid-base64!!!", "   \t\n  "]) {
@@ -661,15 +680,10 @@ describe("MediaStreamHandler lifecycle", () => {
     const closeSession = vi.fn();
     const onConnect = vi.fn();
     const onDisconnect = vi.fn();
-    const handler = createHandler({
-      transcriptionProvider: createStubSttProvider(() => ({
-        ...createStubSession(),
-        close: closeSession,
-      })),
-      shouldAcceptStream: () => true,
-      onConnect,
-      onDisconnect,
-    });
+    const handler = createAcceptedHandler(
+      { ...createStubSession(), close: closeSession },
+      { onConnect, onDisconnect },
+    );
     const server = await startWsServer(handler);
     const ws = await connectWs(server.url);
     const shutdownBarrier = createDeferred<void>();
@@ -704,5 +718,60 @@ describe("MediaStreamHandler lifecycle", () => {
       await handler.close();
       await server.close();
     }
+  });
+});
+
+const requireRecord = createRequireRecord("record", "expected-label-record");
+const nextWsMessage = (ws: WebSocket): Promise<Record<string, unknown>> =>
+  new Promise((resolve, reject) => {
+    ws.once("message", (data) => {
+      try {
+        resolve(requireRecord(JSON.parse(rawDataToString(data)), "WebSocket message"));
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  });
+
+function echoMark(ws: WebSocket, streamSid: string, name: string) {
+  ws.send(JSON.stringify({ event: "mark", streamSid, mark: { name } }));
+}
+
+describe("MediaStreamHandler TTS queue", () => {
+  it("bounds pending playback per stream and recovers after draining", async () => {
+    const handler = createHandler();
+    const activeGate = createDeferred<void>();
+    const playbackOrder: number[] = [];
+
+    const active = handler.queueTts("stream-1", async () => {
+      playbackOrder.push(0);
+      await activeGate.promise;
+    });
+    const pending = Array.from({ length: 8 }, (_, index) =>
+      handler.queueTts("stream-1", async () => {
+        playbackOrder.push(index + 1);
+      }),
+    );
+    let overflowRan = false;
+
+    await expect(
+      handler.queueTts("stream-1", async () => {
+        overflowRan = true;
+      }),
+    ).rejects.toThrow("Telephony TTS queue is full for stream; maxPending=8");
+
+    await handler.queueTts("stream-2", async () => {});
+    expect(overflowRan).toBe(false);
+    expect(playbackOrder).toEqual([0]);
+
+    activeGate.resolve();
+    await active;
+    await Promise.all(pending);
+    expect(playbackOrder).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+    await handler.queueTts("stream-1", async () => {
+      playbackOrder.push(9);
+    });
+    expect(playbackOrder).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 });
