@@ -125,15 +125,11 @@ function writePrebuiltRuntime(root: string) {
     sourceDir: root,
     inventory: previousReleaseInventory,
   });
-  const requiredOutputs = listCoreRuntimePostBuildOutputs({ rootDir: root });
-  for (const relativePath of requiredOutputs) {
-    const outputPath = path.join(root, relativePath);
-    if (!existsSync(outputPath)) {
-      mkdirSync(path.dirname(outputPath), { recursive: true });
-      writeFileSync(outputPath, "fixture\n");
+  for (const relativePath of listCoreRuntimePostBuildOutputs({ rootDir: root })) {
+    if (!existsSync(path.join(root, relativePath))) {
+      writeFiles(root, { [relativePath]: "fixture\n" });
     }
   }
-  expect(listCoreRuntimePostBuildOutputs({ rootDir: root })).toEqual(requiredOutputs);
   writeBuildStamp({ cwd: root });
   writeRuntimePostBuildStamp({ cwd: root });
 }

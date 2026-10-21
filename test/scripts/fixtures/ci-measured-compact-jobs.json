@@ -622,7 +622,6 @@
             "test/scripts/run-opengrep.test.ts",
             "test/scripts/run-oxlint.test.ts",
             "test/scripts/run-tsgo-worktree.test.ts",
-            "test/scripts/run-tsgo.test.ts",
             "test/scripts/run-vitest-bounded.test.ts",
             "test/scripts/run-vitest-profile.test.ts",
             "test/scripts/run-vitest-progress.test.ts",

@@ -27,6 +27,11 @@ import {
 } from "../helpers/fixture-receipts.js";
 import { withinTest } from "../helpers/promise.js";
 import { runQaGatewayFixture } from "../helpers/qa-gateway-cleanup.js";
+import {
+  fixtureReadyBeforeSettlement,
+  isProcessPresent as isProcessAlive,
+  waitForProcessObservation as waitForFixtureExit,
+} from "./run-process.test-support.js";
 
 const wrapperArgv = resolveRuntimeWorkerArgv(
   resolveRuntimeWorkerUrl(scriptModuleEntrypoints.runWithEnv),
@@ -52,30 +57,6 @@ function withReceiptClient(source: string): string {
 import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 ${source}`;
-}
-
-async function waitForFixtureExit(
-  predicate: () => boolean,
-  label: string,
-  signal: AbortSignal,
-): Promise<void> {
-  // The wrapper may exit immediately after sending SIGKILL, without joining
-  // orphan descendants. No owned handle exposes their eventual extinction.
-  let tick: ReturnType<typeof setTimeout> | undefined;
-  try {
-    while (!predicate()) {
-      await withinTest(
-        new Promise<void>((resolve) => {
-          tick = setTimeout(resolve, 5);
-        }),
-        signal,
-      ).catch((cause: unknown) => {
-        throw new Error(`test aborted waiting for ${label}`, { cause });
-      });
-    }
-  } finally {
-    clearTimeout(tick);
-  }
 }
 
 function spawnWrapperFixture(
@@ -127,15 +108,8 @@ function spawnWrapperFixture(
 
   return {
     signal,
-    async waitForReady(filename: string, label: string) {
-      // File publication precedes the receipt; close and receipts use separate
-      // channels, so a close-first race must consult the durable ready record.
-      const settled = completion.then(() => {
-        if (!existsSync(filename)) {
-          throw new Error(`wrapper exited before ${label}`);
-        }
-      });
-      await withinTest(Promise.race([receipts.waitFor(filename, "ready"), settled]), testSignal);
+    async waitForReady(filename: string) {
+      await withinTest(fixtureReadyBeforeSettlement(receipts, filename, completion), testSignal);
     },
     async waitForExit() {
       // Bind the body wait so a stall still reaches the fixture's process cleanup.
@@ -196,15 +170,6 @@ function spawnWrapperFixture(
   };
 }
 
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function descendantFixture(signal: AbortSignal, graceful: boolean) {
   const tempDir = mkdtempSync(path.join(tmpdir(), "openclaw-run-with-env-descendants-"));
   const files = {
@@ -256,11 +221,8 @@ function descendantFixture(signal: AbortSignal, graceful: boolean) {
     ...fixture,
     files,
     async ready() {
-      await fixture.waitForReady(files.READY_FILE, "wrapped command readiness");
-      await fixture.waitForReady(
-        files.GRANDCHILD_READY_FILE,
-        "wrapped command descendant readiness",
-      );
+      await fixture.waitForReady(files.READY_FILE);
+      await fixture.waitForReady(files.GRANDCHILD_READY_FILE);
     },
   };
 }
@@ -389,7 +351,7 @@ describe("run-with-env", () => {
       );
 
       await runQaGatewayFixture(async () => {
-        await fixture.waitForReady(readyFile, "wrapped command readiness");
+        await fixture.waitForReady(readyFile);
         fixture.signal(parentSignal);
 
         const exit = await fixture.waitForExit();
