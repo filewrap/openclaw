@@ -66,16 +66,26 @@ function joinResponse(contentType = "application/json", finalUrl?: string) {
   return release;
 }
 
-function expectFailure(message: string, { consent = false, service = false } = {}) {
+function expectFailure(message: unknown) {
   expect(mocks.runtime.error).toHaveBeenCalledWith(message);
   expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
   expect(mocks.runNodeHost).not.toHaveBeenCalled();
-  if (consent) {
-    expect(mocks.mutateConfigFileWithRetry).not.toHaveBeenCalled();
-  }
-  if (service) {
-    expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
-  }
+  expect(mocks.mutateConfigFileWithRetry).not.toHaveBeenCalled();
+  expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
+}
+
+function savedAccessGateway(
+  host: string,
+  port: number,
+  tls: boolean,
+  clientId: string,
+  clientSecret: string,
+) {
+  mocks.loadNodeHostConfig.mockResolvedValueOnce({
+    version: 1,
+    nodeId: "node-test",
+    gateway: { host, port, tls, cloudflareAccess: { clientId, clientSecret } },
+  });
 }
 
 async function runConnect(args: string[]): Promise<void> {
@@ -111,10 +121,7 @@ describe("connect cli", () => {
       expect(mocks.runNodeHost).toHaveBeenCalledOnce();
       expect(mocks.runtime.error).not.toHaveBeenCalled();
     } else {
-      expect(mocks.runNodeHost).not.toHaveBeenCalled();
-      expect(mocks.runtime.error).toHaveBeenCalledWith(
-        "Gateway join code was not found or has expired.",
-      );
+      expectFailure("Gateway join code was not found or has expired.");
     }
     expect(release).toHaveBeenCalledOnce();
   });
@@ -139,12 +146,7 @@ describe("connect cli", () => {
           tls: true,
           tlsFingerprint: "ab".repeat(32),
         },
-        {
-          host: "gateway.tailnet.example",
-          port: 443,
-          contextPath: "/tailnet-gw",
-          tls: true,
-        },
+        { host: "gateway.tailnet.example", port: 443, contextPath: "/tailnet-gw", tls: true },
       ],
       gatewayBootstrapToken: "bootstrap-token",
       preferGatewayBootstrapToken: true,
@@ -199,7 +201,6 @@ describe("connect cli", () => {
           `If this machine is still paired with wss://gateway.example:443, reconnect with the saved pairing: ${reconnect}`,
           `Otherwise, mint a join URL on the Gateway host with ${profile ? `openclaw --profile ${profile}` : "openclaw"} devices join-code, then run: ${pair}`,
         ].join("\n"),
-        { consent: true, service: true },
       );
     },
   );
@@ -233,47 +234,23 @@ describe("connect cli", () => {
   );
 
   it.each([
-    {
-      name: "empty",
-      contents: Buffer.alloc(0),
-      message: "Connect target file is empty.",
-    },
-    {
-      name: "truncated UTF-8",
-      contents: Buffer.from([0xe2, 0x82]),
-      message: "Connect target file must be valid UTF-8.",
-    },
-    {
-      name: "oversized",
-      contents: Buffer.alloc(64 * 1024 + 1, 0x61),
-      message: "max 65536 bytes",
-    },
-  ])("rejects an $name target file without removing it", async ({ contents, message }) => {
+    ["empty", Buffer.alloc(0), "Connect target file is empty."],
+    ["truncated UTF-8", Buffer.from([0xe2, 0x82]), "Connect target file must be valid UTF-8."],
+    ["oversized", Buffer.alloc(64 * 1024 + 1, 0x61), "max 65536 bytes"],
+  ] as const)("rejects a %s target file without removing it", async (_name, contents, message) => {
     const root = tempDirs.make("openclaw-connect-target-invalid-");
     const targetFile = path.join(root, "setup-code");
     await fs.writeFile(targetFile, contents, { mode: 0o600 });
 
     await runConnect(["--target-file", targetFile, "--ephemeral"]);
 
-    expect(mocks.runtime.error).toHaveBeenCalledWith(expect.stringContaining(message));
-    expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
-    expect(mocks.runNodeHost).not.toHaveBeenCalled();
+    expectFailure(expect.stringContaining(message));
     await expect(fs.readFile(targetFile)).resolves.toEqual(contents);
   });
 
-  it.each([
-    {
-      args: ["--ephemeral", "--service"],
-      message: "--ephemeral cannot be combined with --service.",
-    },
-    {
-      args: ["--ephemeral", "--session-host"],
-      message: "--ephemeral cannot be combined with --session-host.",
-    },
-  ])("rejects incompatible flags: $args", async ({ args, message }) => {
-    await runConnect([setupCode(), ...args]);
-
-    expectFailure(message, { consent: true, service: true });
+  it.each(["--service", "--session-host"])("rejects --ephemeral with %s", async (flag) => {
+    await runConnect([setupCode(), "--ephemeral", flag]);
+    expectFailure(`--ephemeral cannot be combined with ${flag}.`);
   });
 
   it("forwards repeatable command restrictions through service connect", async () => {
@@ -375,16 +352,7 @@ describe("connect cli", () => {
   it("sends Cloudflare Access credentials on the pinned HTTPS join request", async () => {
     const clientId = ["cf", "client", "id"].join("-");
     const clientSecret = ["cf", "client", "secret"].join("-");
-    mocks.loadNodeHostConfig.mockResolvedValueOnce({
-      version: 1,
-      nodeId: "node-test",
-      gateway: {
-        host: "gateway.example",
-        port: 443,
-        tls: true,
-        cloudflareAccess: { clientId, clientSecret },
-      },
-    });
+    savedAccessGateway("gateway.example", 443, true, clientId, clientSecret);
     const target = `https://gateway.example/j/${"a".repeat(22)}`;
     joinResponse("application/json", target);
 
@@ -405,24 +373,12 @@ describe("connect cli", () => {
 
   it("rejects Cloudflare Access credentials before a plaintext join request", async () => {
     const clientSecret = ["cf", "plaintext", "secret"].join("-");
-    mocks.loadNodeHostConfig.mockResolvedValueOnce({
-      version: 1,
-      nodeId: "node-test",
-      gateway: {
-        host: "127.0.0.1",
-        port: 80,
-        tls: false,
-        cloudflareAccess: { clientId: "cf-plaintext-id", clientSecret },
-      },
-    });
+    savedAccessGateway("127.0.0.1", 80, false, "cf-plaintext-id", clientSecret);
 
     await runConnect([`http://127.0.0.1/j/${"a".repeat(22)}`]);
 
-    expect(mocks.runtime.error).toHaveBeenCalledWith(
-      "Cloudflare Access credentials require an HTTPS join URL.",
-    );
+    expectFailure("Cloudflare Access credentials require an HTTPS join URL.");
     expect(String(mocks.runtime.error.mock.calls[0]?.[0])).not.toContain(clientSecret);
     expect(mocks.fetchWithSsrFGuard).not.toHaveBeenCalled();
-    expect(mocks.runNodeHost).not.toHaveBeenCalled();
   });
 });
