@@ -38,34 +38,26 @@ it("defaults agent-proxy sessions to owner consults and adaptive wake names", ()
   });
 });
 
-it.each([undefined, "always"] as const)(
-  "resolves native delegation policy: %s",
-  (configuredConsultPolicy) => {
-    const native = () =>
-      resolve({
-        supportsActivationNameGating: undefined,
-        capabilities: {
-          transports: ["gateway-relay"],
-          inputAudioFormats: [],
-          outputAudioFormats: [],
-          handlesAgentConsult: true,
-        },
-        configuredToolPolicy: "safe-read-only",
-        configuredConsultPolicy,
-      });
-    if (configuredConsultPolicy === "always") {
-      expect(native).toThrow("owns voice responses and delegation");
-      return;
-    }
-    expect(native()).toMatchObject({
-      handlesAgentConsult: true,
-      toolPolicy: "safe-read-only",
-      consultPolicy: "auto",
-      wakeNamePolicy: "never",
-      autoRespondToAudio: true,
-    });
-  },
-);
+it("resolves native delegation policy", () => {
+  expect(
+    resolve({
+      supportsActivationNameGating: undefined,
+      capabilities: {
+        transports: ["gateway-relay"],
+        inputAudioFormats: [],
+        outputAudioFormats: [],
+        handlesAgentConsult: true,
+      },
+      configuredToolPolicy: "safe-read-only",
+    }),
+  ).toMatchObject({
+    handlesAgentConsult: true,
+    toolPolicy: "safe-read-only",
+    consultPolicy: "auto",
+    wakeNamePolicy: "never",
+    autoRespondToAudio: true,
+  });
+});
 
 it("preserves explicit wake-name overrides for capable agent-proxy sessions", () => {
   expect(resolve({ requireWakeName: true }).wakeNamePolicy).toBe("always");

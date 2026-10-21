@@ -29,7 +29,11 @@ describe("client voice mutation digest owner", () => {
     context: number,
     voiceSessionId = "v1",
   ) => owner.record({ agentId: "a", voiceSessionId, context });
-  function pendingOwner() {
+  function pendingOwner(
+    captureAttempt?: ConstructorParameters<
+      typeof ClientVoiceMutationDigestOwner<number>
+    >[0]["captureAttempt"],
+  ) {
     let active = 0;
     let maxActive = 0;
     const warn = vi.fn();
@@ -41,6 +45,7 @@ describe("client voice mutation digest owner", () => {
     }> = [];
     const owner = makeOwner<number>({
       warn,
+      captureAttempt,
       attempt: async ({ voiceSessionId: id, context, signal }) => {
         const completion = createDeferred<boolean>();
         attempts.push({ id, context, signal, completion });
@@ -214,22 +219,14 @@ describe("client voice mutation digest owner", () => {
 
   it("releases queued acceptance on reset but joins active attempts until they settle", async () => {
     const releases: Array<ReturnType<typeof vi.fn>> = [];
-    const attempts: Array<ReturnType<typeof createDeferred<boolean>>> = [];
-    const owner = makeOwner<number>({
-      captureAttempt: () => capture(releases),
-      attempt: async () => {
-        const completion = createDeferred<boolean>();
-        attempts.push(completion);
-        return completion.promise;
-      },
-    });
+    const { owner, attempts } = pendingOwner(() => capture(releases));
     for (let index = 0; index < 3; index++) {
       owner.record({ agentId: "main", voiceSessionId: String(index), context: index });
     }
     owner.clear();
     expect(releases.map((release) => release.mock.calls.length)).toEqual([0, 0, 1]);
-    attempts[0]!.reject(new Error("unknown delivery outcome"));
-    attempts[1]!.resolve(true);
+    attempts[0]!.completion.reject(new Error("unknown delivery outcome"));
+    attempts[1]!.completion.resolve(true);
     await flushMicrotasks();
     expect(releases.map((release) => release.mock.calls.length)).toEqual([1, 1, 1]);
   });

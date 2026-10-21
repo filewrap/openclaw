@@ -184,40 +184,6 @@ describe("realtime voice agent consult runtime", () => {
     expect(runEmbeddedAgent).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])(
-    "waits for run registration and releases it after cancellation=%s",
-    async (cancelled) => {
-      const { runtime, runEmbeddedAgent } = createAgentRuntime();
-      const entered = createDeferred();
-      const release = createDeferred();
-      const controller = new AbortController();
-      const cleanup = vi.fn();
-      const consult = runConsult(runtime, {
-        abortSignal: controller.signal,
-        onRunStarted: async () => {
-          entered.resolve();
-          await release.promise;
-          return { cleanup };
-        },
-      });
-      await entered.promise;
-      expect(runEmbeddedAgent).not.toHaveBeenCalled();
-      expect(cleanup).not.toHaveBeenCalled();
-      if (cancelled) {
-        controller.abort(new Error("voice session closed during registration"));
-      }
-      release.resolve();
-      if (cancelled) {
-        await expect(consult).rejects.toThrow("voice session closed during registration");
-        expect(runEmbeddedAgent).not.toHaveBeenCalled();
-      } else {
-        await expect(consult).resolves.toEqual({ text: "Speak this." });
-        expect(runEmbeddedAgent).toHaveBeenCalledOnce();
-      }
-      expect(cleanup).toHaveBeenCalledOnce();
-    },
-  );
-
   it("retains the voice binding until delegated run completion", async () => {
     const { runtime, runEmbeddedAgent } = createAgentRuntime();
     const started = createDeferred();

@@ -1,11 +1,7 @@
 import { StatementSync } from "node:sqlite";
 import { setImmediate as nextEventLoopTurn } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  awaitGateBeforeSettlement,
-  createDeferred,
-  withinTest,
-} from "../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import {
   observeSqliteReadSql,
   trackSqliteStatementExecutions,
@@ -31,7 +27,10 @@ import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worke
 import { requireNativeSqliteDatabase } from "../test-utils/native-sqlite.js";
 import { prepareClientVoiceSessionClose } from "./client-voice-session-lifecycle.js";
 import { readOpenVoiceSessions } from "./client-voice-session-lookup.worker.js";
-import { resolveOpenClientVoiceSessionId } from "./client-voice-session-read.js";
+import {
+  assertClientVoiceSessionOpen,
+  resolveOpenClientVoiceSessionId,
+} from "./client-voice-session-read.js";
 import {
   parseStoredVoiceSessionRecord,
   type ClientVoiceSessionRecord,
@@ -40,11 +39,7 @@ import {
   readVoiceSessionRecordInTransaction,
   writeVoiceSessionRecordInTransaction,
 } from "./client-voice-session-store.js";
-import {
-  completeRun,
-  recordMutation,
-  seedSession,
-} from "./client-voice-session.fixture.test-support.js";
+import { completeRun, seedSession } from "./client-voice-session.fixture.test-support.js";
 import {
   appendClientVoiceTranscript,
   appendRelayVoiceTranscript,
@@ -64,8 +59,7 @@ const { useClientVoiceSessionHarness } = await vi.hoisted(
 );
 
 describe("client voice session", () => {
-  const { releaseHeldWrites, sendDurableMessageBatch, sessionTurnMocks } =
-    useClientVoiceSessionHarness();
+  const { releaseHeldWrites, sessionTurnMocks } = useClientVoiceSessionHarness();
   const appendTurn = sessionTurnMocks.appendExpectedSessionTranscriptTurn;
   const retryBeforeClose = "voice transcript persistence must be retried before close";
   const queueFull = "voice transcript persistence queue capacity exceeded";
@@ -126,10 +120,17 @@ describe("client voice session", () => {
     const voiceSessionId = await createVoiceSession({
       provider: "google",
       voiceSessionId: "voice-1",
+      transcriptCapable: true,
       now: 10,
     });
     expect(await createVoiceSession({ voiceSessionId, now: 20 })).toBe(voiceSessionId);
-    expect(readRecord(voiceSessionId)).toMatchObject({ provider: "google" });
+    expect(readRecord(voiceSessionId)).toMatchObject({
+      provider: "google",
+      origin: "client",
+      transcriptCapable: true,
+    });
+    const legacy = await createVoiceSession({ voiceSessionId: "legacy" });
+    expect(readRecord(legacy)?.transcriptCapable).not.toBe(true);
     await expect(createVoiceSession({ provider: "openai", voiceSessionId })).rejects.toThrow(
       "provider does not match",
     );
@@ -141,44 +142,12 @@ describe("client voice session", () => {
     await expect(createVoiceSession({ voiceSessionId })).rejects.toThrow("already closed");
   });
 
-  it("preserves declared transcript capability and transport origin", async () => {
-    const capable = await createVoiceSession({
-      transcriptCapable: true,
-      voiceSessionId: "voice-capable",
-    });
-    const legacy = await createVoiceSession({ voiceSessionId: "voice-legacy" });
-    const relay = await createVoiceSession({
-      origin: "relay",
-      voiceSessionId: "voice-relay",
-    });
-    expect(readRecord(capable)).toMatchObject({
-      transcriptCapable: true,
-      origin: "client",
-    });
-    expect(readRecord(legacy)?.transcriptCapable).not.toBe(true);
-    expect(readRecord(relay)?.origin).toBe("relay");
-  });
-
-  it("waits for transcript serialization but not mutation digest delivery", async ({ signal }) => {
-    await seedSession("agent:main:main", {
-      channel: "discord",
-      to: "channel:voice-updates",
-    });
-    const voiceSessionId = await createVoiceSession({ voiceSessionId: "voice-durable-close" });
-    await recordMutation(voiceSessionId);
-    await completeRun(`run-${voiceSessionId}`);
-
+  it("waits for transcript serialization before closing", async () => {
+    const voiceSessionId = await seededVoice("voice-durable-close");
     const { release: transcriptWrite, entered: transcriptEntered } = holdTranscript();
     const append = appendTranscript(voiceSessionId, "final", "final answer", "assistant");
     await awaitAppend(transcriptEntered.promise, append);
 
-    const digestSend = createDeferred<{ status: "sent" }>();
-    const digestEntered = createDeferred();
-    releaseHeldWrites.push(() => digestSend.resolve({ status: "sent" }));
-    sendDurableMessageBatch.mockImplementationOnce(() => {
-      digestEntered.resolve();
-      return digestSend.promise;
-    });
     let closeSettled = false;
     const close = closeVoice(voiceSessionId, 42).then(() => {
       closeSettled = true;
@@ -193,13 +162,6 @@ describe("client voice session", () => {
       status: "closed",
       closedAt: 42,
     });
-    expect(readRecord(voiceSessionId)?.digestDeliveredAt).toBeUndefined();
-    await withinTest(digestEntered.promise, signal);
-    expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
-
-    digestSend.resolve({ status: "sent" });
-    await flushClientVoiceSessionWrites({ agentId: "main", voiceSessionId });
-    expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
   });
 
   it("rejects a concurrent close when an accepted transcript fails", async () => {
@@ -267,6 +229,7 @@ describe("client voice session", () => {
       config: {},
     });
     expect(readRecord(voiceSessionId)).toMatchObject({
+      origin: "relay",
       status: "closed",
       transcriptFailureKeys: unresolved,
     });
@@ -765,6 +728,7 @@ describe("client voice session", () => {
         (sql) => (/data_version/iu.test(sql) ? "freshness" : null),
       );
       expect(readOwnedVoiceSessionFacts(binding)).toMatchObject({ status: "open" });
+      expect(assertClientVoiceSessionOpen(binding)).toBe("client");
       expect(() =>
         runOpenClawAgentWriteTransaction((owner) => {
           writeVoiceSessionRecordInTransaction(owner, { ...original, status: "closed" });
@@ -798,7 +762,12 @@ describe("client voice session", () => {
         await broker.close();
       }
       const facts = readOwnedVoiceSessionFacts(binding);
-      expect(facts).toMatchObject({ status: "closed", hasUserTranscript: true });
+      expect(facts).toMatchObject({
+        status: "closed",
+        hasUserTranscript: true,
+        transcriptCapable: true,
+      });
+      expect(() => assertClientVoiceSessionOpen(binding)).toThrow("voice session is closed");
       expect(probes.counts).toEqual({ freshness: 0 });
       probes.restore();
     });

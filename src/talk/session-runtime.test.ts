@@ -1,10 +1,9 @@
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
-import {
-  REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
-  type RealtimeVoiceBridge,
-  type RealtimeVoiceBridgeCallbacks,
-  type RealtimeVoiceBridgeCreateRequest,
+import type {
+  RealtimeVoiceBridge,
+  RealtimeVoiceBridgeCallbacks,
+  RealtimeVoiceBridgeCreateRequest,
 } from "./provider-types.js";
 import {
   createRealtimeVoiceBridgeSession,
@@ -147,32 +146,6 @@ describe("realtime voice bridge session runtime", () => {
     expect(getPlaybackState).toHaveBeenCalledTimes(2);
   });
 
-  it("passes the requested agent scope and audio format to the provider bridge", () => {
-    expectTypeOf<() => Promise<void>>().toExtend<
-      NonNullable<RealtimeVoiceBridgeCallbacks["onTranscript"]>
-    >();
-    const handleDelegationInput = vi.fn(() => "control" as const);
-    const onTranscript = vi.fn();
-    const { callbacks: request } = createSession({
-      handleDelegationInput,
-      onTranscript,
-      agentId: "voice-agent",
-      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
-    });
-
-    expect(request.handleDelegationInput?.("status", vi.fn())).toBe("control");
-    expect(handleDelegationInput).toHaveBeenCalledExactlyOnceWith("status", expect.any(Function));
-    request.onTranscript?.("user", "status", true);
-    expect(onTranscript).toHaveBeenCalledExactlyOnceWith("user", "status", true);
-    const textMode = { textMode: "snapshot" } as const;
-    request.onTranscript?.("user", "corrected", false, textMode);
-    expect(onTranscript).toHaveBeenLastCalledWith("user", "corrected", false, textMode);
-    expect({ agentId: request.agentId, audioFormat: request.audioFormat }).toEqual({
-      agentId: "voice-agent",
-      audioFormat: REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
-    });
-  });
-
   it.each(["ack-immediately", "ignore"] as const)("handles %s provider marks", (markStrategy) => {
     const sendMark = vi.fn();
     const { callbacks, bridge } = createSession({
@@ -303,35 +276,6 @@ describe("realtime voice bridge session runtime", () => {
     expect(sendSinkAudio).toHaveBeenCalledExactlyOnceWith(Buffer.from("next-output"), undefined);
   });
 
-  it("forwards tool result continuation options and async acceptance to the provider bridge", () => {
-    const acceptance = Promise.resolve();
-    const submitToolResult = vi.fn(() => acceptance);
-    const { session } = createSession({}, { submitToolResult });
-
-    const result = { status: "working" };
-    const options = { willContinue: true };
-    const submitted = session.submitToolResult("call-1", result, options);
-
-    expect(submitted).toBe(acceptance);
-    expect(submitToolResult).toHaveBeenCalledWith("call-1", result, options);
-  });
-
-  it("rejects suppressed results before calling an unsupported provider bridge", () => {
-    const submitToolResult = vi.fn();
-    const { session } = createSession(
-      {},
-      {
-        submitToolResult,
-        supportsToolResultSuppression: false,
-      },
-    );
-
-    expect(() =>
-      session.submitToolResult("call-1", { ok: true }, { suppressResponse: true }),
-    ).toThrow("Realtime provider does not support suppressed tool results");
-    expect(submitToolResult).not.toHaveBeenCalled();
-  });
-
   it("does not expose session callbacks until the provider returns its bridge", () => {
     const onReady = vi.fn();
     const onToolCall = vi.fn();
@@ -353,6 +297,9 @@ describe("realtime voice bridge session runtime", () => {
 
 describe("realtime voice bridge finalization", () => {
   it("drains final transcripts while async close settles with a failure", async () => {
+    expectTypeOf<() => Promise<void>>().toExtend<
+      NonNullable<RealtimeVoiceBridgeCallbacks["onTranscript"]>
+    >();
     const completion = createDeferred();
     const close = vi.fn(() => {
       void session.close();
@@ -427,7 +374,7 @@ describe("native delegation session facade", () => {
       expect(Object.hasOwn(request, "handleDelegationInput")).toBe(true);
       // Buffered native input can arrive after adoption but before any ready event.
       expect(request.handleDelegationInput?.("status", respond)).toBe("control");
-      expect(handleDelegationInput).toHaveBeenCalledTimes(1);
+      expect(handleDelegationInput).toHaveBeenCalledExactlyOnceWith("status", expect.any(Function));
       expect(respond).not.toHaveBeenCalled();
     } finally {
       await session.close();

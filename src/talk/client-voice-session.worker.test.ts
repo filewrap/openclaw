@@ -1,16 +1,13 @@
 import { copyFileSync, existsSync, renameSync, symlinkSync, unlinkSync } from "node:fs";
 import path from "node:path";
-import { DatabaseSync, StatementSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
 import {
   awaitGateBeforeSettlement,
   createDeferred,
   withinTest,
 } from "../../test/helpers/promise.js";
-import {
-  observeHostDataSql,
-  observeSqliteReadSql,
-} from "../../test/helpers/sqlite-statement-execution-counter.js";
+import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import { readSessionTranscriptMessageEvents } from "../config/sessions/session-accessor.sqlite-active-events.js";
 import { replaceSessionEntrySync } from "../config/sessions/session-accessor.sqlite-entry.js";
 import {
@@ -675,24 +672,6 @@ describe("client voice session worker contract", () => {
       await persistence.drain();
       warn.mockRestore();
     }
-  });
-
-  it("reads tool facts without freshness probes and rejects a closed call", async () => {
-    const voiceSessionId = await createVoice({ transcriptCapable: true });
-    const binding = { ...target, voiceSessionId };
-    expect(assertClientVoiceSessionOpen(binding)).toBe("client");
-    const observation = observeSqliteReadSql(StatementSync.prototype);
-    try {
-      expect(assertClientVoiceSessionOpen(binding)).toBe("client");
-      expect(readRecord(voiceSessionId)?.transcriptCapable).toBe(true);
-      expect(observation.queries).toHaveLength(2);
-      expect(observation.queries.join("\n")).not.toMatch(/\b(?:pragma_)?data_version\b/i);
-    } finally {
-      observation.restore();
-    }
-    await closeVoice(voiceSessionId);
-    expect(() => assertClientVoiceSessionOpen(binding)).toThrow("voice session is closed");
-    expect(readRecord(voiceSessionId)?.transcriptCapable).toBe(true);
   });
 
   it("rejects a transcript after another connection closes the admitted call", async () => {
