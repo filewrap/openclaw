@@ -10,6 +10,7 @@ import {
   promptAndConfigureOllama,
 } from "./setup.js";
 import { checkOllamaCloudAuth } from "./setup.runtime.js";
+import { createLocalPrompter, createOllamaFetchMock } from "./setup.test-support.js";
 
 const upsertAuthProfileWithLock = vi.hoisted(() => vi.fn(async () => {}));
 const fetchWithSsrFGuardMock = vi.hoisted(() =>
@@ -25,10 +26,7 @@ const fetchWithSsrFGuardMock = vi.hoisted(() =>
 
 vi.mock("openclaw/plugin-sdk/provider-auth", async (importOriginal) => {
   const actual = await importOriginal<typeof import("openclaw/plugin-sdk/provider-auth")>();
-  return {
-    ...actual,
-    upsertAuthProfileWithLock,
-  };
+  return { ...actual, upsertAuthProfileWithLock };
 });
 
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
@@ -40,52 +38,6 @@ vi.mock("openclaw/plugin-sdk/ssrf-runtime", async (importOriginal) => {
   };
 });
 
-function createOllamaFetchMock(params: {
-  tags?: string[];
-  tagModels?: Array<{ name: string; size?: number }>;
-  fallbackCapabilities?: boolean;
-  show?: Record<string, number | undefined>;
-  capabilities?: Record<string, string[] | undefined>;
-  pullResponse?: Response;
-  tagsError?: Error;
-  meResponse?: Response;
-}) {
-  return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = requestUrl(input);
-    if (url.endsWith("/api/tags")) {
-      if (params.tagsError) {
-        throw params.tagsError;
-      }
-      return jsonResponse({
-        models: params.tagModels ?? (params.tags ?? []).map((name) => ({ name })),
-      });
-    }
-    if (url.endsWith("/api/show")) {
-      const body = JSON.parse(requestBodyText(init?.body)) as { model?: string };
-      const contextWindow = body.model ? params.show?.[body.model] : undefined;
-      const capabilities = body.model
-        ? params.capabilities === undefined
-          ? ["tools"]
-          : (params.capabilities[body.model] ??
-            (params.fallbackCapabilities ? ["tools"] : undefined))
-        : params.fallbackCapabilities
-          ? ["tools"]
-          : undefined;
-      return jsonResponse({
-        ...(contextWindow ? { model_info: { "llama.context_length": contextWindow } } : {}),
-        ...(capabilities ? { capabilities } : {}),
-      });
-    }
-    if (url.endsWith("/api/me") && !params.fallbackCapabilities) {
-      return params.meResponse ?? jsonResponse({});
-    }
-    if (url.endsWith("/api/pull")) {
-      return params.pullResponse ?? new Response('{"status":"success"}\n', { status: 200 });
-    }
-    throw new Error(`Unexpected fetch: ${url}`);
-  });
-}
-
 function mockCallArg(mock: { mock: { calls: unknown[][] } }, index = 0, argIndex = 0) {
   return mock.mock.calls.at(index)?.at(argIndex);
 }
@@ -94,15 +46,6 @@ function abortReasonAsError(signal: AbortSignal): Error {
   return signal.reason instanceof Error
     ? signal.reason
     : new Error("Request aborted", { cause: signal.reason });
-}
-
-function createLocalPrompter(overrides: Partial<WizardPrompter> = {}): WizardPrompter {
-  return {
-    select: vi.fn().mockResolvedValueOnce("local-only"),
-    text: vi.fn().mockResolvedValueOnce("http://127.0.0.1:11434"),
-    note: vi.fn(async () => undefined),
-    ...overrides,
-  } as unknown as WizardPrompter;
 }
 
 const createCloudLocalPrompter = () =>
@@ -211,12 +154,9 @@ describe("ollama setup", () => {
     const fetchMock = createOllamaFetchMock({ tagsError: new Error("down") });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      promptAndConfigureOllama({
-        cfg: {},
-        prompter,
-      }),
-    ).rejects.toThrow("Ollama is still not reachable at http://127.0.0.1:11434");
+    await expect(promptAndConfigureOllama({ cfg: {}, prompter })).rejects.toThrow(
+      "Ollama is still not reachable at http://127.0.0.1:11434",
+    );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
@@ -612,10 +552,9 @@ describe("checkOllamaCloudAuth", () => {
   });
 
   it("bounds oversized 401 body and cancels the stream", async () => {
-    const chunk = new Uint8Array(1024 * 1024); // 1 MiB chunk
+    const chunk = new Uint8Array(1024 * 1024);
     let readCount = 0;
     let canceled = false;
-    // 64 chunks × 1 MiB = 64 MiB — exceeds the 16 MiB cap
     const oversizedBody = new ReadableStream<Uint8Array>({
       pull(controller) {
         if (readCount >= 64) {
@@ -644,7 +583,6 @@ describe("checkOllamaCloudAuth", () => {
       signinUrl: undefined,
     });
 
-    // Stream must be cancelled before all 64 MiB are consumed
     expect(readCount).toBeLessThan(64);
     expect(canceled).toBe(true);
   });
@@ -712,9 +650,7 @@ describe("Ollama non-interactive onboarding", () => {
   });
 
   it("handles embedding models before chat when a requested download fails", async () => {
-    const { embeddings } = { embeddings: 201 };
-
-    const embeddingNames = Array.from({ length: embeddings }, (_, index) => `embedding-${index}`);
+    const embeddingNames = Array.from({ length: 201 }, (_, index) => `embedding-${index}`);
     const fetchMock = createNonInteractiveFetchMock({
       tags: [...embeddingNames, "qwen2.5-coder:7b"],
       capabilities: {

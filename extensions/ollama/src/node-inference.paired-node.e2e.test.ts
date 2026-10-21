@@ -549,6 +549,10 @@ async function readRequestJson(request: IncomingMessage): Promise<Record<string,
   return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
 }
 
+function sendJson(response: ServerResponse, body: unknown): void {
+  response.end(JSON.stringify(body));
+}
+
 async function startFakeOllama(owner: "node" | "gateway"): Promise<FakeOllama> {
   const paths: string[] = [];
   const chatRequests: Array<Record<string, unknown>> = [];
@@ -556,7 +560,7 @@ async function startFakeOllama(owner: "node" | "gateway"): Promise<FakeOllama> {
     void handleFakeOllamaRequest(request, response, owner, paths, chatRequests).catch(
       (error: unknown) => {
         response.statusCode = 500;
-        response.end(JSON.stringify({ error: String(error) }));
+        sendJson(response, { error: String(error) });
       },
     );
   });
@@ -598,44 +602,35 @@ async function handleFakeOllamaRequest(
             { name: LOADED_NODE_MODEL, size: 1200 },
           ]
         : [{ name: "gateway-remote:latest" }];
-    response.end(JSON.stringify({ models }));
-    return;
+    return sendJson(response, { models });
   }
   if (requestPath === "/api/ps") {
-    response.end(JSON.stringify({ models: [{ name: LOADED_NODE_MODEL }] }));
-    return;
+    return sendJson(response, { models: [{ name: LOADED_NODE_MODEL }] });
   }
   if (requestPath === "/api/show") {
     const body = await readRequestJson(request);
     const modelName = typeof body.model === "string" ? body.model : undefined;
     if (!modelName) {
       response.statusCode = 400;
-      response.end(JSON.stringify({ error: "model is required" }));
-      return;
+      return sendJson(response, { error: "model is required" });
     }
     const isEmbedding = modelName.startsWith("embedding-");
-    response.end(
-      JSON.stringify({
-        capabilities: isEmbedding ? ["embedding"] : ["completion", "tools"],
-        model_info: isEmbedding ? {} : { "test.context_length": 32_768 },
-      }),
-    );
-    return;
+    return sendJson(response, {
+      capabilities: isEmbedding ? ["embedding"] : ["completion", "tools"],
+      model_info: isEmbedding ? {} : { "test.context_length": 32_768 },
+    });
   }
   if (requestPath === "/api/chat") {
     const body = await readRequestJson(request);
     chatRequests.push(body);
-    response.end(
-      JSON.stringify({
-        model: body.model,
-        message: { content: owner === "node" ? "PAIRED_NODE_OK" : "WRONG_GATEWAY_ENDPOINT" },
-        done_reason: "stop",
-        prompt_eval_count: 8,
-        eval_count: 3,
-      }),
-    );
-    return;
+    return sendJson(response, {
+      model: body.model,
+      message: { content: owner === "node" ? "PAIRED_NODE_OK" : "WRONG_GATEWAY_ENDPOINT" },
+      done_reason: "stop",
+      prompt_eval_count: 8,
+      eval_count: 3,
+    });
   }
   response.statusCode = 404;
-  response.end(JSON.stringify({ error: "not found" }));
+  sendJson(response, { error: "not found" });
 }

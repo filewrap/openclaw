@@ -1,4 +1,3 @@
-// Ollama tests cover embedding provider plugin behavior.
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/provider-auth";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +47,14 @@ function createProviderConfig(
   return { models: { providers: { [providerId]: provider } } } as unknown as OpenClawConfig;
 }
 
+const PRIVATE_HOST = "https://selected-private-host.invalid";
+const REMOTE_HOST = "https://remote-embedding-host.invalid";
+const SELECTED_KEY = "synthetic-selected-host-key";
+const REMOTE_KEY = "synthetic-remote-key";
+function selectedConfig(provider: Record<string, unknown> = {}) {
+  return createProviderConfig({ baseUrl: `${PRIVATE_HOST}/v1`, models: [], ...provider });
+}
+
 function embeddingOptions<T extends EmbeddingProviderOptions | MemoryEmbeddingOptions>(
   overrides: Partial<T> = {},
 ): T {
@@ -79,28 +86,24 @@ function mockEmbeddingResponse(response: Response) {
   return fetchMock;
 }
 
+function embeddingResponse(embeddings: unknown[], prompt_eval_count?: unknown) {
+  return new Response(JSON.stringify({ embeddings, prompt_eval_count }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function mockEmbeddingFetch(embedding: number[]) {
-  return mockEmbeddingResponse(
-    new Response(JSON.stringify({ embeddings: [embedding] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    }),
-  );
+  return mockEmbeddingResponse(embeddingResponse([embedding]));
 }
 
 function mockBatchEmbeddingFetch(count: number, promptEvalCount?: unknown) {
   const inputs: unknown[] = [];
   const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
     inputs.push(readEmbeddingRequestBody(init).input);
-    return new Response(
-      JSON.stringify({
-        embeddings: Array.from({ length: count }, () => [1, 0]),
-        prompt_eval_count: promptEvalCount,
-      }),
-      {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      },
+    return embeddingResponse(
+      Array.from({ length: count }, () => [1, 0]),
+      promptEvalCount,
     );
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -202,38 +205,36 @@ describe("ollama embedding provider", () => {
     ).rejects.toThrow(/memory\.search\.remote\.apiKey: unresolved SecretRef/i);
   });
 
-  it.each(["ollama-private"])(
-    "resolves selected %s provider credential and header SecretRefs before ambient cloud auth",
-    async (providerId) => {
-      vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-      vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", "synthetic-selected-host-key");
-      vi.stubEnv("OLLAMA_PROXY_KEY", "synthetic-proxy-key");
+  it("resolves selected provider credential and header SecretRefs before ambient cloud auth", async () => {
+    const providerId = "ollama-private";
+    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
+    vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", "synthetic-selected-host-key");
+    vi.stubEnv("OLLAMA_PROXY_KEY", "synthetic-proxy-key");
 
-      const { fetchMock } = await embedTestQuery({
-        config: createProviderConfig(
-          {
-            baseUrl: "https://selected-private-host.invalid/v1",
-            apiKey: envRef("OLLAMA_SELECTED_HOST_KEY"),
-            headers: {
-              "X-Proxy-Auth": envRef("OLLAMA_PROXY_KEY"),
-            },
-            models: [],
+    const { fetchMock } = await embedTestQuery({
+      config: createProviderConfig(
+        {
+          baseUrl: "https://selected-private-host.invalid/v1",
+          apiKey: envRef("OLLAMA_SELECTED_HOST_KEY"),
+          headers: {
+            "X-Proxy-Auth": envRef("OLLAMA_PROXY_KEY"),
           },
-          providerId,
-        ),
-        provider: providerId,
-      });
-
-      expectEmbeddingFetch(fetchMock, "https://selected-private-host.invalid/api/embed", {
-        input: "search_query: hello",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Proxy-Auth": "synthetic-proxy-key",
-          Authorization: "Bearer synthetic-selected-host-key",
+          models: [],
         },
-      });
-    },
-  );
+        providerId,
+      ),
+      provider: providerId,
+    });
+
+    expectEmbeddingFetch(fetchMock, "https://selected-private-host.invalid/api/embed", {
+      input: "search_query: hello",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Proxy-Auth": "synthetic-proxy-key",
+        Authorization: "Bearer synthetic-selected-host-key",
+      },
+    });
+  });
 
   it.each([
     { providerId: "ollama-private", surface: "apiKey", source: "env" },
@@ -247,18 +248,9 @@ describe("ollama embedding provider", () => {
       const fetchMock = mockEmbeddingFetch([1, 0]);
       const unavailableSecret = {
         source,
-        provider: "default" as const,
+        provider: "default",
         id:
-          source === "file"
-            ? "/synthetic/missing-ollama-secret"
-            : source === "exec"
-              ? "synthetic-missing-ollama-secret"
-              : "OLLAMA_MISSING_SELECTED_SECRET",
-      };
-      const selectedHostKey = {
-        source: "env" as const,
-        provider: "default" as const,
-        id: "OLLAMA_SELECTED_HOST_KEY",
+          source === "exec" ? "synthetic-missing-ollama-secret" : "OLLAMA_MISSING_SELECTED_SECRET",
       };
 
       await expect(
@@ -266,7 +258,7 @@ describe("ollama embedding provider", () => {
           config: createProviderConfig(
             {
               baseUrl: "https://selected-private-host.invalid/v1",
-              apiKey: surface === "apiKey" ? unavailableSecret : selectedHostKey,
+              apiKey: surface === "apiKey" ? unavailableSecret : envRef("OLLAMA_SELECTED_HOST_KEY"),
               ...(surface === "headers"
                 ? {
                     headers: {
@@ -290,29 +282,25 @@ describe("ollama embedding provider", () => {
     },
   );
 
-  it.each(["ollama-local"])(
-    "keeps explicit selected-host SecretRef value %s opaque",
-    async (resolvedSecret) => {
-      vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-      vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", resolvedSecret);
+  it("keeps explicit selected-host SecretRef values opaque", async () => {
+    const resolvedSecret = "ollama-local";
+    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
+    vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", resolvedSecret);
 
-      const { fetchMock } = await embedTestQuery({
-        config: createProviderConfig({
-          baseUrl: "https://selected-private-host.invalid/v1",
-          apiKey: envRef("OLLAMA_SELECTED_HOST_KEY"),
-          models: [],
-        }),
-      });
+    const { fetchMock } = await embedTestQuery({
+      config: selectedConfig({
+        apiKey: envRef("OLLAMA_SELECTED_HOST_KEY"),
+      }),
+    });
 
-      expectEmbeddingFetch(fetchMock, "https://selected-private-host.invalid/api/embed", {
-        input: "search_query: hello",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${resolvedSecret}`,
-        },
-      });
-    },
-  );
+    expectEmbeddingFetch(fetchMock, "https://selected-private-host.invalid/api/embed", {
+      input: "search_query: hello",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${resolvedSecret}`,
+      },
+    });
+  });
 
   it.each([7, -1])("sends one batch and reports native usage %s", async (tokens) => {
     const { fetchMock, inputs } = mockBatchEmbeddingFetch(3, tokens);
@@ -361,45 +349,25 @@ describe("ollama embedding provider", () => {
     expect(textSpy).not.toHaveBeenCalled();
   });
 
-  it.each([
-    {
-      name: "missing model",
-      status: 404,
-      detail: 'model "all-minilm" not found, try pulling it first',
-      recovery: " Run `ollama pull all-minilm` on the configured Ollama host.",
-    },
-  ])("reports actionable embed errors for $name", async ({ status, detail, recovery }) => {
-    const body = JSON.stringify({ error: detail });
-    const fetchMock = mockEmbeddingResponse(new Response(body, { status }));
+  it("reports actionable embed errors for a missing model", async () => {
+    const body = JSON.stringify({ error: 'model "all-minilm" not found, try pulling it first' });
+    const fetchMock = mockEmbeddingResponse(new Response(body, { status: 404 }));
     const { provider } = await createEmbeddingProvider({ model: "all-minilm" });
 
     await expect(provider.embed("hello", { inputType: "query" })).rejects.toMatchObject({
-      message: `Ollama embed HTTP ${status}: ${body}${recovery}`,
+      message: `Ollama embed HTTP 404: ${body} Run \`ollama pull all-minilm\` on the configured Ollama host.`,
     });
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
-  it("rejects non-number embedding values instead of zeroing them", async () => {
-    mockEmbeddingResponse(
-      new Response(JSON.stringify({ embeddings: [["0.1", 0.2]] }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-
+  it.each([
+    [["0.1", 0.2], "a non-number embedding value"],
+    [[], "an empty embedding"],
+  ] as const)("rejects malformed embedding %j", async (embedding, error) => {
+    mockEmbeddingResponse(embeddingResponse([embedding]));
     const { provider } = await createEmbeddingProvider();
-
     await expect(provider.embed("hello", { inputType: "query" })).rejects.toThrow(
-      "Ollama embed response contains a non-number embedding value",
-    );
-  });
-
-  it("rejects empty embeddings instead of silently disabling semantic search", async () => {
-    mockEmbeddingFetch([]);
-    const { provider } = await createEmbeddingProvider();
-
-    await expect(provider.embed("hello", { inputType: "query" })).rejects.toThrow(
-      "Ollama embed response contains an empty embedding",
+      `Ollama embed response contains ${error}`,
     );
   });
 
@@ -476,169 +444,101 @@ describe("ollama embedding provider", () => {
     expect(acquireLocalService).not.toHaveBeenCalled();
   });
 
-  it("does not attach pure env OLLAMA_API_KEY to a local host", async () => {
+  it.each([
+    ["http://127.0.0.1:11434", undefined],
+    ["https://ollama.com", "Bearer ollama-cloud-key"],
+  ])("scopes ambient cloud credentials for %s", async (baseUrl, authorization) => {
     vi.stubEnv("OLLAMA_API_KEY", "ollama-cloud-key");
-
-    const { fetchMock } = await embedTestQuery();
-
-    const init = firstFetchInit(fetchMock);
-    const headers = init?.headers as Record<string, string> | undefined;
-    expect(headers?.Authorization).toBeUndefined();
+    const { fetchMock } = await embedTestQuery({ remote: { baseUrl } });
+    expect(new Headers(firstFetchInit(fetchMock)?.headers).get("Authorization")).toBe(
+      authorization ?? null,
+    );
+    if (authorization) {
+      expectEmbeddingFetch(fetchMock, `${baseUrl}/api/embed`, {
+        input: "search_query: hello",
+        headers: { "Content-Type": "application/json", Authorization: authorization },
+      });
+    }
   });
 
-  it("attaches pure env OLLAMA_API_KEY to Ollama Cloud", async () => {
-    vi.stubEnv("OLLAMA_API_KEY", "ollama-cloud-key");
-
-    const { fetchMock } = await embedTestQuery({ remote: { baseUrl: "https://ollama.com" } });
-
-    expectEmbeddingFetch(fetchMock, "https://ollama.com/api/embed", {
-      input: "search_query: hello",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer ollama-cloud-key",
-      },
-    });
-  });
-
-  it("uses explicit header auth without resolving an inactive selected-host apiKey SecretRef", async () => {
-    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-    vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
-
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "https://selected-private-host.invalid/v1",
-        apiKey: envRef("OLLAMA_MISSING_SELECTED_SECRET"),
-        models: [],
-      }),
+  it.each<{
+    name: string;
+    selected: Record<string, unknown>;
+    remote: NonNullable<EmbeddingProviderOptions["remote"]>;
+    headers: Record<string, string>;
+  }>([
+    {
+      name: "explicit header auth leaves a competing apiKey SecretRef inactive",
+      selected: { apiKey: envRef("OLLAMA_MISSING_SELECTED_SECRET") },
       remote: {
-        baseUrl: "https://selected-private-host.invalid",
+        baseUrl: PRIVATE_HOST,
         headers: { authorization: "Bearer synthetic-explicit-tenant-a" },
       },
-    });
-
-    expectEmbeddingFetch(fetchMock, "https://selected-private-host.invalid/api/embed", {
-      input: "search_query: hello",
-      headers: {
-        "Content-Type": "application/json",
-        authorization: "Bearer synthetic-explicit-tenant-a",
-      },
-    });
-  });
-
-  it("skips a selected-host SecretRef header overridden case-insensitively by remote auth", async () => {
-    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-    vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", "synthetic-selected-host-key");
-    vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
-
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "https://selected-private-host.invalid/v1",
+      headers: { authorization: "Bearer synthetic-explicit-tenant-a" },
+    },
+    {
+      name: "remote headers override selected-host SecretRefs case-insensitively",
+      selected: {
         apiKey: envRef("OLLAMA_SELECTED_HOST_KEY"),
-        headers: {
-          "X-Proxy-Auth": envRef("OLLAMA_MISSING_SELECTED_SECRET"),
-        },
-        models: [],
-      }),
-      remote: {
-        baseUrl: "https://selected-private-host.invalid",
-        headers: { "x-proxy-auth": "synthetic-remote-header" },
+        headers: { "X-Proxy-Auth": envRef("OLLAMA_MISSING_SELECTED_SECRET") },
       },
-    });
-
-    expectEmbeddingFetch(fetchMock, "https://selected-private-host.invalid/api/embed", {
-      input: "search_query: hello",
+      remote: { baseUrl: PRIVATE_HOST, headers: { "x-proxy-auth": "synthetic-remote-header" } },
       headers: {
-        "Content-Type": "application/json",
         "x-proxy-auth": "synthetic-remote-header",
-        Authorization: "Bearer synthetic-selected-host-key",
+        Authorization: `Bearer ${SELECTED_KEY}`,
       },
-    });
-  });
-
-  it("does not attach provider apiKey to a different remote embedding host", async () => {
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "http://127.0.0.1:11434",
-        apiKey: "provider-host-key",
-        models: [],
-      }),
+    },
+    {
+      name: "a different host does not inherit a literal provider key",
+      selected: { baseUrl: "http://127.0.0.1:11434", apiKey: "provider-host-key" },
       remote: { baseUrl: "https://memory.example.com" },
-    });
-
-    const init = firstFetchInit(fetchMock);
-    const headers = init?.headers as Record<string, string> | undefined;
-    expect(headers?.Authorization).toBeUndefined();
-  });
-
-  it("does not forward selected-host SecretRefs to a different remote embedding host", async () => {
-    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-    vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", "synthetic-selected-host-key");
-    vi.stubEnv("OLLAMA_SELECTED_PROXY_KEY", "synthetic-selected-proxy-key");
-
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "https://selected-private-host.invalid/v1",
+      headers: {},
+    },
+    {
+      name: "a different host does not inherit selected-host SecretRefs",
+      selected: {
         apiKey: envRef("OLLAMA_SELECTED_HOST_KEY"),
-        headers: {
-          "X-Selected-Host-Auth": envRef("OLLAMA_SELECTED_PROXY_KEY"),
-        },
-        models: [],
-      }),
+        headers: { "X-Selected-Host-Auth": envRef("OLLAMA_SELECTED_PROXY_KEY") },
+      },
       remote: {
-        baseUrl: "https://remote-embedding-host.invalid",
-        apiKey: "synthetic-remote-key",
+        baseUrl: REMOTE_HOST,
+        apiKey: REMOTE_KEY,
         headers: { "X-Remote-Auth": "synthetic-remote-header" },
       },
-    });
-
-    expectEmbeddingFetch(fetchMock, "https://remote-embedding-host.invalid/api/embed", {
-      input: "search_query: hello",
       headers: {
-        "Content-Type": "application/json",
         "X-Remote-Auth": "synthetic-remote-header",
-        Authorization: "Bearer synthetic-remote-key",
+        Authorization: `Bearer ${REMOTE_KEY}`,
       },
-    });
-  });
-
-  it("ignores an inactive selected-host SecretRef when remote credentials own another host", async () => {
-    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
-    vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
-
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "https://selected-private-host.invalid/v1",
-        apiKey: envRef("OLLAMA_MISSING_SELECTED_SECRET"),
-        models: [],
-      }),
-      remote: {
-        baseUrl: "https://remote-embedding-host.invalid",
-        apiKey: "synthetic-remote-key",
-      },
-    });
-
-    expectEmbeddingFetch(fetchMock, "https://remote-embedding-host.invalid/api/embed", {
-      input: "search_query: hello",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer synthetic-remote-key",
-      },
-    });
-  });
-
-  it("honors remote local marker as an explicit no-auth opt-out", async () => {
-    const { fetchMock } = await embedTestQuery({
-      config: createProviderConfig({
-        baseUrl: "http://127.0.0.1:11434",
-        apiKey: "provider-host-key",
-        models: [],
-      }),
+    },
+    {
+      name: "remote credentials leave another host's unresolved SecretRef inactive",
+      selected: { apiKey: envRef("OLLAMA_MISSING_SELECTED_SECRET") },
+      remote: { baseUrl: REMOTE_HOST, apiKey: REMOTE_KEY },
+      headers: { Authorization: `Bearer ${REMOTE_KEY}` },
+    },
+    {
+      name: "the remote local marker explicitly opts out of selected-host auth",
+      selected: { baseUrl: "http://127.0.0.1:11434", apiKey: "provider-host-key" },
       remote: { apiKey: "ollama-local" }, // pragma: allowlist secret
+      headers: {},
+    },
+  ])("$name", async ({ selected, remote, headers }) => {
+    vi.stubEnv("OLLAMA_API_KEY", "synthetic-cloud-key");
+    vi.stubEnv("OLLAMA_SELECTED_HOST_KEY", SELECTED_KEY);
+    vi.stubEnv("OLLAMA_SELECTED_PROXY_KEY", "synthetic-selected-proxy-key");
+    vi.stubEnv("OLLAMA_MISSING_SELECTED_SECRET", "");
+    const { fetchMock } = await embedTestQuery({
+      config: selectedConfig(selected),
+      remote,
     });
-
-    const init = firstFetchInit(fetchMock);
-    const headers = init?.headers as Record<string, string> | undefined;
-    expect(headers?.Authorization).toBeUndefined();
+    expectEmbeddingFetch(
+      fetchMock,
+      `${remote.baseUrl ?? selected.baseUrl ?? PRIVATE_HOST}/api/embed`,
+      {
+        input: "search_query: hello",
+        headers: { "Content-Type": "application/json", ...headers },
+      },
+    );
   });
 
   it("preserves the legacy identity only for the default Ollama endpoint", async () => {
