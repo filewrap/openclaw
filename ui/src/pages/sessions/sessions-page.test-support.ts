@@ -238,6 +238,7 @@ export function createManagedSessions(overrides: Partial<SessionCapability> = {}
     archiveVisibility: archiveState.visibility,
     beginArchive: archiveState.beginPending,
     create: vi.fn(async () => null),
+    createResult: vi.fn(async () => null),
     subscribe,
     ...overrides,
   } as unknown as SessionCapability;

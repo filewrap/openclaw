@@ -5,6 +5,11 @@ import type { SessionDeleteRow } from "./selection.ts";
 import type { SessionsPageMenuProps } from "./session-menu.tsx";
 import type { TranscriptSearchProps } from "./transcript-search-view.tsx";
 
+export type SessionsPageMutationResult =
+  | "completed"
+  | "stale"
+  | { status: "failed"; error: unknown };
+
 export type SessionsPageState = {
   sortColumn: "key" | "updated";
   sortDir: "asc" | "desc";

@@ -301,7 +301,10 @@ describe("sessions page lifecycle", () => {
   it("reports a connection error instead of silently dropping a patch", async () => {
     const { page, connection, sessions } = await mountMutation({ patch: vi.fn() });
     connection.emit({ phase: "reconnecting", client: null });
-    expect(await page.patchSession("agent:main:main", { label: "renamed" })).toBe("failed");
+    expect(await page.patchSession("agent:main:main", { label: "renamed" })).toEqual({
+      status: "failed",
+      error: "Connect to the Gateway to change sessions.",
+    });
     expect(sessions.patch).not.toHaveBeenCalled();
     expect(page.error).toBe("Connect to the Gateway to change sessions.");
   });
@@ -539,12 +542,12 @@ describe("sessions page lifecycle", () => {
   it("drops stale mutation state, errors, menus, and navigation after disconnect", async () => {
     const deleted = createDeferred<Awaited<ReturnType<SessionCapability["deleteMany"]>>>();
     const patched = createDeferred<Awaited<ReturnType<SessionCapability["patch"]>>>();
-    const forked = createDeferred<string | null>();
+    const forked = createDeferred<Awaited<ReturnType<SessionCapability["createResult"]>>>();
     const groups = createDeferred<Awaited<ReturnType<SessionCapability["groupsPut"]>>>();
     const { page, sessions, connection, context } = await mountMutation({
       deleteMany: vi.fn(() => deleted.promise),
       patch: vi.fn(() => patched.promise),
-      create: vi.fn(() => forked.promise),
+      createResult: vi.fn(() => forked.promise),
       groupsPut: vi.fn(() => groups.promise),
     });
     const target = sessionRow("main", { key: "main" });
@@ -566,7 +569,7 @@ describe("sessions page lifecycle", () => {
       preservedWorktrees: [],
     });
     patched.resolve({ ok: true, key: "main", path: "", entry: { sessionId: target.sessionId! } });
-    forked.resolve("forked");
+    forked.resolve({ key: "forked", sessionId: "forked-id" });
     groups.reject(new Error("stale group error"));
     await Promise.all(requests);
     expect(page.result?.sessions.map(({ key }) => key)).toEqual(["main"]);
@@ -577,9 +580,11 @@ describe("sessions page lifecycle", () => {
   });
 
   it("forks an active session from its last completed message", async () => {
-    const { page, sessions } = await mountMutation({ create: vi.fn(async () => "active-fork") });
+    const { page, sessions } = await mountMutation({
+      createResult: vi.fn(async () => ({ key: "active-fork", sessionId: "active-fork-id" })),
+    });
     await page.forkSession("main", true);
-    expect(sessions.create).toHaveBeenCalledWith(
+    expect(sessions.createResult).toHaveBeenCalledWith(
       {
         parentSessionKey: "main",
         fork: true,
