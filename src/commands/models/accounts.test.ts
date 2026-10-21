@@ -223,6 +223,21 @@ function startResult(): UsersAuthConnectStartResult {
   };
 }
 
+function withAuthGateway(
+  handlers: Partial<
+    Record<"catalog" | "start" | "status" | "answer" | "cancel", (request: Request) => unknown>
+  >,
+  run: Parameters<typeof withGateway>[1],
+) {
+  const responses: Record<string, ((request: Request) => unknown) | undefined> = {
+    "users.authConnect.start": startResult,
+    ...Object.fromEntries(
+      Object.entries(handlers).map(([method, handler]) => [`users.authConnect.${method}`, handler]),
+    ),
+  };
+  return withGateway((request) => responses[request.method]?.(request), run);
+}
+
 function waitForPromptAbort(): void {
   mocks.password.mockImplementation(
     ({ signal }) =>
@@ -411,23 +426,14 @@ describe("personal model account CLI over an identified Gateway connection", () 
       ],
     } satisfies UsersAuthConnectCatalogResult;
     mocks.autocomplete.mockResolvedValueOnce("xai").mockResolvedValueOnce("api-key");
-    await withGateway(
-      ({ method }) => {
-        if (method === "users.authConnect.catalog") {
-          return choices;
-        }
-        if (method === "users.authConnect.start") {
-          return startResult();
-        }
-        if (method === "users.authConnect.status") {
-          return { status: "pending", step: keyStep };
-        }
-        if (method === "users.authConnect.answer") {
-          return ++answers === 1
+    await withAuthGateway(
+      {
+        catalog: () => choices,
+        status: () => ({ status: "pending", step: keyStep }),
+        answer: () =>
+          ++answers === 1
             ? { status: "pending", step: keyStep, error: validationError }
-            : { status: "connected", authProfileId: ACCOUNT_ID, links: [] };
-        }
-        return undefined;
+            : { status: "connected", authProfileId: ACCOUNT_ID, links: [] },
       },
       async ({ port, url, requests, connections }) => {
         mocks.password.mockImplementation(async () => {
@@ -543,12 +549,9 @@ describe("personal model account CLI over an identified Gateway connection", () 
     let renderedProgress = "";
     let inputStepId: string | undefined;
     try {
-      await withGateway(
-        async ({ method, params }) => {
-          if (method === "users.authConnect.start") {
-            return startResult();
-          }
-          if (method === "users.authConnect.status") {
+      await withAuthGateway(
+        {
+          status: async () => {
             await progressUpdated.promise;
             polls += 1;
             if (polls === 3) {
@@ -564,16 +567,15 @@ describe("personal model account CLI over an identified Gateway connection", () 
               inputStepId = step.id;
             }
             return { status: "pending", step: sanitizeWizardStepForClient(step) };
-          }
-          if (method === "users.authConnect.answer") {
+          },
+          answer: async ({ params }) => {
             if (typeof params.stepId !== "string") {
               throw new Error("Expected an exact wizard step ID.");
             }
             await session.answer(params.stepId, params.value);
             await session.whenSettled();
             return connected;
-          }
-          return undefined;
+          },
         },
         async ({ port, requests, connections }) => {
           await login(port, output, true);
@@ -624,15 +626,8 @@ describe("personal model account CLI over an identified Gateway connection", () 
     waitForPromptAbort();
     const output = runtime();
     let polls = 0;
-    await withGateway(
-      ({ method }) =>
-        method === "users.authConnect.start"
-          ? startResult()
-          : method === "users.authConnect.status"
-            ? ++polls === 1
-              ? pendingInput
-              : result
-            : undefined,
+    await withAuthGateway(
+      { status: () => (++polls === 1 ? pendingInput : result) },
       async ({ port, requests }) => {
         await expect(login(port, output, true)).rejects.toMatchObject({ code: 1 });
         expect(mocks.password.mock.calls[0]?.[0].signal?.aborted).toBe(true);
@@ -652,19 +647,13 @@ describe("personal model account CLI over an identified Gateway connection", () 
     const received = createDeferredCore<Request>();
     const acknowledged = createDeferredCore<UsersAuthConnectStatusResult>();
     const output = runtime();
-    await withGateway(
-      (request) => {
-        if (request.method === "users.authConnect.start") {
-          return startResult();
-        }
-        if (request.method === "users.authConnect.status") {
-          return pendingInput;
-        }
-        if (request.method === "users.authConnect.cancel") {
+    await withAuthGateway(
+      {
+        status: () => pendingInput,
+        cancel: (request) => {
           received.resolve(request);
           return acknowledged.promise;
-        }
-        return undefined;
+        },
       },
       async ({ port, connections }) => {
         const command = expect(login(port, output)).rejects.toMatchObject({ code: 130 });
@@ -683,16 +672,13 @@ describe("personal model account CLI over an identified Gateway connection", () 
     const started = createDeferredCore();
     const response = createDeferredCore<UsersAuthConnectStartResult>();
     const onSignal = vi.spyOn(process, "once");
-    await withGateway(
-      ({ method }) => {
-        if (method === "users.authConnect.start") {
+    await withAuthGateway(
+      {
+        start: () => {
           started.resolve();
           return response.promise;
-        }
-        if (method === "users.authConnect.cancel") {
-          return { status: "cancelled" };
-        }
-        return undefined;
+        },
+        cancel: () => ({ status: "cancelled" }),
       },
       async ({ port, requests, connections }) => {
         const command = expect(login(port)).rejects.toMatchObject({ code: 130 });
@@ -720,18 +706,14 @@ describe("personal model account CLI over an identified Gateway connection", () 
   it("stops on connection loss and never carries the operation to another socket", async () => {
     waitForPromptAbort();
     let polls = 0;
-    await withGateway(
-      ({ method, socket }) => {
-        if (method === "users.authConnect.start") {
-          return startResult();
-        }
-        if (method === "users.authConnect.status") {
+    await withAuthGateway(
+      {
+        status: ({ socket }) => {
           if (++polls === 1) {
             return pendingInput;
           }
           socket.close(1001, "gone");
-        }
-        return undefined;
+        },
       },
       async ({ port, requests, connections }) => {
         await expect(login(port)).rejects.toThrow("Could not confirm sign-in cancellation");

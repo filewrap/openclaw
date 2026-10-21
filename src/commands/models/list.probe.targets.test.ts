@@ -144,7 +144,8 @@ vi.mock("../../agents/auth-profiles.js", () => ({
 const { buildProbeTargets } = await import("./list.probe.js");
 
 type ProbeParams = Parameters<typeof buildProbeTargets>[0];
-type ProbeTarget = Awaited<ReturnType<typeof buildProbeTargets>>["targets"][number];
+type ProbePlan = Awaited<ReturnType<typeof buildProbeTargets>>;
+type ProbeTarget = ProbePlan["targets"][number];
 function target(
   provider: string,
   model: string,
@@ -168,6 +169,23 @@ function catalogModel(
 ): ModelCatalogEntry {
   return { provider, id, name: id, ...(status ? { status } : {}) };
 }
+
+function expectTargets(result: ProbePlan, ...targets: ProbeTarget[]) {
+  expect(result.results).toStrictEqual([]);
+  expect(result.targets).toStrictEqual(targets);
+}
+
+function profileIssue(reasonCode: string, error: string) {
+  const profileId = "anthropic:default";
+  return {
+    ...target("anthropic", "claude-sonnet-4-6", "profile", { profileId, label: profileId }),
+    model: "anthropic/claude-sonnet-4-6",
+    mode: "token",
+    status: "unknown",
+    reasonCode,
+    error,
+  };
+}
 function plan(
   overrides: Omit<Partial<ProbeParams>, "options"> & {
     options?: Partial<ProbeParams["options"]>;
@@ -187,19 +205,14 @@ function providerConfig(
   provider = "anthropic",
   overrides: Partial<ModelProviderConfig> = {},
 ): OpenClawConfig {
-  return {
-    models: {
-      providers: {
-        [provider]: {
-          baseUrl: "https://api.anthropic.com/v1",
-          api: "anthropic-messages",
-          models: [],
-          apiKey,
-          ...overrides,
-        },
-      },
-    },
+  const entry: ModelProviderConfig = {
+    baseUrl: "https://api.anthropic.com/v1",
+    api: "anthropic-messages",
+    models: [],
+    apiKey,
+    ...overrides,
   };
+  return { models: { providers: { [provider]: entry } } };
 }
 
 function emptyStore() {
@@ -319,18 +332,10 @@ describe("buildProbeTargets", () => {
       plan({ cfg: providerConfig("test"), options: { includeDirectKeys: true } }),
     );
     expect(result.results).toStrictEqual([
-      {
-        error:
-          "Auth profile credentials are missing or expired.\n↳ Auth reason [invalid_expires]: token expires must be a positive Unix ms timestamp.",
-        label: "anthropic:default",
-        mode: "token",
-        model: "anthropic/claude-sonnet-4-6",
-        profileId: "anthropic:default",
-        provider: "anthropic",
-        reasonCode: "invalid_expires",
-        source: "profile",
-        status: "unknown",
-      },
+      profileIssue(
+        "invalid_expires",
+        "Auth profile credentials are missing or expired.\n↳ Auth reason [invalid_expires]: token expires must be a positive Unix ms timestamp.",
+      ),
     ]);
     expect(result.targets).toEqual([
       expect.objectContaining({ label: "config", source: "models.json", boundValue: "test" }),
@@ -438,17 +443,7 @@ describe("buildProbeTargets", () => {
     resolveAuthProfileEligibilityMock.mockReturnValue({ eligible: true, reasonCode: "ok" });
     const result = await plan({ cfg: providerConfig(ref), options: { includeDirectKeys: true } });
     expect(result.results).toStrictEqual([
-      {
-        error: "Excluded by auth.order for this provider.",
-        label: "anthropic:default",
-        mode: "token",
-        model: "anthropic/claude-sonnet-4-6",
-        profileId: "anthropic:default",
-        provider: "anthropic",
-        reasonCode: "excluded_by_auth_order",
-        source: "profile",
-        status: "unknown",
-      },
+      profileIssue("excluded_by_auth_order", "Excluded by auth.order for this provider."),
     ]);
     expect(result.targets).toStrictEqual(
       [ref, "anthropic:other"].map((profileId) =>
@@ -504,13 +499,13 @@ describe("buildProbeTargets", () => {
         providers: ["byteplus-plan"],
         modelCandidates: canonicalAuth ? [] : ["byteplus-plan/ark-code-latest"],
       });
-      expect(result.results).toStrictEqual([]);
-      expect(result.targets).toStrictEqual([
+      expectTargets(
+        result,
         target("byteplus-plan", "ark-code-latest", "profile", {
           profileId,
           label: profileId,
         }),
-      ]);
+      );
     },
   );
 
@@ -527,8 +522,7 @@ describe("buildProbeTargets", () => {
         modelCandidates: [],
       }),
     );
-    expect(result.results).toStrictEqual([]);
-    expect(result.targets).toStrictEqual([target("zai", "glm-4.7")]);
+    expectTargets(result, target("zai", "glm-4.7"));
   });
 
   it("prioritizes live Anthropic Haiku catalog entries over retired and slower probes", async () => {
@@ -543,8 +537,7 @@ describe("buildProbeTargets", () => {
     const result = await withClearedAnthropicEnv(() =>
       plan({ cfg: providerConfig("sk-ant-test"), modelCandidates: [] }),
     );
-    expect(result.results).toStrictEqual([]);
-    expect(result.targets).toStrictEqual([target("anthropic", "claude-haiku-4-5-20251001")]);
+    expectTargets(result, target("anthropic", "claude-haiku-4-5-20251001"));
   });
 
   it("uses workspace-scoped auth evidence when building env probe targets", async () => {
@@ -567,13 +560,13 @@ describe("buildProbeTargets", () => {
     await withClearedAnthropicEnv(async () => {
       expect((await plan()).targets).toStrictEqual([]);
       const result = await plan({ agentDir: "/tmp/coder-agent" });
-      expect(result.results).toStrictEqual([]);
-      expect(result.targets).toStrictEqual([
+      expectTargets(
+        result,
         target("anthropic", "claude-sonnet-4-6", "profile", {
           label: "anthropic:coder",
           profileId: "anthropic:coder",
         }),
-      ]);
+      );
     });
   });
 });

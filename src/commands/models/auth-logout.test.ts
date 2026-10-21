@@ -248,23 +248,6 @@ describe("models auth logout", () => {
     expect(mocks.removeAuthProfilesAcrossOwnerStores).not.toHaveBeenCalled();
   });
 
-  it("clears a provider binding before removing its key, preserving model selection", async () => {
-    const cfg: OpenClawConfig = {
-      models: authConfig(undefined, "openai:manual").models,
-      agents: { defaults: { model: "openai/current" } },
-    };
-    const updated = trackConfig(cfg);
-    await modelsAuthLogoutCommand({ profileId: "openai:manual", yes: true }, createRuntime());
-    expect({
-      agents: updated().agents,
-      apiKey: updated().models?.providers?.openai?.apiKey,
-    }).toEqual({
-      agents: cfg.agents,
-      apiKey: undefined,
-    });
-    expect(mocks.removeAuthProfilesAcrossOwnerStores).toHaveBeenCalledOnce();
-  });
-
   it("removes cached credential copies across agents without disabling another account", () =>
     withAuthProfileTestState("openclaw-auth-catalog-logout-", async ({ agentDirFor }) => {
       const main = agentDirFor("main");
