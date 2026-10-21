@@ -40,6 +40,12 @@ function createMaintenanceArtifacts() {
   };
 }
 
+const archived = (sessionId: string) => ({
+  sessionId,
+  archivedAt: expect.any(Number),
+  archiveReason: "age-retention",
+});
+
 describe("pruneStaleEntries", () => {
   it.each([
     ["agent:main:dashboard:child", { spawnedBy: "agent:main:main" }, "age-retention"],
@@ -61,11 +67,7 @@ describe("pruneStaleEntries", () => {
     expect(store.protected).toEqual(original);
     delete store.protected.pinnedAt;
     expect(pruneStaleEntries(store, 30 * DAY_MS)).toBe(0);
-    expect(store.protected).toMatchObject({
-      sessionId: original.sessionId,
-      archivedAt: expect.any(Number),
-      archiveReason: "age-retention",
-    });
+    expect(store.protected).toMatchObject(archived(original.sessionId));
   });
 });
 
@@ -232,11 +234,7 @@ describe("applyFileBackedSessionStoreMaintenance", () => {
     try {
       const otherStore = makeActiveStore();
       await maintain(otherStore, maintainedStorePath);
-      expect(otherStore.old).toMatchObject({
-        sessionId: activeSessionId,
-        archivedAt: expect.any(Number),
-        archiveReason: "age-retention",
-      });
+      expect(otherStore.old).toMatchObject(archived(activeSessionId));
 
       const activeStore = makeActiveStore();
       await maintain(activeStore, activeStorePath);
@@ -245,11 +243,7 @@ describe("applyFileBackedSessionStoreMaintenance", () => {
 
       admission.release();
       await maintain(activeStore, activeStorePath);
-      expect(activeStore.old).toMatchObject({
-        sessionId: activeSessionId,
-        archivedAt: expect.any(Number),
-        archiveReason: "age-retention",
-      });
+      expect(activeStore.old).toMatchObject(archived(activeSessionId));
     } finally {
       admission.release();
     }

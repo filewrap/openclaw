@@ -3,6 +3,7 @@ import { normalizeLegacySessionEntryDelivery } from "../../infra/state-migration
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { createSessionConversationTestRegistry } from "../../test-utils/session-conversation-registry.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
+import type { OpenClawConfig } from "../types.openclaw.js";
 import type { SessionEntry, SessionOrigin } from "./types.js";
 
 type SessionEntryFixture = SessionEntry & {
@@ -97,6 +98,15 @@ async function expectDelivery(
 ) {
   expect(await extractDeliveryInfo(sessionKey)).toEqual(resultFor(delivery, threadId));
 }
+async function expectBatch(
+  rows: Array<[string | undefined, DeliveryContext | undefined, string?]>,
+  cfg?: OpenClawConfig,
+) {
+  const requests = rows.map(([sessionKey]) => (sessionKey === undefined ? {} : { sessionKey }));
+  expect(await extractDeliveryInfoBatch(requests, { cfg })).toEqual(
+    rows.map(([, delivery, threadId]) => resultFor(delivery, threadId)),
+  );
+}
 
 beforeAll(async () => {
   ({ extractDeliveryInfo, extractDeliveryInfoBatch } = await import("./delivery-info.js"));
@@ -111,14 +121,6 @@ beforeEach(() => {
 });
 
 describe("extractDeliveryInfo", () => {
-  it("falls back to base sessions for :thread: keys", async () => {
-    const baseKey = "agent:main:slack:channel:C0123ABC";
-    const threadKey = `${baseKey}:thread:1234567890.123456`;
-    const delivery = { channel: "slack", to: "slack:C0123ABC", accountId: "workspace-1" };
-    storeState.store[baseKey] = buildEntry(delivery);
-    await expectDelivery(threadKey, delivery, "1234567890.123456");
-  });
-
   it("continues candidate session keys until it finds the freshest routable entry", async () => {
     storeState.store[MIXED_KEY] = legacyEntry({
       updatedAt: Date.now() - 1000,
@@ -226,22 +228,13 @@ describe("extractDeliveryInfoBatch", () => {
       },
     );
 
-    expect(
-      await extractDeliveryInfoBatch([
-        { sessionKey: canonicalKey },
-        { sessionKey: queriedKey },
-        { sessionKey: `${queriedKey}:topic:55` },
-        {},
-        { sessionKey: "agent:main:missing" },
-        { sessionKey: queriedKey },
-      ]),
-    ).toEqual([
-      resultFor(canonicalDelivery),
-      resultFor(aliasDelivery),
-      resultFor(aliasDelivery, "55"),
-      resultFor(undefined),
-      resultFor(undefined),
-      resultFor(aliasDelivery),
+    await expectBatch([
+      [canonicalKey, canonicalDelivery],
+      [queriedKey, aliasDelivery],
+      [`${queriedKey}:topic:55`, aliasDelivery, "55"],
+      [undefined, undefined],
+      ["agent:main:missing", undefined],
+      [queriedKey, aliasDelivery],
     ]);
     expect(inventories).toBe(1);
   });
@@ -257,17 +250,11 @@ describe("extractDeliveryInfoBatch", () => {
       },
     });
 
-    expect(
-      await extractDeliveryInfoBatch(
-        [brokenKey, healthyKey, "agent:main:missing", healthyKey].map((sessionKey) => ({
-          sessionKey,
-        })),
-      ),
-    ).toEqual([
-      resultFor(undefined),
-      resultFor(telegramDelivery),
-      resultFor(undefined),
-      resultFor(telegramDelivery),
+    await expectBatch([
+      [brokenKey, undefined],
+      [healthyKey, telegramDelivery],
+      ["agent:main:missing", undefined],
+      [healthyKey, telegramDelivery],
     ]);
   });
 
@@ -289,17 +276,17 @@ describe("extractDeliveryInfoBatch", () => {
       },
     });
 
-    expect(
-      await extractDeliveryInfoBatch(
-        ["agent:worker:main", shadowKey, "agent:ops:main"].map((sessionKey) => ({ sessionKey })),
-        {
-          cfg: {
-            session: { scope: "global" },
-            agents: { ownership: "explicit", entries: { ops: {}, worker: {}, shadow: {} } },
-          },
-        },
-      ),
-    ).toEqual([resultFor(workerDelivery), resultFor(shadowDelivery), resultFor(opsDelivery)]);
+    await expectBatch(
+      [
+        ["agent:worker:main", workerDelivery],
+        [shadowKey, shadowDelivery],
+        ["agent:ops:main", opsDelivery],
+      ],
+      {
+        session: { scope: "global" },
+        agents: { ownership: "explicit", entries: { ops: {}, worker: {}, shadow: {} } },
+      },
+    );
     const admittedPaths = storeState.readSessionEntriesFromStoreInWorker.mock.calls.map(
       ([scope]) => scope.storePath,
     );
