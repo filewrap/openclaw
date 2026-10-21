@@ -473,6 +473,8 @@ export class DraftPlaceBrowser {
     const isCurrentRegistration = () =>
       this.browserRegistration === operation && isCurrentBrowser();
     this.browser.error = null;
+    // Retire the preceding directory error without hiding reads started during registration.
+    this.browser.readCompletion = null;
     this.callbacks.changed();
     const completed = (async () => {
       try {
