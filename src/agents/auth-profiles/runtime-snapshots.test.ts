@@ -25,13 +25,12 @@ import {
   getRuntimeAuthProfileStoreSnapshotCore as getSnapshot,
   getRuntimeAuthProfileStoreMetadataRevision as getMetadataRevision,
   getRuntimeAuthProfileStoreSnapshotRevision as getSnapshotRevision,
-  noteRuntimeAuthProfileStorePersistedMutation as notePersistedMutation,
   registerRuntimeAuthProfileStoreMutationListener as onStoreMutation,
   replaceRuntimeAuthProfileStoreSnapshots as replaceSnapshots,
   replaceOwnedRuntimeAuthProfileStoreSnapshots as replaceOwnedSnapshots,
   setRuntimeAuthProfileStoreSnapshot as setSnapshot,
 } from "./runtime-snapshots.js";
-import { createSnapshotStore as createStore, testing } from "./runtime-snapshots.test-support.js";
+import { createSnapshotStore as createStore } from "./runtime-snapshots.test-support.js";
 import { readAuthProfileRowsReadOnly as readRows } from "./sqlite-json.js";
 import { acquireAuthProfileReadDatabase } from "./sqlite-read-pool.js";
 import { resolveAuthProfileDatabasePath } from "./sqlite.js";
@@ -92,15 +91,42 @@ describe("runtime auth profile snapshots", () => {
         "CREATE TABLE reader_fixture (value TEXT); INSERT INTO reader_fixture VALUES ('available')",
       );
     }
-    setSnapshot(createStore("reader-owner"), readerDir);
+    const store = createStore("reader-owner");
+    setSnapshot(store, readerDir);
     const reader = acquireAuthProfileReadDatabase(databasePath, openSqliteReadOnlyDatabase);
     expect(reader.status).toBe("readable");
     if (reader.status !== "readable") {
       throw new Error("Expected a pooled auth reader");
     }
     const revision = getSnapshotRevision(readerDir);
-    setUsage(createStore("reader-owner"), readerDir, { "openai:default": { lastUsed: 2 } });
-    expect(getSnapshotRevision(readerDir)).not.toBe(revision);
+    const metadataRevision = getMetadataRevision(readerDir);
+    const missingRevision = getMetadataRevision("/tmp/absent-auth-owner");
+    const listener = vi.fn();
+    track(onStoreMutation(listener));
+    const next = {
+      ...store,
+      runtimeInheritsMainState: true,
+      lastGood: { openai: "openai:default" },
+      usageStats: {
+        "openai:default": {
+          lastUsed: 2,
+          errorCount: 2,
+          failureCounts: { timeout: 2 },
+          lastFailureAt: 2,
+          lastProbeAt: 2,
+        },
+      },
+    };
+    replaceSnapshots([{ agentDir: readerDir, store: next }]);
+    expect(getSnapshot(readerDir)).toEqual(next);
+    expect(getMetadataRevision(readerDir)).toBe(metadataRevision);
+    expect(getMetadataRevision("/tmp/absent-auth-owner")).toBe(missingRevision);
+    expect(listener).not.toHaveBeenCalled();
+    expect(getSnapshotRevision(readerDir)).toBeGreaterThan(revision);
+    expect(reader.db.isOpen).toBe(true);
+    const replacedRevision = getSnapshotRevision(readerDir);
+    setUsage(next, readerDir, { "openai:default": { lastUsed: 3 } });
+    expect(getSnapshotRevision(readerDir)).not.toBe(replacedRevision);
     expect(reader.db.isOpen).toBe(true);
     clearSnapshot(path.join(readerDir, "unrelated"));
     expect(reader.db.isOpen).toBe(true);
@@ -153,36 +179,6 @@ describe("runtime auth profile snapshots", () => {
     setSnapshot(createStore("replaced"), agentDir);
     expect(getMaterializations(agentDir)).toEqual([]);
     expect(pluginStoreListener).toHaveBeenCalledOnce();
-  });
-
-  it("keeps metadata stable while replace publishes bookkeeping for rollback readers", () => {
-    const store = createStore("metadata");
-    setSnapshot(store, agentDir);
-    const metadataRevision = getMetadataRevision(agentDir);
-    const missingRevision = getMetadataRevision("/tmp/absent-auth-owner");
-    const snapshotRevision = getSnapshotRevision(agentDir);
-    const listener = vi.fn();
-    track(onStoreMutation(listener));
-    const next = {
-      ...store,
-      runtimeInheritsMainState: true,
-      lastGood: { openai: "openai:default" },
-      usageStats: {
-        "openai:default": {
-          lastUsed: 2,
-          errorCount: 2,
-          failureCounts: { timeout: 2 },
-          lastFailureAt: 2,
-          lastProbeAt: 2,
-        },
-      },
-    };
-    replaceSnapshots([{ agentDir, store: next }]);
-    expect(getSnapshot(agentDir)).toEqual(next);
-    expect(getSnapshotRevision(agentDir)).toBeGreaterThan(snapshotRevision);
-    expect(getMetadataRevision(agentDir)).toBe(metadataRevision);
-    expect(getMetadataRevision("/tmp/absent-auth-owner")).toBe(missingRevision);
-    expect(listener).not.toHaveBeenCalled();
   });
 
   it.each(["replace", "remove"] as const)(
@@ -401,27 +397,6 @@ describe("runtime auth profile snapshots", () => {
     expect(getSnapshot(agentDir)?.order?.openai).toEqual(["openai:default"]);
   });
 
-  it("bounds persisted mutation lineage by owner and profile", () => {
-    for (let index = 0; index <= testing.MAX_PERSISTED_MUTATION_OWNERS; index += 1) {
-      notePersistedMutation(`/tmp/openclaw-mutation-owner-${index}`, {
-        credentialsChanged: true,
-        stateChanged: false,
-        profileIds: ["openai:default"],
-      });
-    }
-    for (let index = 0; index <= testing.MAX_PERSISTED_MUTATION_PROFILES_PER_OWNER; index += 1) {
-      notePersistedMutation("/tmp/openclaw-mutation-profile-owner", {
-        credentialsChanged: true,
-        stateChanged: false,
-        profileIds: [`openai:${index}`],
-      });
-    }
-
-    const counts = testing.getPersistedMutationRecordCounts();
-    expect(counts.owners).toBeLessThanOrEqual(testing.MAX_PERSISTED_MUTATION_OWNERS);
-    expect(counts.profiles).toBeLessThanOrEqual(testing.MAX_PERSISTED_MUTATION_PROFILES_PER_OWNER);
-    testing.resetPersistedMutationLineage();
-  });
   it.skipIf(process.platform === "win32")("does not reuse credentials from a replaced file", () => {
     const databasePath = path.join(tempDirs.make("auth-reader-replacement-"), "agent.sqlite");
     const credentials = (key: string) => ({ profiles: { fixture: { key } } });

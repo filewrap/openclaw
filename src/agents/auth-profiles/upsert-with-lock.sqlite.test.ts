@@ -100,6 +100,9 @@ const keyStore = (
 function oauth(access: string, refresh: string, expires = Date.now() + 60_000): OAuthCredential {
   return { type: "oauth", provider: "openai", access, refresh, expires };
 }
+function nextGeneration(credential: OAuthCredential, label = "synthetic-new"): OAuthCredential {
+  return { ...credential, access: `${label}-access`, refresh: `${label}-refresh` };
+}
 function persist(
   agentDir: string | undefined,
   profileId: string,
@@ -181,11 +184,7 @@ it.for([
   async ({ owner, initial, root }, { agentDir }) => {
     const profileId = "openai:admission";
     const incoming = oauth("synthetic-old-access", "synthetic-old-refresh");
-    const authoritative = {
-      ...incoming,
-      access: "synthetic-new-access",
-      refresh: "synthetic-new-refresh",
-    };
+    const authoritative = nextGeneration(incoming);
     const ownerDir = owner === "local" ? agentDir : undefined;
     const selectedStateDir = path.resolve(agentDir, "../../..");
     const otherStateDir = root === "changed" ? tempDirs.make("auth-upsert-other-root-") : undefined;
@@ -234,11 +233,7 @@ it("refuses inherited OAuth authority that changes during the worker callback ha
 }) => {
   const profileId = "openai:handoff";
   const incoming = oauth("synthetic-old-access", "synthetic-old-refresh");
-  const authoritative = {
-    ...incoming,
-    access: "synthetic-new-access",
-    refresh: "synthetic-new-refresh",
-  };
+  const authoritative = nextGeneration(incoming);
   save({});
   save({}, agentDir);
   let callbacks = 0;
@@ -319,7 +314,7 @@ it.each(["rotated", "appeared"] as const)(
       const authoritative =
         mode === "rotated"
           ? oauth("rotated-access", "rotated-refresh")
-          : { ...credential, access: "fresh-login-access", refresh: "fresh-login-refresh" };
+          : nextGeneration(credential, "fresh-login");
       seed(mode === "rotated" ? { [profileId]: credential } : {}, mainAgentDir);
       let queuedWrite: Promise<void> | undefined;
       await withOAuthProfileLock({ profileId, provider: credential.provider }, async () => {
@@ -383,11 +378,7 @@ it("does not restore a nonportable OAuth generation during batch rollback", asyn
 }) => {
   const profileId = "openai:default";
   const previous = oauth("previous-access", "previous-refresh");
-  const replacement = {
-    ...previous,
-    access: "replacement-access",
-    refresh: "replacement-refresh",
-  };
+  const replacement = nextGeneration(previous, "replacement");
   seed({ [profileId]: previous }, agentDir);
 
   const receipt = await persist(agentDir, profileId, replacement, {

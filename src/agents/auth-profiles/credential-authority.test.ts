@@ -464,10 +464,7 @@ describe.each(["shared-state", "agent"] as const)("%s released SDK credential wr
       () => runOutcome(() => current.sdk(writer, "sdk-committed"), outcome, "cancelled SDK commit"),
     );
     expect(observed).toEqual(outcome === "commit" ? credential("sdk-committed") : undefined);
-    expect(current.readPersisted()).toEqual(
-      credential(outcome === "commit" ? "sdk-committed" : "original"),
-    );
-    expect(current.read()).toEqual(current.readPersisted());
+    expectCredential(current, outcome === "commit" ? "sdk-committed" : "original");
     expect(fs.existsSync(marker)).toBe(false);
     expectRetainedCustody(rootPath, false);
   });

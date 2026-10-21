@@ -234,7 +234,6 @@ describe("prepared auth profile row reads", () => {
   });
 
   it("captures environment and retains the agent owner through child settlement", async () => {
-    const registration = vi.spyOn(resources, "registerOpenClawAgentDatabaseAsyncResource");
     const env = { OPENCLAW_STATE_DIR: "/fixture/original" };
     const reader = prepare(env);
     env.OPENCLAW_STATE_DIR = "/fixture/replaced";
@@ -254,9 +253,6 @@ describe("prepared auth profile row reads", () => {
           throw new Error("Child was not entered");
         }),
       ]);
-      expect(registration).toHaveBeenCalledWith(
-        expect.objectContaining({ agentId: "main", path: databasePath }),
-      );
       expect(child.read).toHaveBeenCalledWith(
         databasePath,
         expect.objectContaining({

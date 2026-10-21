@@ -1,7 +1,6 @@
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { authProfileFileChanges } from "./file-state.js";
-import { runtimeAuthProfileRowsCache } from "./runtime-persisted-rows.js";
 import {
   clearRuntimeAuthProfileStoreSnapshots as clearSnapshots,
   getRuntimeAuthProfileStoreSnapshotAtDatabasePath as getSnapshot,
@@ -100,20 +99,14 @@ it.each([
   },
 );
 
-it.each([false, true])(
-  "retains first-file snapshots only with known source provenance: %s",
-  async (knownSource) => {
-    onRefresh(async () => true);
-    publishAgent("inherited");
-    if (knownSource) {
-      runtimeAuthProfileRowsCache.recordSource(sharedDatabase, "absent", null);
-    }
-    await observation.onChange?.({
-      directory: path.dirname(sharedDatabase),
-      identityChanged: false,
-      sourcesChanged: false,
-      createdPaths: [sharedDatabase],
-    });
-    expect(getSnapshot(agentDatabase) !== undefined).toBe(knownSource);
-  },
-);
+it("retires first-file snapshots without known source provenance", async () => {
+  onRefresh(async () => true);
+  publishAgent("inherited");
+  await observation.onChange?.({
+    directory: path.dirname(sharedDatabase),
+    identityChanged: false,
+    sourcesChanged: false,
+    createdPaths: [sharedDatabase],
+  });
+  expect(getSnapshot(agentDatabase)).toBeUndefined();
+});

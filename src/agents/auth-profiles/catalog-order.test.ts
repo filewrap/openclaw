@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
 import type { ModelProviderConfig } from "../../config/types.models.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
@@ -47,96 +47,94 @@ const catalogConfig = (
   },
 });
 
-describe("provider catalog auth order", () => {
-  it("uses configured ordering for both catalog resolvers", () => {
-    const store = createAuthProfileStoreFixture({
-      [first]: createApiKeyCredential("openai", "key-a"),
-      [second]: createApiKeyCredential("openai", "key-b"),
+it("uses configured ordering for both catalog resolvers", () => {
+  const store = createAuthProfileStoreFixture({
+    [first]: createApiKeyCredential("openai", "key-a"),
+    [second]: createApiKeyCredential("openai", "key-b"),
+  });
+  for (const resolve of resolvers) {
+    expect(resolve({}, store, authOrder("openai", [second, first]))("openai")).toMatchObject({
+      apiKey: "key-b",
+      profileId: second,
+      mode: "api_key",
+    });
+  }
+});
+
+it("keeps the static credential kind separate from the preferred OAuth profile", () => {
+  const store = createAuthProfileStoreFixture({
+    "minimax-portal:token": {
+      type: "token" as const,
+      provider: "minimax-portal",
+      token: "catalog-token",
+    },
+    "minimax-portal:oauth": createOAuthRefreshCredential({ provider: "minimax-portal" }),
+  });
+  expect(createProviderApiKeyResolver({}, store)("minimax-portal")).toMatchObject({
+    apiKey: "catalog-token",
+    discoveryApiKey: "catalog-token",
+    mode: "token",
+    profileId: "minimax-portal:token",
+  });
+  expect(createProviderAuthResolver({}, store)("minimax-portal")).toMatchObject({
+    mode: "oauth",
+    profileId: "minimax-portal:oauth",
+  });
+});
+
+it.each(["oauth", "token"] as const)(
+  "preserves configured %s mode for direct catalog credentials",
+  (mode) => {
+    const store: AuthProfileStore = { version: 1, profiles: {} };
+    const config = catalogConfig(mode, "literal-catalog-token");
+    const envConfig = catalogConfig(mode, {
+      source: "env",
+      provider: "default",
+      id: "CATALOG_TOKEN",
     });
     for (const resolve of resolvers) {
-      expect(resolve({}, store, authOrder("openai", [second, first]))("openai")).toMatchObject({
-        apiKey: "key-b",
-        profileId: second,
-        mode: "api_key",
+      expect(resolve({}, store, config)("openai")).toMatchObject({
+        mode,
+        discoveryApiKey: "literal-catalog-token",
       });
+      expect(
+        resolve({ CATALOG_TOKEN: "env-catalog-token" }, store, envConfig)("openai"),
+      ).toMatchObject({ mode, discoveryApiKey: "env-catalog-token" });
+      expect(
+        resolve({ OPENAI_API_KEY: "direct-env-token" }, store, config)("openai"),
+      ).toMatchObject({ mode, discoveryApiKey: "direct-env-token" });
     }
-  });
+  },
+);
 
-  it("keeps the static credential kind separate from the preferred OAuth profile", () => {
-    const store = createAuthProfileStoreFixture({
-      "minimax-portal:token": {
-        type: "token" as const,
-        provider: "minimax-portal",
-        token: "catalog-token",
+it("keeps unresolved OAuth refs selected for locked catalog resolution", () => {
+  const profileId = "openai:oauth-ref";
+  const store = createAuthProfileStoreFixture({
+    [profileId]: createUnresolvedOAuthRefCredential(),
+  });
+  expect(
+    createProviderAuthResolver({}, store, authOrder("openai", [profileId]))("openai"),
+  ).toMatchObject({ apiKey: undefined, mode: "oauth", profileId, source: "profile" });
+});
+
+it("supports owner-local exclusion of a failed canonical profile", () => {
+  const profileA = "openai:oauth-a";
+  const profileB = "openai:api-key-b";
+  const resolveAuth = createProviderAuthResolver(
+    {},
+    createAuthProfileStoreFixture({
+      [profileA]: createOAuthRefreshCredential(),
+      [profileB]: {
+        type: "api_key" as const,
+        provider: "openai",
+        keyRef: { source: "file" as const, provider: "vault", id: "/openai/profile-b" },
       },
-      "minimax-portal:oauth": createOAuthRefreshCredential({ provider: "minimax-portal" }),
-    });
-    expect(createProviderApiKeyResolver({}, store)("minimax-portal")).toMatchObject({
-      apiKey: "catalog-token",
-      discoveryApiKey: "catalog-token",
-      mode: "token",
-      profileId: "minimax-portal:token",
-    });
-    expect(createProviderAuthResolver({}, store)("minimax-portal")).toMatchObject({
-      mode: "oauth",
-      profileId: "minimax-portal:oauth",
-    });
-  });
-
-  it.each(["oauth", "token"] as const)(
-    "preserves configured %s mode for direct catalog credentials",
-    (mode) => {
-      const store: AuthProfileStore = { version: 1, profiles: {} };
-      const config = catalogConfig(mode, "literal-catalog-token");
-      const envConfig = catalogConfig(mode, {
-        source: "env",
-        provider: "default",
-        id: "CATALOG_TOKEN",
-      });
-      for (const resolve of resolvers) {
-        expect(resolve({}, store, config)("openai")).toMatchObject({
-          mode,
-          discoveryApiKey: "literal-catalog-token",
-        });
-        expect(
-          resolve({ CATALOG_TOKEN: "env-catalog-token" }, store, envConfig)("openai"),
-        ).toMatchObject({ mode, discoveryApiKey: "env-catalog-token" });
-        expect(
-          resolve({ OPENAI_API_KEY: "direct-env-token" }, store, config)("openai"),
-        ).toMatchObject({ mode, discoveryApiKey: "direct-env-token" });
-      }
-    },
+    }),
+    authOrder("openai", [profileA, profileB]),
   );
-
-  it("keeps unresolved OAuth refs selected for locked catalog resolution", () => {
-    const profileId = "openai:oauth-ref";
-    const store = createAuthProfileStoreFixture({
-      [profileId]: createUnresolvedOAuthRefCredential(),
-    });
-    expect(
-      createProviderAuthResolver({}, store, authOrder("openai", [profileId]))("openai"),
-    ).toMatchObject({ apiKey: undefined, mode: "oauth", profileId, source: "profile" });
-  });
-
-  it("supports owner-local exclusion of a failed canonical profile", () => {
-    const profileA = "openai:oauth-a";
-    const profileB = "openai:api-key-b";
-    const resolveAuth = createProviderAuthResolver(
-      {},
-      createAuthProfileStoreFixture({
-        [profileA]: createOAuthRefreshCredential(),
-        [profileB]: {
-          type: "api_key" as const,
-          provider: "openai",
-          keyRef: { source: "file" as const, provider: "vault", id: "/openai/profile-b" },
-        },
-      }),
-      authOrder("openai", [profileA, profileB]),
-    );
-    expect(resolveAuth("openai")).toMatchObject({ mode: "oauth", profileId: profileA });
-    expect(resolveAuth("openai", { excludeProfileIds: [profileA] })).toMatchObject({
-      mode: "api_key",
-      profileId: profileB,
-    });
+  expect(resolveAuth("openai")).toMatchObject({ mode: "oauth", profileId: profileA });
+  expect(resolveAuth("openai", { excludeProfileIds: [profileA] })).toMatchObject({
+    mode: "api_key",
+    profileId: profileB,
   });
 });

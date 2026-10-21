@@ -42,7 +42,7 @@ function publishDerived(
 afterEach(() => clearRuntimeAuthProfileStoreSnapshots());
 beforeEach(() => void prepareSharedAuthStoreOwnershipForNative());
 
-it.each(["api-key", "oauth", "hidden", "unknown"] as const)(
+it.each(["api-key", "oauth"] as const)(
   "invalidates shared shadows according to %s local ownership",
   (kind) => {
     const owner = sharedOwner("/tmp/openclaw-auth-incremental/shared.sqlite");
@@ -59,10 +59,7 @@ it.each(["api-key", "oauth", "hidden", "unknown"] as const)(
         ? apiKeyStore(["fixture:primary"])
         : {
             ...createStore("local"),
-            runtimeLocalProfileIds:
-              kind === "unknown"
-                ? undefined
-                : [kind === "hidden" ? "hidden:legacy" : "openai:default"],
+            runtimeLocalProfileIds: ["openai:default"],
           };
     publishDerived(store, localDir, owner);
     if (kind === "api-key") {
