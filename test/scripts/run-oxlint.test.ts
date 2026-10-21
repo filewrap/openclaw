@@ -565,29 +565,24 @@ describe("run-oxlint", () => {
   });
 
   it("preserves the published updater's automatic full-lint plan on constrained Linux CI", () => {
-    const env = { CI: "true" };
-    const platform = "linux";
-    const hostResources = CONSTRAINED_HOST;
     const directories = ["agents", "alpha", "beta", "gateway", "infra", "zeta"];
-    const cwd = createSourceTree("src", directories, ["root.ts"]);
+    const options = {
+      env: { CI: "true" },
+      platform: "linux",
+      hostResources: CONSTRAINED_HOST,
+    } as const;
     const shards = selectedShards("core", {
-      cwd,
-      env,
-      platform,
-      hostResources,
+      ...options,
+      cwd: createSourceTree("src", directories, ["root.ts"]),
     });
-
-    expect(shards.map((shard) => shard.args.slice(2))).toEqual([
-      ["src/agents", "src/zeta"],
-      ["src/alpha", "src/root.ts"],
-      ["src/beta", "ui"],
-      ["src/gateway", "packages"],
-      ["src/infra"],
+    expect(shards.map((shard) => shard.args)).toEqual([
+      oxlintShard("", "core", "src/agents", "src/zeta").args,
+      oxlintShard("", "core", "src/alpha", "src/root.ts").args,
+      oxlintShard("", "core", "src/beta", "ui").args,
+      oxlintShard("", "core", "src/gateway", "packages").args,
+      oxlintShard("", "core", "src/infra").args,
     ]);
-    expect(shards.every((shard) => shard.args[1] === "config/tsconfig/oxlint.core.json")).toBe(
-      true,
-    );
-    expect(shouldRunOxlintShardsSerial({ env, platform, hostResources })).toBe(true);
+    expect(shouldRunOxlintShardsSerial(options)).toBe(true);
   });
 
   it.each([
