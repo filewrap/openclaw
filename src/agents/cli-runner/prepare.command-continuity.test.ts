@@ -21,6 +21,7 @@ import {
   cliSessionBinding,
   emptyCliPreparation,
   setRawCliBackendForPrepareTest,
+  withCliContext,
 } from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
@@ -126,7 +127,7 @@ describe("direct CLI command continuity", () => {
             ? { requireExplicitMessageTarget: false }
             : {}),
         });
-        try {
+        await withCliContext(previous, async () => {
           expect(previous.messageToolPolicyHash).toBe(
             sessionState === "published-explicit-false"
               ? "92a8de91722cbb4fe1a7fd6892245e359c339d96cafe8db3a08738ffda913d71"
@@ -138,9 +139,7 @@ describe("direct CLI command continuity", () => {
             updatedAt: Date.now(),
             cliSessionBindings: { "test-cli": publishedBinding },
           });
-        } finally {
-          await previous.preparedBackend.cleanup?.();
-        }
+        });
       }
       const runtime = createThrowingTestRuntime();
       const ordinary = await prepareAgentCommandExecution(
@@ -163,7 +162,7 @@ describe("direct CLI command continuity", () => {
         cliSessionBinding: publishedBinding,
       });
       const binding = nativeBinding(first);
-      try {
+      await withCliContext(first, async () => {
         if (isPublished) {
           expect(first.reusableCliSession).toEqual({
             mode: "reuse",
@@ -173,9 +172,7 @@ describe("direct CLI command continuity", () => {
             "3ae4a9801e78dd74aa01b3ccad9fb6ab5628c39000b88276f651ed7fb9bdb555",
           );
         }
-      } finally {
-        await first.preparedBackend.cleanup?.();
-      }
+      });
       await replaceSessionEntry(target, {
         sessionId: ordinary.sessionId,
         updatedAt: Date.now(),
@@ -203,14 +200,12 @@ describe("direct CLI command continuity", () => {
         config,
         cliSessionBinding: binding,
       });
-      try {
+      await withCliContext(resumed, async () => {
         expect(resumed.reusableCliSession).toEqual({
           mode: "reuse",
           sessionId: "native-cli-session",
         });
-      } finally {
-        await resumed.preparedBackend.cleanup?.();
-      }
+      });
     },
   );
 
@@ -241,41 +236,31 @@ describe("direct CLI command continuity", () => {
       sourceReplyDeliveryMode: stableMode,
     } satisfies NonNullable<RunCliAgentParams["cliSessionBindingFacts"]>;
     setRawCliBackendForPrepareTest(buildDefaultTestCliBackend({ bundleMcp: true }));
-    const config = {};
+    const inbound = {
+      config: {},
+      sessionKey: "main",
+      messageChannel: "telegram",
+      currentChannelId: "123",
+      cliSessionBindingFacts,
+    };
     const prepared: PreparedCliRunContext[] = [];
     try {
       const first = await cli.prepare({
-        config,
-        sessionKey: "main",
+        ...inbound,
         prompt: "first ask",
-        messageChannel: "telegram",
-        currentChannelId: "123",
         requireExplicitMessageTarget: true,
         extraSystemPrompt: `volatile msg-1\n\n${staticPrompt}`,
         sourceReplyDeliveryMode: "message_tool_only",
         currentMessageId: "msg-1",
-        cliSessionBindingFacts,
       });
       prepared.push(first);
       const second = await cli.prepare({
-        config,
-        sessionKey: "main",
+        ...inbound,
         prompt: "second ask",
-        messageChannel: "telegram",
-        currentChannelId: "123",
         extraSystemPrompt: `volatile msg-2\n\n${staticPrompt}`,
         sourceReplyDeliveryMode: stableMode,
         currentMessageId: "msg-2",
-        cliSessionBindingFacts,
-        cliSessionBinding: {
-          sessionId: "cli-session",
-          extraSystemPromptHash: first.extraSystemPromptHash,
-          messageToolPolicyHash: first.messageToolPolicyHash,
-          promptToolNamesHash: first.promptToolNamesHash,
-          cwdHash: hashCliSessionText(dir),
-          mcpConfigHash: first.preparedBackend.mcpConfigHash,
-          mcpResumeHash: first.preparedBackend.mcpResumeHash,
-        },
+        cliSessionBinding: { ...cliSessionBinding(first), cwdHash: hashCliSessionText(dir) },
       });
       prepared.push(second);
 

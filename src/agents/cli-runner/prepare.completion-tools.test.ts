@@ -9,7 +9,6 @@ import { replaceSessionEntrySync } from "../../config/sessions/session-accessor.
 import { assertNoRetainedSessionSharingReads } from "../../config/sessions/session-accessor.sqlite-diagnostics.test-support.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { mintMcpLoopbackClientGrant as MintMcpLoopbackClientGrant } from "../../gateway/mcp-grant-store.js";
 import { handleMcpJsonRpc } from "../../gateway/mcp-http.handlers.js";
 import {
   resolveMcpLoopbackPolicyTools,
@@ -18,11 +17,7 @@ import {
 import { buildMcpToolSchema } from "../../gateway/mcp-http.schema.js";
 import type { CliBackendPlugin } from "../../plugins/cli-backend.types.js";
 import { testing as cliBackendsTesting } from "../cli-backends.test-support.js";
-import {
-  createCliRunnerPrepareFixture,
-  createTestMcpLoopbackClientGrant,
-  createTestMcpLoopbackServerConfig,
-} from "../cli-runner.test-helpers.js";
+import { createCliRunnerPrepareFixture } from "../cli-runner.test-helpers.js";
 import * as subagentSpawn from "../subagents/spawn/subagent-spawn.js";
 import {
   expectReadWriteEditTools,
@@ -32,15 +27,16 @@ import { requestNativeTool, runPlugin, SUCCESS_RESULT } from "./execute-plugin.t
 import {
   createJsonlStdinBackendConfig,
   cliSessionBinding,
-  emptyCliPreparation,
+  mockCliMcpPreparation,
   setRawCliBackendForPrepareTest,
+  withCliContext,
 } from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
   resetCliRunnerPrepareTestDeps,
   setCliRunnerPrepareTestDeps,
 } from "./prepare.test-support.js";
-import type { RunCliAgentParams } from "./types.js";
+import type { PreparedCliRunContext, RunCliAgentParams } from "./types.js";
 
 const claudeBackend: CliBackendPlugin & { pluginId: string } = {
   id: "claude-cli",
@@ -83,27 +79,36 @@ function completionRun(sessionTarget: {
 
 describe("restricted CLI tool preparation", () => {
   let fixture: ReturnType<typeof createCliRunnerPrepareFixture>;
-  const mintGrant = vi.fn<typeof MintMcpLoopbackClientGrant>();
+  let mintGrant: ReturnType<typeof mockCliMcpPreparation>["mint"];
+
+  function scopedTools(context: PreparedCliRunContext, cfg: OpenClawConfig, grantIndex = 0) {
+    const grant = mintGrant.mock.calls[grantIndex]?.[0]?.context;
+    if (!grant) {
+      throw new Error("expected an MCP grant");
+    }
+    return resolveMcpLoopbackScopedTools({
+      cfg,
+      context: grant,
+      admittedRunContext: context.params.admittedRunContext,
+    });
+  }
+
+  function expectManagedBundle(context: PreparedCliRunContext) {
+    const args = context.preparedBackend.backend.args ?? [];
+    const bundle = JSON.parse(
+      fs.readFileSync(args[args.indexOf("--mcp-config") + 1] ?? "", "utf-8"),
+    ) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(Object.keys(bundle.mcpServers)).toEqual(["openclaw"]);
+  }
 
   beforeEach(() => {
-    mintGrant.mockReset().mockImplementation(createTestMcpLoopbackClientGrant);
     setRawCliBackendForPrepareTest(claudeBackend);
-    setCliRunnerPrepareTestDeps({
-      ...emptyCliPreparation(),
-      makeBootstrapWarn: () => () => undefined,
-      getActiveMcpLoopbackRuntime: () => ({
-        port: 31783,
-        ownerToken: "loopback-owner-token",
-        nonOwnerToken: "loopback-non-owner-token",
-      }),
-      createMcpLoopbackServerConfig: createTestMcpLoopbackServerConfig,
-      mintMcpLoopbackClientGrant: mintGrant,
-      bindMcpLoopbackClientGrantAdmission: () => true,
-      revokeMcpLoopbackClientGrant: () => true,
+    ({ mint: mintGrant } = mockCliMcpPreparation({
       resolveMcpLoopbackPolicyTools,
       resolveMcpLoopbackScopedTools,
-      getCliLiveSessionGeneration: () => undefined,
-    });
+    }));
     fixture = createCliRunnerPrepareFixture((params) => {
       setRuntimeConfigSnapshot(params.config ?? {});
       return prepareCliRunContext({ skillsSnapshot: { prompt: "", skills: [] }, ...params });
@@ -155,22 +160,14 @@ describe("restricted CLI tool preparation", () => {
         sessionTarget: { ...fixture.session.sessionTarget, sessionKey },
         config,
       });
-      try {
+      await withCliContext(context, async () => {
         await runPlugin(context, async function* (execution) {
           await expect(
             requestNativeTool(execution, "Read", { file_path: stateFile }),
           ).resolves.toMatchObject({ behavior: "deny" });
           yield SUCCESS_RESULT;
         });
-        const grant = mintGrant.mock.calls[0]?.[0]?.context;
-        if (!grant) {
-          throw new Error("expected workspace-only MCP tools");
-        }
-        const scoped = await resolveMcpLoopbackScopedTools({
-          cfg: config,
-          context: grant,
-          admittedRunContext: context.params.admittedRunContext,
-        });
+        const scoped = await scopedTools(context, config);
         const { readTool, writeTool, editTool } = expectReadWriteEditTools(scoped.tools);
         await writeTool.execute("workspace-write", {
           path: "note.txt",
@@ -208,9 +205,7 @@ describe("restricted CLI tool preparation", () => {
           writeTool.execute("outside-create", { path: "../../new.txt", content: "changed" }),
         ).rejects.toThrow();
         expect(fs.existsSync(path.join(stateDir, "new.txt"))).toBe(false);
-      } finally {
-        await context.preparedBackend.cleanup?.();
-      }
+      });
     },
   );
 
@@ -226,7 +221,7 @@ describe("restricted CLI tool preparation", () => {
         agents: { entries: { main: { tools: { fs: { workspaceOnly: false } } } } },
       },
     });
-    try {
+    await withCliContext(context, async () => {
       await runPlugin(context, async function* (execution) {
         await expect(
           requestNativeTool(execution, "Read", {
@@ -235,9 +230,7 @@ describe("restricted CLI tool preparation", () => {
         ).resolves.toMatchObject({ behavior: "allow" });
         yield SUCCESS_RESULT;
       });
-    } finally {
-      await context.preparedBackend.cleanup?.();
-    }
+    });
   });
 
   it("retains an exact file-tool selection when applying workspace-only policy", async () => {
@@ -252,20 +245,10 @@ describe("restricted CLI tool preparation", () => {
       cliToolAvailability: { native: [], openClaw: ["write"] },
       config,
     });
-    try {
-      const grant = mintGrant.mock.calls[0]?.[0]?.context;
-      if (!grant) {
-        throw new Error("expected workspace-only MCP tools");
-      }
-      const scoped = await resolveMcpLoopbackScopedTools({
-        cfg: config,
-        context: grant,
-        admittedRunContext: context.params.admittedRunContext,
-      });
+    await withCliContext(context, async () => {
+      const scoped = await scopedTools(context, config);
       expect(scoped.tools.map((tool) => tool.name)).toEqual(["write"]);
-    } finally {
-      await context.preparedBackend.cleanup?.();
-    }
+    });
   });
 
   it.each(["agent", "side-question", "preparation-error"] as const)(
@@ -403,11 +386,7 @@ describe("restricted CLI tool preparation", () => {
         expect(grant.conversationToolPolicy).toEqual(
           source === "conversation" ? conversationToolPolicy : undefined,
         );
-        const scoped = await resolveMcpLoopbackScopedTools({
-          cfg: config,
-          context: grant,
-          admittedRunContext: context.params.admittedRunContext,
-        });
+        const scoped = await scopedTools(context, config);
         expect(scoped.tools.map((tool) => tool.name)).not.toContain("write");
         const spawn = scoped.tools.find((tool) => tool.name === "sessions_spawn");
         if (!spawn) {
@@ -436,12 +415,7 @@ describe("restricted CLI tool preparation", () => {
           throw new Error("expected the permitted read tool");
         }
         await expect(read.execute("restricted-root-read", { path: outsidePath })).rejects.toThrow();
-        const args = context.preparedBackend.backend.args ?? [];
-        const mcpConfigPath = args[args.indexOf("--mcp-config") + 1];
-        const bundle = JSON.parse(fs.readFileSync(mcpConfigPath ?? "", "utf-8")) as {
-          mcpServers: Record<string, unknown>;
-        };
-        expect(Object.keys(bundle.mcpServers)).toEqual(["openclaw"]);
+        expectManagedBundle(context);
       } finally {
         launch.mockRestore();
         await context.preparedBackend.cleanup?.();
@@ -529,7 +503,7 @@ describe("restricted CLI tool preparation", () => {
           tools: { allow: writeAllowed ? ["read", "write"] : ["read"] },
         },
       });
-      try {
+      await withCliContext(context, async () => {
         expect(context.params.cliToolAvailability?.native).toEqual([]);
         expect(context.systemPrompt).toContain(
           writeAllowed
@@ -537,9 +511,7 @@ describe("restricted CLI tool preparation", () => {
             : "this run cannot safely finish full BOOTSTRAP.md",
         );
         expect(context.systemPrompt.includes(content)).toBe(writeAllowed);
-      } finally {
-        await context.preparedBackend.cleanup?.();
-      }
+      });
     },
   );
 
@@ -595,11 +567,7 @@ describe("restricted CLI tool preparation", () => {
       } satisfies Partial<RunCliAgentParams>;
       const owner = await fixture.prepare({ ...run, senderId: "owner", senderIsOwner: true });
       const ownerGrant = mintGrant.mock.calls[0]![0].context;
-      const ownerTools = await resolveMcpLoopbackScopedTools({
-        cfg: run.config,
-        context: ownerGrant,
-        admittedRunContext: owner.params.admittedRunContext,
-      });
+      const ownerTools = await scopedTools(owner, run.config);
       await owner.preparedBackend.cleanup?.();
       setCliRunnerPrepareTestDeps({
         claudeCliSessionTranscriptHasContent: async () => true,
@@ -620,7 +588,7 @@ describe("restricted CLI tool preparation", () => {
           sourceSessionKey: childSessionKey,
         },
       });
-      try {
+      await withCliContext(context, async () => {
         const grant = mintGrant.mock.calls[1]![0].context;
         expect(grant).toBeDefined();
         expect(context.params.cliToolAvailability?.native).toEqual([]);
@@ -639,11 +607,7 @@ describe("restricted CLI tool preparation", () => {
         });
         expect(grant.toolsAllow).toEqual(context.params.cliToolAvailability?.openClaw);
         expect(grant.trustedInternalHandoff).toEqual(trustedInternalHandoff);
-        const scoped = await resolveMcpLoopbackScopedTools({
-          cfg: run.config,
-          context: grant,
-          admittedRunContext: context.params.admittedRunContext,
-        });
+        const scoped = await scopedTools(context, run.config, 1);
         const toolSchema = buildMcpToolSchema(scoped.tools);
         expect(toolSchema).toEqual(buildMcpToolSchema(ownerTools.tools));
         const deniedPath = path.join(fixture.session.dir, "completion-must-not-write.txt");
@@ -678,15 +642,8 @@ describe("restricted CLI tool preparation", () => {
           ).resolves.toMatchObject({ result: { content: [{ type: "text", text: denial }] } });
         }
         expect(fs.existsSync(deniedPath)).toBe(false);
-        const args = context.preparedBackend.backend.args ?? [];
-        const mcpConfigPath = args[args.indexOf("--mcp-config") + 1];
-        const bundle = JSON.parse(fs.readFileSync(mcpConfigPath ?? "", "utf-8")) as {
-          mcpServers: Record<string, unknown>;
-        };
-        expect(Object.keys(bundle.mcpServers)).toEqual(["openclaw"]);
-      } finally {
-        await context.preparedBackend.cleanup?.();
-      }
+        expectManagedBundle(context);
+      });
     },
   );
 
@@ -732,11 +689,9 @@ describe("restricted CLI tool preparation", () => {
       disableTools: true,
       toolsAllow: ["write"],
     });
-    try {
+    await withCliContext(context, async () => {
       expect(context.params.cliToolAvailability).toEqual({ native: [], openClaw: [] });
       expect(context.params.toolsAllow).toBeUndefined();
-    } finally {
-      await context.preparedBackend.cleanup?.();
-    }
+    });
   });
 });

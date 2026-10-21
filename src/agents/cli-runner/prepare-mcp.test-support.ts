@@ -17,6 +17,17 @@ import {
 import { setCliRunnerPrepareTestDeps } from "./prepare.test-support.js";
 import type { PreparedCliRunContext, RunCliAgentParams } from "./types.js";
 
+export async function withCliContext<T>(
+  context: PreparedCliRunContext,
+  body: (context: PreparedCliRunContext) => Promise<T>,
+): Promise<T> {
+  try {
+    return await body(context);
+  } finally {
+    await context.preparedBackend.cleanup?.();
+  }
+}
+
 export function cliSessionBinding(context: PreparedCliRunContext, sessionId = "cli-session") {
   return {
     sessionId,

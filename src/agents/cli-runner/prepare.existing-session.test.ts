@@ -35,6 +35,7 @@ import { executePreparedCliRun } from "./execute.js";
 import {
   cliSessionBinding as buildCliSessionBinding,
   setRawCliBackendForPrepareTest,
+  withCliContext,
 } from "./prepare-mcp.test-support.js";
 import { prepareCliRunContext } from "./prepare.js";
 import {
@@ -131,14 +132,10 @@ it("keeps a stored Claude conversation across the upgrade while excluding native
   vi.stubEnv("HOME", dir);
   const nativeSettingsPath = path.join(dir, ".claude", "settings.json");
   fs.mkdirSync(path.dirname(nativeSettingsPath), { recursive: true });
-  const nativeSettings = JSON.stringify(
-    {
-      autoMemoryEnabled: true,
-      enabledPlugins: { "prior-plugin@local": true },
-    },
-    null,
-    2,
-  );
+  const nativeSettings = JSON.stringify({
+    autoMemoryEnabled: true,
+    enabledPlugins: { "prior-plugin@local": true },
+  });
   fs.writeFileSync(nativeSettingsPath, nativeSettings);
   fs.writeFileSync(path.join(dir, "AGENTS.md"), "OPENCLAW_CONTEXT_SURVIVES_UPGRADE");
   fs.writeFileSync(path.join(dir, "CLAUDE.md"), "NATIVE_CUSTOMIZATION_MUST_NOT_BE_INJECTED");
@@ -163,44 +160,41 @@ it("keeps a stored Claude conversation across the upgrade while excluding native
   const nativeProjectDir = resolveClaudeCliProjectDirForWorkspace({ workspaceDir: dir });
   fs.mkdirSync(nativeProjectDir, { recursive: true });
   const nativeTranscriptPath = path.join(nativeProjectDir, nativeSessionId + ".jsonl");
+  const history = [
+    {
+      id: "old-user",
+      parentId: null,
+      message: { role: "user", content: "Remember UPGRADE-HISTORY-42." },
+    },
+    {
+      id: "old-assistant",
+      parentId: "old-user",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Saved UPGRADE-HISTORY-42." }],
+      },
+    },
+  ];
   const nativeTranscript =
-    [
-      {
-        type: "user",
-        uuid: "old-user",
-        sessionId: nativeSessionId,
-        message: { role: "user", content: "Remember UPGRADE-HISTORY-42." },
-      },
-      {
-        type: "assistant",
-        uuid: "old-assistant",
-        parentUuid: "old-user",
-        sessionId: nativeSessionId,
-        message: {
-          role: "assistant",
-          content: [{ type: "text", text: "Saved UPGRADE-HISTORY-42." }],
-        },
-      },
-    ]
-      .map((record) => JSON.stringify(record))
+    history
+      .map(({ id, parentId, message }) =>
+        JSON.stringify({
+          type: message.role,
+          uuid: id,
+          ...(parentId ? { parentUuid: parentId } : {}),
+          sessionId: nativeSessionId,
+          message,
+        }),
+      )
       .join("\n") + "\n";
   fs.writeFileSync(nativeTranscriptPath, nativeTranscript);
-  fixture.appendTranscript({
-    id: "old-user",
-    parentId: null,
-    timestamp: new Date(1).toISOString(),
-    message: { role: "user", content: "Remember UPGRADE-HISTORY-42.", timestamp: 1 },
-  });
-  fixture.appendTranscript({
-    id: "old-assistant",
-    parentId: "old-user",
-    timestamp: new Date(2).toISOString(),
-    message: {
-      role: "assistant",
-      content: [{ type: "text", text: "Saved UPGRADE-HISTORY-42." }],
-      timestamp: 2,
-    },
-  });
+  for (const [index, entry] of history.entries()) {
+    fixture.appendTranscript({
+      ...entry,
+      timestamp: new Date(index + 1).toISOString(),
+      message: { ...entry.message, timestamp: index + 1 },
+    });
+  }
 
   // This is a stored v2026.10.3-format binding, not a migration. Its digest is
   // the stable loopback config hash: port-canonicalized, including Claude's
@@ -323,30 +317,25 @@ it("keeps a stored Claude conversation across the upgrade while excluding native
     false,
     getCliSessionBinding(loadSessionEntry(sessionTarget), "claude-cli"),
   );
-  let upgradedBinding: ReturnType<typeof getCliSessionBinding>;
-  try {
+  const upgradedBinding = await withCliContext(upgraded, async () => {
     expect(upgraded.reusableCliSession).toEqual({
       mode: "invalidate",
       invalidatedReason: "prompt-tools",
     });
     await executePreparedCliRun(upgraded);
-    upgradedBinding = {
+    return {
       ...buildCliSessionBinding(upgraded, nativeSessionId),
       authEpoch: upgraded.authEpoch,
       authEpochVersion: upgraded.authEpochVersion,
     };
-  } finally {
-    await upgraded.preparedBackend.cleanup?.();
-  }
+  });
   // A verified completion then resumes that session with the same catalog.
   const completion = await prepareTurn(true, upgradedBinding);
-  try {
+  await withCliContext(completion, async () => {
     expect(completion.reusableCliSession).toEqual({ mode: "reuse", sessionId: nativeSessionId });
     expect(completion.promptToolNamesHash).toBe(upgraded.promptToolNamesHash);
     await executePreparedCliRun(completion, nativeSessionId);
-  } finally {
-    await completion.preparedBackend.cleanup?.();
-  }
+  });
 
   expect(sent).toHaveLength(2);
   expect(sent[0]?.useResume).toBe(false);
@@ -363,9 +352,9 @@ it("keeps a stored Claude conversation across the upgrade while excluding native
       expectDefined(turn.args[turn.args.indexOf("--settings") + 1], "restricted Claude settings"),
     );
     expect(settings).toMatchObject({ disableAllHooks: true, autoMemoryEnabled: false });
-    expect(turn.args).not.toContain(nativeSettingsPath);
-    expect(turn.args).not.toContain("--plugin-dir");
-    expect(turn.args).not.toContain("--no-session-persistence");
+    for (const forbidden of [nativeSettingsPath, "--plugin-dir", "--no-session-persistence"]) {
+      expect(turn.args).not.toContain(forbidden);
+    }
     expect(turn.toolAvailability).toEqual({ native: [], openClaw: ["read"] });
     expect(turn.args[turn.args.indexOf("--tools") + 1]).toBe("");
     expect(turn.args[turn.args.indexOf("--allowedTools") + 1]).toBe("mcp__openclaw__read");
