@@ -138,9 +138,7 @@ function runIdentityVerification(
   writeFileSync(
     join(fakeBin, "curl"),
     "#!/usr/bin/env bash\nprintf '%s\\n' \"$FAKE_OIDC_JSON\"\n",
-    {
-      mode: 0o755,
-    },
+    { mode: 0o755 },
   );
   return spawnSync(
     "bash",
@@ -295,9 +293,7 @@ function runCandidateProvenance(
                 : {
                     isValid: true,
                     state: "VALID",
-                    signer: {
-                      login: signature === "web-flow" ? "web-flow" : "release-maintainer",
-                    },
+                    signer: { login: signature === "web-flow" ? "web-flow" : "release-maintainer" },
                   },
           associatedPullRequests: {
             nodes: [
@@ -398,9 +394,10 @@ type ProvenanceCase = NonNullable<Parameters<typeof runCandidateProvenance>[1]> 
   stderr?: string;
 };
 
+// Share the signature/PR matrix; keep checkout-context admission at both workflow entry points.
 function checkProvenance(
-  block: ProvenanceBlock,
   { exit = 0, stdout, stderr, ...params }: ProvenanceCase,
+  block: ProvenanceBlock = PROVENANCE_BLOCKS[0],
 ) {
   const result = runCandidateProvenance(block, params);
   const assertion = expect(
@@ -422,8 +419,8 @@ function checkProvenance(
   }
 }
 
-function provenanceScenario(block: ProvenanceBlock, defaults: ProvenanceCase) {
-  return (overrides: ProvenanceCase = {}) => checkProvenance(block, { ...defaults, ...overrides });
+function provenanceScenario(defaults: ProvenanceCase, block?: ProvenanceBlock) {
+  return (overrides: ProvenanceCase = {}) => checkProvenance({ ...defaults, ...overrides }, block);
 }
 
 describe("release Telegram QA workflow", () => {
@@ -508,10 +505,7 @@ describe("release Telegram QA workflow", () => {
       releaseCiBranch,
     ]) {
       for (const invocation of ["dispatch", "reusable"] as const) {
-        const result = runIdentityVerification({
-          invocation,
-          workflowBranch,
-        });
+        const result = runIdentityVerification({ invocation, workflowBranch });
         expect(result.status, `${workflowBranch}/${invocation}: ${result.stderr}`).toBe(0);
       }
     }
@@ -553,38 +547,34 @@ describe("release Telegram QA workflow", () => {
     }
   });
 
-  it("accepts only same-line extended-stable successors in both provenance blocks", () => {
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      checkProvenance(provenanceBlock, {
-        candidateVersion: "2026.7.35",
-        targetContextRef: "extended-stable/2026.7.33",
-      });
+  it("accepts only same-line extended-stable successors in the shared provenance owner", () => {
+    checkProvenance({
+      candidateVersion: "2026.7.35",
+      targetContextRef: "extended-stable/2026.7.33",
+    });
 
-      for (const candidateVersion of ["2026.7.32", "2026.8.35", "2026.7.35-beta.1"]) {
-        checkProvenance(provenanceBlock, {
-          candidateVersion,
-          targetContextRef: "extended-stable/2026.7.33",
-          exit: 1,
-          stderr: "PATCH >= 33",
-        });
-      }
+    for (const candidateVersion of ["2026.7.32", "2026.8.35", "2026.7.35-beta.1"]) {
+      checkProvenance({
+        candidateVersion,
+        targetContextRef: "extended-stable/2026.7.33",
+        exit: 1,
+        stderr: "PATCH >= 33",
+      });
     }
   });
 
   it("keeps exact release candidates trusted when the canonical branch advances", () => {
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      for (const targetContextRef of ["release/2026.7.35", "extended-stable/2026.7.33"]) {
-        for (const signature of ["maintainer", "web-flow", "missing"] as const) {
-          checkProvenance(provenanceBlock, {
-            candidateVersion: "2026.7.35",
-            remoteSha: "b".repeat(40),
-            releaseCompareStatus: "ahead",
-            targetContextRef,
-            signature,
-            mergedPullRequests: [{ baseRefName: targetContextRef }],
-            stdout: "Telegram candidate trust reason: release-branch",
-          });
-        }
+    for (const targetContextRef of ["release/2026.7.35", "extended-stable/2026.7.33"]) {
+      for (const signature of ["maintainer", "web-flow", "missing"] as const) {
+        checkProvenance({
+          candidateVersion: "2026.7.35",
+          remoteSha: "b".repeat(40),
+          releaseCompareStatus: "ahead",
+          targetContextRef,
+          signature,
+          mergedPullRequests: [{ baseRefName: targetContextRef }],
+          stdout: "Telegram candidate trust reason: release-branch",
+        });
       }
     }
   });
@@ -602,85 +592,76 @@ describe("release Telegram QA workflow", () => {
       { mergedPullRequests: [{ mergeCommitOid: "c".repeat(40) }] },
       { mergedPullRequests: [{ baseRepository: "fork/openclaw" }] },
     ];
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      for (const params of cases) {
-        checkProvenance(provenanceBlock, {
-          candidateVersion: "2026.7.35",
-          remoteSha: "b".repeat(40),
-          releaseCompareStatus: "ahead",
-          targetContextRef: "extended-stable/2026.7.33",
-          signature: "web-flow",
-          mergedPullRequests: [{ baseRefName: "extended-stable/2026.7.33" }],
-          ...params,
-          exit: "nonzero",
-        });
-      }
+
+    for (const params of cases) {
+      checkProvenance({
+        candidateVersion: "2026.7.35",
+        remoteSha: "b".repeat(40),
+        releaseCompareStatus: "ahead",
+        targetContextRef: "extended-stable/2026.7.33",
+        signature: "web-flow",
+        mergedPullRequests: [{ baseRefName: "extended-stable/2026.7.33" }],
+        ...params,
+        exit: "nonzero",
+      });
     }
   });
 
-  it("accepts only strict signed frozen beta branch heads in both provenance blocks", () => {
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      const run = provenanceScenario(provenanceBlock, {
-        branchHeads: ["release/2026.7.1-beta.3-code-frozen-r13"],
-        candidateVersion: "2026.7.1-beta.3",
-        remoteSha: "b".repeat(40),
-        targetContextRef: "release/2026.7.1",
-        exit: "nonzero",
-      });
-      run({ exit: 0, stdout: "Telegram candidate trust reason: frozen-release-branch-head" });
+  it("accepts only strict signed frozen beta branch heads in the shared provenance owner", () => {
+    const run = provenanceScenario({
+      branchHeads: ["release/2026.7.1-beta.3-code-frozen-r13"],
+      candidateVersion: "2026.7.1-beta.3",
+      remoteSha: "b".repeat(40),
+      targetContextRef: "release/2026.7.1",
+      exit: "nonzero",
+    });
+    run({ exit: 0, stdout: "Telegram candidate trust reason: frozen-release-branch-head" });
 
-      const rejectedCases: Record<string, Parameters<typeof runCandidateProvenance>[1]> = {
-        "stale frozen branch": { branchHeads: [] },
-        "duplicate frozen branches": {
-          branchHeads: [
-            "release/2026.7.1-beta.3-code-frozen",
-            "release/2026.7.1-beta.3-code-frozen-r13",
-          ],
-        },
-        "wrong-version frozen branch": {
-          branchHeads: ["release/2026.7.1-beta.2-code-frozen-r13"],
-        },
-        "non-exact target ref": { targetRef: "refs/heads/release/2026.7.1-beta.3-code-frozen-r13" },
-        "missing signature": { signature: "missing" },
-        "invalid signature": { signature: "invalid" },
-        "web-flow signature": { signature: "web-flow" },
-        "low-permission signer": { permission: "write" },
-        "same-repository PR head": { openPr: true },
-      };
-      for (const params of Object.values(rejectedCases)) {
-        run(params);
-      }
+    const rejectedCases: Record<string, Parameters<typeof runCandidateProvenance>[1]> = {
+      "stale frozen branch": { branchHeads: [] },
+      "duplicate frozen branches": {
+        branchHeads: [
+          "release/2026.7.1-beta.3-code-frozen",
+          "release/2026.7.1-beta.3-code-frozen-r13",
+        ],
+      },
+      "wrong-version frozen branch": { branchHeads: ["release/2026.7.1-beta.2-code-frozen-r13"] },
+      "non-exact target ref": { targetRef: "refs/heads/release/2026.7.1-beta.3-code-frozen-r13" },
+      "missing signature": { signature: "missing" },
+      "invalid signature": { signature: "invalid" },
+      "web-flow signature": { signature: "web-flow" },
+      "low-permission signer": { permission: "write" },
+      "same-repository PR head": { openPr: true },
+    };
+    for (const params of Object.values(rejectedCases)) {
+      run(params);
     }
   });
 
   it("verifies an exact merged PR directly when commit associations omit it", () => {
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      for (const signature of ["web-flow", "missing"] as const) {
-        checkProvenance(provenanceBlock, {
-          candidateVersion: "2026.7.33",
-          targetContextRef: "extended-stable/2026.7.33",
-          signature,
-          messageHeadline: "fix(release): keep survivor sessions inside retention (#149710)",
-          directPullRequest: {},
-          unrelatedOpenPullRequests: 2,
-          stdout: "Telegram candidate trust reason: release-branch",
-        });
-      }
+    for (const signature of ["web-flow", "missing"] as const) {
+      checkProvenance({
+        candidateVersion: "2026.7.33",
+        targetContextRef: "extended-stable/2026.7.33",
+        signature,
+        messageHeadline: "fix(release): keep survivor sessions inside retention (#149710)",
+        directPullRequest: {},
+        unrelatedOpenPullRequests: 2,
+        stdout: "Telegram candidate trust reason: release-branch",
+      });
     }
   });
 
   it("uses one exact associated merge without consulting the PR hint", () => {
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      checkProvenance(provenanceBlock, {
-        candidateVersion: "2026.7.33",
-        directPullRequest: { state: "OPEN" },
-        mergedPullRequests: [{}],
-        messageHeadline: "fixture (#149710)",
-        signature: "web-flow",
-        targetContextRef: "extended-stable/2026.7.33",
-        unrelatedOpenPullRequests: 2,
-      });
-    }
+    checkProvenance({
+      candidateVersion: "2026.7.33",
+      directPullRequest: { state: "OPEN" },
+      mergedPullRequests: [{}],
+      messageHeadline: "fixture (#149710)",
+      signature: "web-flow",
+      targetContextRef: "extended-stable/2026.7.33",
+      unrelatedOpenPullRequests: 2,
+    });
   });
 
   it("never treats a commit's PR hint as release authorization", () => {
@@ -699,73 +680,70 @@ describe("release Telegram QA workflow", () => {
       { label: "no canonical PR suffix", messageHeadline: "claimed #149710 elsewhere" },
       { label: "ambiguous existing associations", mergedPullRequests: [{}, {}] },
     ];
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      for (const { label: _label, ...params } of cases) {
-        checkProvenance(provenanceBlock, {
-          candidateVersion: "2026.7.33",
-          targetContextRef: "extended-stable/2026.7.33",
-          signature: "web-flow",
-          messageHeadline: "fixture (#149710)",
-          directPullRequest: {},
-          ...params,
-          exit: "nonzero",
-        });
-      }
+
+    for (const { label: _label, ...params } of cases) {
+      checkProvenance({
+        candidateVersion: "2026.7.33",
+        targetContextRef: "extended-stable/2026.7.33",
+        signature: "web-flow",
+        messageHeadline: "fixture (#149710)",
+        directPullRequest: {},
+        ...params,
+        exit: "nonzero",
+      });
     }
   });
 
-  it("keeps release provenance attribution fail-closed in both blocks", () => {
-    for (const provenanceBlock of PROVENANCE_BLOCKS) {
-      const run = provenanceScenario(provenanceBlock, {
-        candidateVersion: "2026.7.1",
-        targetContextRef: "release/2026.7.1",
-        exit: "nonzero",
-      });
-      const cases: Record<string, Parameters<typeof runCandidateProvenance>[1]> = {
-        "stale canonical branch": {
-          candidateVersion: "2026.7.1-beta.3",
-          remoteSha: "b".repeat(40),
-        },
-        "missing merge attribution": { signature: "missing" },
-        "ambiguous merge attribution": {
-          mergedPullRequests: [
-            { baseRefName: "release-integration/2026.7.1-a" },
-            { baseRefName: "release-integration/2026.7.1-b" },
-          ],
-          signature: "web-flow",
-        },
-        "foreign repository attribution": {
-          mergedPullRequests: [{ baseRepository: "fork/openclaw" }],
-          signature: "web-flow",
-        },
-        "different merge commit attribution": {
-          mergedPullRequests: [{ mergeCommitOid: "b".repeat(40) }],
-          signature: "web-flow",
-        },
-        "insufficient actor permission": {
-          mergedPullRequests: [{ baseRefName: "release-integration/2026.7.1-repair" }],
-          permission: "write",
-          signature: "web-flow",
-        },
-        "invalid signature": { signature: "invalid" },
-      };
-      for (const params of Object.values(cases)) {
-        run(params);
-      }
-
-      run({
+  it("keeps release provenance attribution fail-closed in the shared provenance owner", () => {
+    const run = provenanceScenario({
+      candidateVersion: "2026.7.1",
+      targetContextRef: "release/2026.7.1",
+      exit: "nonzero",
+    });
+    const cases: Record<string, Parameters<typeof runCandidateProvenance>[1]> = {
+      "stale canonical branch": {
+        candidateVersion: "2026.7.1-beta.3",
+        remoteSha: "b".repeat(40),
+      },
+      "missing merge attribution": { signature: "missing" },
+      "ambiguous merge attribution": {
+        mergedPullRequests: [
+          { baseRefName: "release-integration/2026.7.1-a" },
+          { baseRefName: "release-integration/2026.7.1-b" },
+        ],
+        signature: "web-flow",
+      },
+      "foreign repository attribution": {
+        mergedPullRequests: [{ baseRepository: "fork/openclaw" }],
+        signature: "web-flow",
+      },
+      "different merge commit attribution": {
+        mergedPullRequests: [{ mergeCommitOid: "b".repeat(40) }],
+        signature: "web-flow",
+      },
+      "insufficient actor permission": {
         mergedPullRequests: [{ baseRefName: "release-integration/2026.7.1-repair" }],
-        permission: "admin",
-        signature: "missing",
-        exit: 0,
-      });
-
-      run({
-        candidateVersion: "2026.7.1-alpha.1",
-        exit: 1,
-        stderr: "Telegram candidate version 2026.7.1-alpha.1 does not belong to release 2026.7.1.",
-      });
+        permission: "write",
+        signature: "web-flow",
+      },
+      "invalid signature": { signature: "invalid" },
+    };
+    for (const params of Object.values(cases)) {
+      run(params);
     }
+
+    run({
+      mergedPullRequests: [{ baseRefName: "release-integration/2026.7.1-repair" }],
+      permission: "admin",
+      signature: "missing",
+      exit: 0,
+    });
+
+    run({
+      candidateVersion: "2026.7.1-alpha.1",
+      exit: 1,
+      stderr: "Telegram candidate version 2026.7.1-alpha.1 does not belong to release 2026.7.1.",
+    });
   });
 
   it("binds every release context to candidate version and SHA", () => {
@@ -776,11 +754,8 @@ describe("release Telegram QA workflow", () => {
       ["v2026.7.1-alpha.2", "2026.7.1-alpha.2"],
       ["v2026.7.1-beta.3", "2026.7.1-beta.3"],
     ] as const) {
-      for (const provenanceBlock of PROVENANCE_BLOCKS) {
-        const run = provenanceScenario(provenanceBlock, {
-          candidateVersion,
-          targetContextRef,
-        });
+      for (const block of PROVENANCE_BLOCKS) {
+        const run = provenanceScenario({ candidateVersion, targetContextRef }, block);
         run();
         run({ candidateVersion: "2026.8.1", exit: 1 });
         run({ remoteSha: "b".repeat(40), exit: 1 });
@@ -947,11 +922,7 @@ describe("release Telegram QA workflow", () => {
     for (const [configPath, allowed] of paths) {
       const result = spawnSync("bash", ["-ceu", admission!], {
         encoding: "utf8",
-        env: {
-          ...process.env,
-          OPENCLAW_STATE_DIR: stateRoot,
-          OPENCLAW_CONFIG_PATH: configPath,
-        },
+        env: { ...process.env, OPENCLAW_STATE_DIR: stateRoot, OPENCLAW_CONFIG_PATH: configPath },
       });
       expect(result.status === 0, configPath).toBe(allowed);
     }

@@ -50,6 +50,8 @@ const TOOLING = {
 };
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
+const readJson = (file: string) => JSON.parse(readFileSync(file, "utf8"));
+
 function inputs(overrides: Record<string, unknown> = {}) {
   return {
     tag: "v2026.9.2-beta.1",
@@ -135,11 +137,7 @@ function publicationRequest(ready = readyRelease(), resumeRunId = "") {
 
 describe("release readiness contract", () => {
   it("binds core postpublish evidence to the exact failed publisher", () => {
-    const expected = {
-      releaseTag: "v2026.9.2-beta.1",
-      npmDistTag: "beta",
-      parentRunId: 700,
-    };
+    const expected = { releaseTag: "v2026.9.2-beta.1", npmDistTag: "beta", parentRunId: 700 };
     const evidence = {
       version: 1,
       releaseVersion: "2026.9.2-beta.1",
@@ -414,18 +412,21 @@ function bridgeFixture(releaseRunAttempt = 1, conclusion = "success") {
     FIXTURE_FAILED_PACKAGE: "",
     FIXTURE_CORE_POSTPUBLISH_EVIDENCE: "true",
   };
+  const trace = (): Trace[] =>
+    existsSync(env.FIXTURE_TRACE)
+      ? readFileSync(env.FIXTURE_TRACE, "utf8")
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+      : [];
   return {
     root,
     scripts,
     env,
-    trace: (): Trace[] =>
-      existsSync(env.FIXTURE_TRACE)
-        ? readFileSync(env.FIXTURE_TRACE, "utf8")
-            .trim()
-            .split("\n")
-            .filter(Boolean)
-            .map((line) => JSON.parse(line))
-        : [],
+    trace,
+    events: (event: string) => trace().filter((entry) => entry.event === event),
+    posts: () => trace().filter((entry) => entry.args?.includes("POST")),
   };
 }
 
@@ -681,9 +682,7 @@ describe("release readiness executable handoff", () => {
             { cwd: fixture.root, env: fixture.env, encoding: "utf8", timeout: 10_000 },
           );
           expect(validated.status, validated.stderr).toBe(0);
-          expect(fixture.trace().filter((entry) => entry.event === "public-verified")).toHaveLength(
-            2,
-          );
+          expect(fixture.events("public-verified")).toHaveLength(2);
         }
       } else {
         expect(result.status).toBe(1);
@@ -967,7 +966,7 @@ function finalizationFixture(overrides: Record<string, unknown> = {}) {
       });
     },
     state: (): { writes: number; isDraft: boolean; isPrerelease: boolean; isLatest: boolean } =>
-      JSON.parse(readFileSync(statePath, "utf8")),
+      readJson(statePath),
   };
 }
 
@@ -1434,7 +1433,7 @@ async function preparationFixture(
     overrides.frvCore !== false,
   );
   const statePath = join(fixture.root, "github-state.json");
-  const state = JSON.parse(readFileSync(statePath, "utf8"));
+  const state = readJson(statePath);
   Object.assign(state, { frv: evidence });
   writeFileSync(statePath, JSON.stringify(state));
   const git = writeFixtureFile(
@@ -1573,11 +1572,11 @@ describe("publication dispatch retention", () => {
       releaseRunAttempt: null,
       producer: null,
     };
-    expect(fixture.trace().filter((entry) => entry.event === "publication-dispatch")).toEqual([
+    expect(fixture.events("publication-dispatch")).toEqual([
       { event: "publication-dispatch", request: unknown },
     ]);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toHaveLength(1);
-    expect(JSON.parse(readFileSync(fixture.requestPath, "utf8"))).toEqual(unknown);
+    expect(fixture.posts()).toHaveLength(1);
+    expect(readJson(fixture.requestPath)).toEqual(unknown);
     expect(result.status, result.stderr).toBe(1);
     expect(existsSync(fixture.env.GITHUB_OUTPUT)).toBe(false);
     expect(result.stderr).toContain("unknown; do not redispatch");
@@ -1589,7 +1588,7 @@ describe("publication dispatch retention", () => {
     mkdirSync(dirname(fixture.requestPath), { recursive: true });
     writeFileSync(fixture.requestPath, '{"preserve":"original"}');
     expect(fixture.publish().status).toBe(1);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+    expect(fixture.posts()).toEqual([]);
     expect(readFileSync(fixture.requestPath, "utf8")).toBe('{"preserve":"original"}');
   });
 
@@ -1611,19 +1610,17 @@ describe("publication dispatch retention", () => {
       env.FIXTURE_ACK_FAILURE = failure;
     }
     expect(fixture.publish(env).status).toBe(1);
-    expect(JSON.parse(readFileSync(fixture.requestPath, "utf8"))).toMatchObject({
+    expect(readJson(fixture.requestPath)).toMatchObject({
       state,
       releaseRunId: state === "unknown" ? null : 700,
     });
     if (failure.endsWith(":rename")) {
-      expect(
-        JSON.parse(readFileSync(join(dirname(fixture.requestPath), "dispatch.next.json"), "utf8")),
-      ).toMatchObject({
+      expect(readJson(join(dirname(fixture.requestPath), "dispatch.next.json"))).toMatchObject({
         releaseRunId: 700,
       });
     }
     expect(fixture.publish(env).status).toBe(1);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toHaveLength(1);
+    expect(fixture.posts()).toHaveLength(1);
   });
 
   it.each([
@@ -1637,14 +1634,14 @@ describe("publication dispatch retention", () => {
   ])("keeps the known publisher after invalid %s", (_label, overrides) => {
     const fixture = publicationFixture(overrides);
     expect(fixture.publish().status).toBe(1);
-    expect(JSON.parse(readFileSync(fixture.requestPath, "utf8"))).toMatchObject({
+    expect(readJson(fixture.requestPath)).toMatchObject({
       state: "unverified",
       releaseRunId: 700,
       releaseRunAttempt: null,
       producer: null,
     });
     expect(existsSync(fixture.env.GITHUB_OUTPUT)).toBe(false);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toHaveLength(1);
+    expect(fixture.posts()).toHaveLength(1);
   });
 
   it.each([
@@ -1678,8 +1675,8 @@ describe("publication dispatch retention", () => {
       );
       expect(result.status, result.stderr).toBe(1);
     }
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
-    expect(fixture.trace().filter((entry) => entry.event === "public-verified")).toEqual([]);
+    expect(fixture.posts()).toEqual([]);
+    expect(fixture.events("public-verified")).toEqual([]);
     expect(fixture.state().writes).toBe(0);
   });
 });
@@ -1721,7 +1718,7 @@ describe("release preparation recovery", () => {
     const result = fixture.validate({ PUBLICATION_CONSUMER: "core-npm" });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("does not cover the actual core npm operation");
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+    expect(fixture.posts()).toEqual([]);
   });
 
   const windowsInputs = {
@@ -1750,15 +1747,12 @@ describe("release preparation recovery", () => {
             : {},
       );
       expect(result.status, result.stderr).toBe(scenario === "valid" ? 0 : 1);
-      expect(
-        fixture.trace().filter((entry) => entry.event === "preparation-dispatch"),
-      ).toHaveLength(scenario === "valid" ? 1 : 0);
+      expect(fixture.events("preparation-dispatch")).toHaveLength(scenario === "valid" ? 1 : 0);
       expect(existsSync(fixture.requestPath)).toBe(scenario === "valid");
       if (scenario === "valid") {
-        expect(
-          JSON.parse(readFileSync(fixture.requestPath, "utf8")).inputs
-            .windows_node_installer_digests,
-        ).toBe(windowsInputs.windows_node_installer_digests);
+        expect(readJson(fixture.requestPath).inputs.windows_node_installer_digests).toBe(
+          windowsInputs.windows_node_installer_digests,
+        );
       }
     },
   );
@@ -1860,7 +1854,7 @@ describe("release preparation recovery", () => {
     const fixture = await preparationFixture({ unavailableFrv: true });
     const result = fixture.prepare();
     expect(result.status, result.stderr).toBe(1);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+    expect(fixture.posts()).toEqual([]);
     expect(existsSync(fixture.requestPath)).toBe(false);
     expect(result.stderr).toMatch(/FRV|full release|fixture GitHub/iu);
   });
@@ -1869,11 +1863,11 @@ describe("release preparation recovery", () => {
     const fixture = await preparationFixture();
     mkdirSync(fixture.env.GITHUB_STEP_SUMMARY);
     expect(fixture.prepare().status).toBe(1);
-    expect(JSON.parse(readFileSync(fixture.requestPath, "utf8"))).toMatchObject({
+    expect(readJson(fixture.requestPath)).toMatchObject({
       npmArtifact: descriptor("npm"),
       clawhubRunId: 400,
     });
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toHaveLength(1);
+    expect(fixture.posts()).toHaveLength(1);
   });
   it("does not seal readiness when the prepared ClawHub publisher is unavailable", async () => {
     const fixture = await preparationFixture();
@@ -1892,7 +1886,7 @@ describe("release preparation recovery", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("fixture ClawHub trusted publisher missing");
     expect(fixture.trace().filter((entry) => entry.event.startsWith("transfer-"))).toEqual([]);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+    expect(fixture.posts()).toEqual([]);
     expect(existsSync(join(fixture.env.RUNNER_TEMP, "release-ready/release-ready.json"))).toBe(
       false,
     );
@@ -1905,10 +1899,10 @@ describe("release preparation recovery", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("ClawHub dispatch response lost after acceptance");
     const request = { ...preparationRequest(), clawhubRunId: null };
-    expect(fixture.trace().filter((entry) => entry.event === "preparation-dispatch")).toEqual([
+    expect(fixture.events("preparation-dispatch")).toEqual([
       { event: "preparation-dispatch", target: "clawhub", request },
     ]);
-    expect(JSON.parse(readFileSync(fixture.requestPath, "utf8"))).toEqual(request);
+    expect(readJson(fixture.requestPath)).toEqual(request);
     expect(existsSync(fixture.env.GITHUB_OUTPUT)).toBe(false);
   });
 
@@ -1917,8 +1911,8 @@ describe("release preparation recovery", () => {
     const request = preparationRequest();
     const result = fixture.prepare(request, 2);
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(readFileSync(fixture.requestPath, "utf8"))).toEqual(request);
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+    expect(readJson(fixture.requestPath)).toEqual(request);
+    expect(fixture.posts()).toEqual([]);
     expect(
       fixture.trace().filter((entry) => (entry.args?.[1] ?? "").endsWith("/actions/runs/400")),
     ).toEqual([{ event: "gh", args: ["api", `repos/${REPOSITORY}/actions/runs/400`] }]);
@@ -1946,7 +1940,7 @@ describe("release preparation recovery", () => {
       const result = fixture.prepare({ ...preparationRequest(), ...overrides });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("Preparation recovery");
-      expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+      expect(fixture.posts()).toEqual([]);
       expect(existsSync(fixture.requestPath)).toBe(false);
       expect(existsSync(fixture.env.GITHUB_OUTPUT)).toBe(false);
     },
@@ -1960,7 +1954,7 @@ describe("release preparation recovery", () => {
     const result = fixture.prepare(preparationRequest());
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("producer workflow identity mismatch");
-    expect(fixture.trace().filter((entry) => entry.args?.includes("POST"))).toEqual([]);
+    expect(fixture.posts()).toEqual([]);
     expect(existsSync(fixture.env.GITHUB_OUTPUT)).toBe(false);
   });
 });
@@ -1995,10 +1989,7 @@ process.exitCode = 1;
         const authorized = Object.keys(changes).length === 0;
         expect(fixture.trace().some((event) => event.event === "carry-failed")).toBe(true);
         expect(result.status, result.stderr).toBe(authorized ? 0 : 1);
-        expect(fixture.state()).toMatchObject({
-          writes: authorized ? 1 : 0,
-          isDraft: !authorized,
-        });
+        expect(fixture.state()).toMatchObject({ writes: authorized ? 1 : 0, isDraft: !authorized });
       }
     },
   );
@@ -2199,7 +2190,7 @@ process.exitCode = 1;
     const result = fixture.run("button", "v2026.9.2", "beta");
     expect(result.status, result.stderr).toBe(0);
     expect(fixture.state()).toMatchObject({ writes: 1, isDraft: false });
-    expect(fixture.trace().filter((entry) => entry.event === "public-verified")).toEqual([
+    expect(fixture.events("public-verified")).toEqual([
       {
         event: "public-verified",
         runId: 700,
@@ -2207,7 +2198,7 @@ process.exitCode = 1;
         parentStatePolicy: "sealed-producer",
       },
     ]);
-    expect(fixture.trace().filter((entry) => entry.event === "core-publication-verified")).toEqual([
+    expect(fixture.events("core-publication-verified")).toEqual([
       { event: "core-publication-verified", runId: 700, runAttempt: 1 },
     ]);
   });

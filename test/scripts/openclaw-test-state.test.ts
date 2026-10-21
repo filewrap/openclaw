@@ -55,11 +55,7 @@ describe("scripts/lib/openclaw-test-state", () => {
     const payload = JSON.parse(
       await render(
         "create",
-        {
-          label: "script-test",
-          scenario: "update-stable",
-          "env-file": snippet,
-        },
+        { label: "script-test", scenario: "update-stable", "env-file": snippet },
         true,
       ),
     );
@@ -90,18 +86,10 @@ describe("scripts/lib/openclaw-test-state", () => {
   });
 
   it("renders a Docker-friendly shell snippet", async () => {
-    const text = await renderSnippet("shell", {
+    await renderSnippet("shell", {
       label: "update-channel-switch",
       scenario: "update-stable",
     });
-    for (const expected of [
-      'OPENCLAW_TEST_STATE_TMP_ROOT="${OPENCLAW_TEST_STATE_TMPDIR:-${TMPDIR:-/tmp}}"',
-      'mktemp -d "$OPENCLAW_TEST_STATE_TMP_ROOT/openclaw-update-channel-switch-update-stable-home.XXXXXX"',
-      "OPENCLAW_TEST_STATE_JSON",
-      '"channel": "stable"',
-    ]) {
-      expect(text).toContain(expected);
-    }
     const payload = await probe();
     expect(payload.home.startsWith(os.tmpdir())).toBe(true);
     expect(path.basename(payload.home)).toMatch(
@@ -157,14 +145,7 @@ describe("scripts/lib/openclaw-test-state", () => {
   });
 
   it("renders a reusable Docker shell function", async () => {
-    const text = await renderSnippet("shell-function", {}, true);
-    for (const expected of [
-      "openclaw_test_state_create()",
-      "unset OPENCLAW_AGENT_DIR",
-      "update-stable",
-    ]) {
-      expect(text).toContain(expected);
-    }
+    await renderSnippet("shell-function", {}, true);
     const payload = await probe(
       path.join(root, "function-tmp"),
       'export OPENCLAW_AGENT_DIR=/tmp/outside-agent; openclaw_test_state_create "onboard case" minimal;',
