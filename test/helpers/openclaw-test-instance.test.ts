@@ -159,24 +159,6 @@ async function observeCliExit() {
   return { exited: exited.promise, restore: () => observer.mockRestore() };
 }
 
-// Detached inherited writers have no ChildProcess handle in this test process.
-async function waitForProcessExit(pid: number, signal: AbortSignal): Promise<void> {
-  try {
-    for (;;) {
-      signal.throwIfAborted();
-      if (!isProcessAlive(pid)) {
-        return;
-      }
-      await delay(5, undefined, { signal });
-    }
-  } catch (error) {
-    if (signal.aborted) {
-      throw new Error(`process still alive: ${pid}`, { cause: error });
-    }
-    throw error;
-  }
-}
-
 async function createGatewayControl(): Promise<FakeGatewayControl> {
   const reached = createDeferred();
   const released = createDeferred();
@@ -473,13 +455,7 @@ writeFileSync("dist/.runtime-postbuildstamp", "");
 }
 
 async function expectPathMissing(targetPath: string): Promise<void> {
-  try {
-    await fs.stat(targetPath);
-  } catch (error) {
-    expect((error as NodeJS.ErrnoException).code).toBe("ENOENT");
-    return;
-  }
-  throw new Error(`Expected missing path: ${targetPath}`);
+  await expect(fs.stat(targetPath)).rejects.toMatchObject({ code: "ENOENT" });
 }
 
 async function isPortReserved(port: number): Promise<boolean> {
@@ -1757,7 +1733,7 @@ describe("openclaw test instance", () => {
         expect(instance.logs()).not.toContain(RESTART_MARKER);
         expect(await readAttempts()).toHaveLength(1);
         expect(instance.child).toBeUndefined();
-        await withinTest(waitForProcessExit(drainingPid, testSignal), testSignal);
+        await withinTest(waitForDead(drainingPid, testSignal), testSignal);
         expect(isProcessAlive(drainingPid)).toBe(false);
       } finally {
         restoreClock();
@@ -1825,7 +1801,7 @@ describe("openclaw test instance", () => {
         await instance.stopGateway();
         expect(instance.child).toBeUndefined();
         expect(isProcessAlive(attempts[1]?.pid as number)).toBe(false);
-        await withinTest(waitForProcessExit(drainingPid, testSignal), testSignal);
+        await withinTest(waitForDead(drainingPid, testSignal), testSignal);
         expect(isProcessAlive(drainingPid)).toBe(false);
       } finally {
         restoreClock();
@@ -1835,68 +1811,22 @@ describe("openclaw test instance", () => {
     },
   );
 
-  it.each([true, false])(
-    "does not target an exited Windows gateway (inherited pipes=%s)",
-    async (inheritedPipes) => {
-      const stdout = new PassThrough();
-      const stderr = new PassThrough();
-      const kill = vi.fn(() => true);
-      // SAFETY: The stub supplies every process and pipe member consumed by the stopper.
-      const child = {
-        exitCode: 1,
-        kill,
-        pid: 12345,
-        signalCode: null,
-        stderr,
-        stdout,
-      } as unknown as Parameters<typeof testing.stopWindowsGatewayProcess>[0];
-      const closePipes = () => {
-        stdout.destroy();
-        stderr.destroy();
-      };
-      const runTaskkill = vi.fn(() => {
-        closePipes();
-        return { status: 0 };
-      });
-      if (!inheritedPipes) {
-        const closed = Promise.all([once(stdout, "close"), once(stderr, "close")]);
-        closePipes();
-        await closed;
-      }
-
-      try {
-        await expect(
-          testing.stopWindowsGatewayProcess(child, Date.now() + 500, 250, {
-            forceWindowsTree: true,
-            runTaskkill,
-          }),
-        ).rejects.toMatchObject({ processTreeState: "indeterminate" });
-        expect(runTaskkill).not.toHaveBeenCalled();
-        expect(kill).not.toHaveBeenCalled();
-        expect(stdout.closed).toBe(!inheritedPipes);
-        expect(stderr.closed).toBe(!inheritedPipes);
-      } finally {
-        const closed = Promise.all(
-          [stdout, stderr].map((pipe) => (pipe.closed ? Promise.resolve() : once(pipe, "close"))),
-        );
-        closePipes();
-        await closed;
-      }
-    },
-  );
-
   it.each([
     { label: "joined closure", taskkillStatus: 0, closePipes: true, stopped: true },
     { label: "held pipe", taskkillStatus: 0, closePipes: false, stopped: false },
     { label: "unverified tree", taskkillStatus: 1, closePipes: true, stopped: false },
     { label: "unverified exited leader", taskkillStatus: 1, closePipes: true, stopped: false },
+    { label: "exited forced tree", taskkillStatus: 1, closePipes: true, stopped: false },
+    { label: "exited closed pipes", taskkillStatus: 1, closePipes: true, stopped: false },
     { label: "taskkill timeout", taskkillStatus: 1, closePipes: true, stopped: false },
     { label: "taskkill exception", taskkillStatus: 1, closePipes: true, stopped: false },
   ])("observes Windows $label after blocking termination", async (scenario) => {
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const stopLog = testing.createBoundedStringLog();
-    const exitedLeader = scenario.label === "unverified exited leader";
+    const preclosed = scenario.label === "exited closed pipes";
+    const forceWindowsTree = scenario.label === "exited forced tree" || preclosed;
+    const exitedLeader = scenario.label === "unverified exited leader" || forceWindowsTree;
     const heldPipe = scenario.label === "held pipe";
     const processState = createGatewayProcessState({ exitCode: exitedLeader ? 7 : null });
     // SAFETY: The stub supplies every process and pipe member consumed by the stopper.
@@ -1906,6 +1836,12 @@ describe("openclaw test instance", () => {
       stdout,
       stderr,
     }) as unknown as Parameters<typeof testing.stopWindowsGatewayProcess>[0];
+    if (preclosed) {
+      const closed = Promise.all([once(stdout, "close"), once(stderr, "close")]);
+      stdout.destroy();
+      stderr.destroy();
+      await closed;
+    }
     const observed = createDeferred();
     const now = Date.now.bind(Date);
     let offset = 0;
@@ -1947,12 +1883,17 @@ describe("openclaw test instance", () => {
         child,
         Date.now() + 500,
         250,
-        { runTaskkill },
+        { runTaskkill, forceWindowsTree },
         stopLog,
       );
       let stopped = false;
       if (!scenario.stopped) {
         await expect(stop).rejects.toBeInstanceOf(Error);
+        if (exitedLeader) {
+          await expect(stop).rejects.toMatchObject({ processTreeState: "indeterminate" });
+          expect(child.kill).not.toHaveBeenCalled();
+          expect([stdout.closed, stderr.closed]).toEqual([preclosed, preclosed]);
+        }
       } else {
         stopped = await stop;
         expect(stopped).toBe(scenario.stopped);
@@ -1995,8 +1936,8 @@ describe("openclaw test instance", () => {
           pid: process.pid,
           exitCode: exitedLeader ? 7 : null,
           signalCode: heldPipe ? "SIGTERM" : null,
-          stdoutClosed: heldPipe,
-          stderrClosed: false,
+          stdoutClosed: heldPipe || preclosed,
+          stderrClosed: preclosed,
           elapsedMs: expect.any(Number),
           taskkill,
           errorCode: threw ? "EACCES" : "EPROCESSGROUP_CLEANUP_FAILED",
@@ -2019,27 +1960,6 @@ describe("openclaw test instance", () => {
     }
   });
 
-  it("keeps only bounded child output tails in helper logs", () => {
-    const stdout = testing.createBoundedStringLog(32);
-    const stderr = testing.createBoundedStringLog(32);
-
-    testing.appendLogChunk(stdout, `old stdout ${"x".repeat(64)}\n`);
-    testing.appendLogChunk(stdout, "recent stdout\n");
-    testing.appendLogChunk(stderr, `old stderr ${"y".repeat(64)}\n`);
-    testing.appendLogChunk(stderr, "recent stderr\n");
-
-    const logs = testing.formatLogs(stdout, stderr);
-    expect(logs).toContain("[output truncated to last 32 bytes]");
-    expect(logs).toContain("recent stdout");
-    expect(logs).toContain("recent stderr");
-    expect(logs).not.toContain("old stdout");
-    expect(logs).not.toContain("old stderr");
-
-    const exact = testing.createBoundedStringLog(32);
-    testing.appendLogChunk(exact, "x".repeat(32));
-    expect(testing.formatLogs(exact, [])).not.toContain("output truncated");
-  });
-
   describe("UTF-8 log trimming", () => {
     let exerciseTrimming: () => Promise<void>;
     let stopTrimming: (() => Promise<void>) | undefined;
@@ -2060,6 +1980,7 @@ describe("openclaw test instance", () => {
         { chunks: ["😀"], limit: 3, expected: "" },
         { chunks: ["€"], limit: 2, expected: "" },
         { chunks: ["a", "€"], limit: 3, expected: "€" },
+        { chunks: ["x".repeat(32)], limit: 32, expected: "x".repeat(32), truncated: false },
       ];
       const control = await createGatewayControl();
       // A synchronous regression must be killed and joined outside the Vitest event loop.
@@ -2069,7 +1990,7 @@ describe("openclaw test instance", () => {
       ${CONTROL_REQUEST_SOURCE}
       process.stderr.write("loaded actual log helper; waiting to start UTF-8 cases\\n");
       await waitForControl(${JSON.stringify(`${control.url}/wait`)});
-      for (const { chunks, limit, expected } of JSON.parse(process.argv[1])) {
+      for (const { chunks, limit, expected, truncated = true } of JSON.parse(process.argv[1])) {
         const log = testing.createBoundedStringLog(limit);
         for (const chunk of chunks) {
           testing.appendLogChunk(log, chunk);
@@ -2077,7 +1998,7 @@ describe("openclaw test instance", () => {
         }
         assert.equal(log.join(""), expected);
         assert.ok(!log.join("").includes("�"));
-        assert.match(testing.formatLogs(log, []), /output truncated to last/);
+        assert.equal(testing.formatLogs(log, []).includes("output truncated to last"), truncated);
       }
       process.stdout.write("UTF-8 cases completed");
     `;

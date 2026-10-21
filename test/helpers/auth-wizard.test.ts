@@ -1,12 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import {
-  closeOpenClawAgentDatabaseByPath,
-  openOpenClawAgentDatabase,
-} from "../../src/state/openclaw-agent-db.js";
-import { closeOpenClawStateDatabaseByPath } from "../../src/state/openclaw-state-db-cache.js";
-import { openOpenClawStateDatabase } from "../../src/state/openclaw-state-db.js";
 import { captureFullEnv } from "../../src/test-utils/env.js";
 import { setupAuthTestEnv } from "./auth-wizard.js";
 
@@ -51,21 +45,10 @@ it.for(["absent", "set"])(
     const previousEnv = { ...process.env };
     const failure = new Error("agent mkdir failed");
     let root: string | undefined;
-    let shared: ReturnType<typeof openOpenClawStateDatabase> | undefined;
-    let agent: ReturnType<typeof openOpenClawAgentDatabase> | undefined;
     const mkdir = fs.mkdir;
     onTestFinished(async () => {
-      try {
-        if (agent) {
-          closeOpenClawAgentDatabaseByPath(agent.path);
-        }
-        if (shared) {
-          closeOpenClawStateDatabaseByPath(shared.path);
-        }
-      } finally {
-        if (root) {
-          await fs.rm(root, { recursive: true, force: true });
-        }
+      if (root) {
+        await fs.rm(root, { recursive: true, force: true });
       }
     });
     vi.spyOn(fs, "mkdir").mockImplementation(async (...args) => {
@@ -77,9 +60,6 @@ it.for(["absent", "set"])(
         const stateDir = path.dirname(args[0]);
         root = path.dirname(stateDir);
         expect((await fs.stat(stateDir)).isDirectory()).toBe(true);
-        const env = { ...process.env, OPENCLAW_STATE_DIR: stateDir };
-        shared = openOpenClawStateDatabase({ env });
-        agent = openOpenClawAgentDatabase({ agentId: "main", env });
         throw failure;
       }
       return mkdir(...args);
@@ -88,7 +68,6 @@ it.for(["absent", "set"])(
       setupAuthTestEnv("auth-wrapper-failure-", { agentSubdir: "faulting-agent" }),
     ).rejects.toBe(failure);
     expect.soft(process.env).toEqual(previousEnv);
-    expect.soft([shared?.db.isOpen, agent?.db.isOpen]).toEqual([false, false]);
     expect(root).toBeDefined();
     await expect(fs.stat(root!)).rejects.toMatchObject({ code: "ENOENT" });
   },

@@ -22,6 +22,7 @@ async function createAcquisitionPeer(
   context: Pick<TestContext, "onTestFinished">,
   options: { holdStop?: boolean; stopError?: Error } = {},
 ) {
+  const controller = new AbortController();
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   const connection = createDeferred<Connection>();
   const reconnection = createDeferred<Connection>();
@@ -120,6 +121,7 @@ async function createAcquisitionPeer(
           onHelloOk,
         },
         {
+          signal: controller.signal,
           timeoutMs: 1_000,
           timeoutMessage: "Acquisition peer did not send hello",
           closeMessage: "Acquisition peer closed",
@@ -130,6 +132,7 @@ async function createAcquisitionPeer(
       void acquisition.catch((error: unknown) => connection.reject(error));
       return acquisition;
     },
+    abort: (reason: Error) => controller.abort(reason),
     connection: connection.promise,
     reconnection: reconnection.promise,
     sendHello({ socket, frame }: Connection) {
@@ -148,40 +151,18 @@ async function createAcquisitionPeer(
 it("does not start a client for an already-aborted acquisition", async (context) => {
   const peer = await createAcquisitionPeer(context);
   const reason = new Error("cancel before acquisition");
-  const controller = new AbortController();
-  controller.abort(reason);
-  const acquisition = peer.acquire({ signal: controller.signal });
+  peer.abort(reason);
+  const acquisition = peer.acquire();
   await setImmediate();
   expect(peer.startCount()).toBe(0);
   await expect(acquisition).rejects.toBe(reason);
 });
 
-it("joins a cancelled hello acquisition before rejecting and refuses a late hello", async (context) => {
-  const peer = await createAcquisitionPeer(context, { holdStop: true });
-  const controller = new AbortController();
-  const reason = new Error("cancel pending hello");
-  const onHelloOk = vi.fn();
-  const acquisition = peer.acquire({ signal: controller.signal }, onHelloOk);
-  const markSettled = vi.fn();
-  void acquisition.then(markSettled, markSettled);
-  const connection = await peer.connection;
-  controller.abort(reason);
-  peer.sendHello(connection);
-  await setImmediate();
-  expect(peer.stopCount()).toBe(1);
-  await peer.socketStopped;
-  expect(markSettled).not.toHaveBeenCalled();
-  expect(onHelloOk).not.toHaveBeenCalled();
-  peer.releaseStop();
-  await expect(acquisition).rejects.toBe(reason);
-});
-
 it("retains acquisition ownership when the caller aborts inside its hello callback", async (context) => {
   const peer = await createAcquisitionPeer(context);
-  const controller = new AbortController();
   const reason = new Error("cancel at hello handoff");
-  const onHelloOk = vi.fn(() => controller.abort(reason));
-  const acquisition = peer.acquire({ signal: controller.signal }, onHelloOk);
+  const onHelloOk = vi.fn(() => peer.abort(reason));
+  const acquisition = peer.acquire({}, onHelloOk);
   const connection = await peer.connection;
   expect(connection.frame.params).toMatchObject({
     role: "operator",
@@ -196,7 +177,6 @@ it("retains acquisition ownership when the caller aborts inside its hello callba
 
 it("keeps caller hello callbacks on reconnect after successful handoff and later abort", async (context) => {
   const peer = await createAcquisitionPeer(context);
-  const controller = new AbortController();
   const verifyCleanup = vi.fn((cleanup: () => Promise<void>) => cleanup());
   const reconnected = createDeferred();
   let helloCount = 0;
@@ -205,11 +185,11 @@ it("keeps caller hello callbacks on reconnect after successful handoff and later
       reconnected.resolve();
     }
   });
-  const acquisition = peer.acquire({ signal: controller.signal, verifyCleanup }, onHelloOk);
+  const acquisition = peer.acquire({ verifyCleanup }, onHelloOk);
   const connection = await peer.connection;
   peer.sendHello(connection);
   const client = await acquisition;
-  controller.abort(new Error("cancel after handoff"));
+  peer.abort(new Error("cancel after handoff"));
   connection.socket.close(1012, "synthetic reconnect");
   peer.sendHello(await withTestTimeout(peer.reconnection, 5_000, "client did not reconnect"));
   await withTestTimeout(reconnected.promise, 1_000, "caller did not receive reconnect hello");
@@ -223,7 +203,6 @@ it("keeps caller hello callbacks on reconnect after successful handoff and later
 
 it("suppresses a cancelled acquisition's late hello while rollback has not started", async (context) => {
   const peer = await createAcquisitionPeer(context);
-  const controller = new AbortController();
   const reason = new Error("cancel with rollback registered but held");
   const releaseCleanup = createDeferred();
   const onHelloOk = vi.fn();
@@ -231,12 +210,12 @@ it("suppresses a cancelled acquisition's late hello while rollback has not start
     await releaseCleanup.promise;
     await cleanup();
   });
-  const acquisition = peer.acquire({ signal: controller.signal, verifyCleanup }, onHelloOk);
+  const acquisition = peer.acquire({ verifyCleanup }, onHelloOk);
   const handedOff = vi.fn();
   void acquisition.then(handedOff, () => {});
   try {
     const connection = await peer.connection;
-    controller.abort(reason);
+    peer.abort(reason);
     expect(verifyCleanup).toHaveBeenCalledOnce();
     expect(peer.stopCount()).toBe(0);
     const pong = once(connection.socket, "pong", { signal: AbortSignal.timeout(1_000) });
@@ -258,7 +237,6 @@ it("suppresses a cancelled acquisition's late hello while rollback has not start
 
 it("registers failed acquisition rollback before stop and retains its separate failure", async (context) => {
   const peer = await createAcquisitionPeer(context, { holdStop: true, stopError: rollbackError });
-  const controller = new AbortController();
   const reason = new Error("cancel before failed rollback");
   const registered: Promise<void>[] = [];
   const verifyCleanup = vi.fn((cleanup: () => Promise<void>) => {
@@ -268,13 +246,16 @@ it("registers failed acquisition rollback before stop and retains its separate f
     void completion.catch(() => {});
     return completion;
   });
-  const acquisition = peer.acquire({ signal: controller.signal, verifyCleanup });
+  const acquisition = peer.acquire({ verifyCleanup });
+  const settled = vi.fn();
+  void acquisition.then(settled, settled);
   await peer.connection;
   expect(verifyCleanup).not.toHaveBeenCalled();
-  controller.abort(reason);
+  peer.abort(reason);
   await setImmediate();
   expect(verifyCleanup).toHaveBeenCalledOnce();
   await peer.socketStopped;
+  expect(settled).not.toHaveBeenCalled();
   peer.releaseStop();
   await expect(acquisition).rejects.toBeInstanceOf(GatewayTestClientCleanupError);
   await expect(acquisition).rejects.toMatchObject({ errors: [reason, rollbackError] });

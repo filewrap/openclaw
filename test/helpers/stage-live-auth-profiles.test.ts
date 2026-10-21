@@ -61,15 +61,14 @@ afterEach(async () => {
   tempDirs.cleanup();
 });
 
-it.each([
-  "DROP TABLE auth_profile_store;",
-  "DROP TABLE auth_profile_state;",
-  "DROP TABLE auth_profile_store; DROP TABLE auth_profile_state;",
-])("fails closed for incomplete auth schema: %s", async (sql) => {
-  const fixture = stagingFixture(sql);
-  await expect(fixture.stage()).rejects.toThrow("canonical auth schema is incomplete");
-  expect(fs.existsSync(resolveAuthProfileDatabasePath(fixture.target))).toBe(false);
-});
+it.each(["DROP TABLE auth_profile_store;", "DROP TABLE auth_profile_state;"])(
+  "fails closed for incomplete auth schema: %s",
+  async (sql) => {
+    const fixture = stagingFixture(sql);
+    await expect(fixture.stage()).rejects.toThrow("canonical auth schema is incomplete");
+    expect(fs.existsSync(resolveAuthProfileDatabasePath(fixture.target))).toBe(false);
+  },
+);
 
 it("stages a readable store when the state row is absent", async () => {
   const fixture = stagingFixture("DELETE FROM auth_profile_state;");

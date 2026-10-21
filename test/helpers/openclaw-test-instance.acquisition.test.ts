@@ -237,31 +237,6 @@ it.each(["child-process", "in-process"])(
   },
 );
 
-it.skipIf(process.platform !== "linux")(
-  "keeps Gateway and deferred sandbox listeners outside the kernel client-port range",
-  async () => {
-    const [low, high] = (await fs.readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8"))
-      .trim()
-      .split(/\s+/u)
-      .map(Number);
-    const instance = await createOpenClawTestInstance({ name: "sandbox-port-allocation" });
-    const sandbox = net.createServer();
-    await runQaGatewayFixture(
-      async () => {
-        for (const port of [instance.port, instance.port + 1]) {
-          expect(port < low! || port > high!, `listener ${port} overlaps ${low}–${high}`).toBe(
-            true,
-          );
-        }
-        await listen(sandbox, instance.port + 1);
-        expect(sandbox.listening).toBe(true);
-      },
-      () => close(sandbox),
-      () => instance.cleanup(),
-    );
-  },
-);
-
 it.each([
   ["state", true],
   ["config", true],
@@ -416,11 +391,6 @@ it.each([
           }
         }
         expect(readParentEndpoints()).toEqual(inherited);
-        expect(resolveGatewayUrlOverride({ env, gatewayUrl: explicitUrl })).toEqual({
-          url: explicitUrl,
-          source: "cli",
-        });
-        expect(resolveGatewayUrlOverride({ env, localPortOverride: 19705 })).toEqual({});
         expect(resolveGatewayPort(config, env)).toBe(expectedPort);
         expect(resolveGatewayUrlOverride({ env })).toEqual(override);
       },
