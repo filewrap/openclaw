@@ -63,7 +63,7 @@ export function createModelProviderLogin(options: LoginOptions) {
   let focusPicker: "search" | "method" | null = null;
   let generation = 0;
   let mutationActive = false;
-  let externalStepReady: (() => void) | undefined;
+  let presentationReady: (() => void) | undefined;
   let refreshWarning: string | null = null;
   let message: ModelProviderRowMessage | undefined;
   let loginMode: "auth" | "activate" | "access" = "auth";
@@ -75,7 +75,7 @@ export function createModelProviderLogin(options: LoginOptions) {
     getClient: () => options.getScope().context.gateway.snapshot.client,
     getAgentId: () => options.getScope().agentId,
     onClose: () => reset(),
-    onExternalStep: () => externalStepReady?.(),
+    onPresentationChange: () => presentationReady?.(),
     onAnswer: (value, includeValue) => void run(() => runner.answer(value, includeValue)),
     onBackgroundCompletion: (completion) => run(() => Promise.resolve(completion), true),
     requestFailedMessage: () => t("modelProviders.requestFailed"),
@@ -320,7 +320,7 @@ export function createModelProviderLogin(options: LoginOptions) {
     methodChoices = undefined;
     apiKeyChoice = undefined;
     mutationActive = false;
-    externalStepReady = undefined;
+    presentationReady = undefined;
     refreshWarning = null;
     message = undefined;
     loginMode = "auth";
@@ -357,7 +357,7 @@ export function createModelProviderLogin(options: LoginOptions) {
 
   function wizardViewProps() {
     view.read();
-    return wizard.viewProps({
+    const current = wizard.viewProps({
       mode: loginMode === "access" ? "auth" : loginMode,
       refreshWarning,
       doneMessage: runner.state.authLabel
@@ -367,6 +367,11 @@ export function createModelProviderLogin(options: LoginOptions) {
         ? t("modelProviders.login.modelReady", { model: completionModel.name })
         : undefined,
     });
+    return {
+      ...current,
+      // Config admission can precede the runner's committed presentation.
+      admissionPending: mutationActive && current.state.phase === "idle",
+    };
   }
 
   function doneAction() {
@@ -624,15 +629,15 @@ export function createModelProviderLogin(options: LoginOptions) {
       options.getScope().context.gateway.snapshot.client === client &&
       options.getScope().connectionEpoch === connectionEpoch &&
       options.getScope().agentId === agentId;
-    const externalStep = Promise.withResolvers<void>();
-    externalStepReady = externalStep.resolve;
+    const checkpoint = Promise.withResolvers<void>();
+    presentationReady = checkpoint.resolve;
     const operation = settleRun();
-    // The runner may keep reading after exposing the browser URL. Let that
-    // human-input checkpoint render while the owner still awaits its callback.
+    // The runner owns continued work once its starting/step state is visible.
+    // Release the presentation hold while it awaits the next wizard response.
     void presentation.run(
       "wizard",
       operation,
-      Promise.race([retired, externalStep.promise]),
+      Promise.race([retired, checkpoint.promise]),
       isCurrent,
       (error) => {
         runner.fail(formatUiError(error, t("modelProviders.requestFailed")));
@@ -684,8 +689,8 @@ export function createModelProviderLogin(options: LoginOptions) {
           runner.fail(formatUiError(error, t("modelProviders.requestFailed")));
         }
       } finally {
-        if (externalStepReady === externalStep.resolve) {
-          externalStepReady = undefined;
+        if (presentationReady === checkpoint.resolve) {
+          presentationReady = undefined;
         }
         if (currentGeneration === generation) {
           mutationActive = false;
