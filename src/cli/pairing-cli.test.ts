@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { theme } from "../../packages/terminal-core/src/theme.js";
+import { createTestConfigSnapshot } from "../commands/test-runtime-config-helpers.js";
 import type { runWithLocalStateOwner } from "./local-state-owner.js";
 import { registerPairingCli } from "./pairing-cli.js";
 
@@ -42,20 +43,7 @@ const pairingRequest = {
 
 function configSnapshot(ownerAllowFrom?: string[]) {
   const config = ownerAllowFrom ? { commands: { ownerAllowFrom } } : {};
-  return {
-    snapshot: {
-      path: "/tmp/openclaw.json",
-      exists: true,
-      raw: "{}",
-      parsed: {},
-      valid: true,
-      issues: [],
-      legacyIssues: [],
-      sourceConfig: config,
-      runtimeConfig: config,
-    },
-    writeOptions: {},
-  };
+  return { snapshot: createTestConfigSnapshot(config), writeOptions: {} };
 }
 
 function expectApproval(channel = "telegram", account = {}) {

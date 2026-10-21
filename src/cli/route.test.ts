@@ -9,6 +9,19 @@ const ensureConfigReadyMock = vi.hoisted(() =>
 const ensurePluginRegistryLoadedMock = vi.hoisted(() => vi.fn());
 const runRouteMock = vi.hoisted(() => vi.fn(async () => true));
 const statusDefaults = { json: false, deep: false, all: false, usage: false, verbose: false };
+const healthDefaults = {
+  url: undefined,
+  token: undefined,
+  password: undefined,
+  timeout: "10000",
+  expectFinal: false,
+  json: true,
+};
+const unsetArgs = (enabled: boolean) => ({
+  path: "update.channel",
+  cliOptions: { dryRun: enabled, allowExec: enabled, json: enabled },
+  localStateOwner: { method: "config unset", target: "update.channel" },
+});
 
 vi.mock("./banner.js", () => ({
   emitCliBanner: emitCliBannerMock,
@@ -137,12 +150,12 @@ describe("tryRouteCli", () => {
       "gateway health --url ws://127.0.0.1:18789 --token abc --password def --timeout 5000 --expect-final --json",
       {
         rpc: {
+          ...healthDefaults,
           url: "ws://127.0.0.1:18789",
           token: "abc",
           password: "def",
           timeout: "5000",
           expectFinal: true,
-          json: true,
         },
         localPortOverride: undefined,
       },
@@ -150,14 +163,7 @@ describe("tryRouteCli", () => {
     [
       "gateway --port 19083 health --json",
       {
-        rpc: {
-          url: undefined,
-          token: undefined,
-          password: undefined,
-          timeout: "10000",
-          expectFinal: false,
-          json: true,
-        },
+        rpc: healthDefaults,
         localPortOverride: 19083,
       },
     ],
@@ -166,24 +172,8 @@ describe("tryRouteCli", () => {
       { path: "update.channel", json: true },
       true,
     ],
-    [
-      "config unset --profile work update.channel",
-      {
-        path: "update.channel",
-        cliOptions: { dryRun: false, allowExec: false, json: false },
-        localStateOwner: { method: "config unset", target: "update.channel" },
-      },
-      true,
-    ],
-    [
-      "config unset --dry-run --json --allow-exec update.channel",
-      {
-        path: "update.channel",
-        cliOptions: { dryRun: true, allowExec: true, json: true },
-        localStateOwner: { method: "config unset", target: "update.channel" },
-      },
-      true,
-    ],
+    ["config unset --profile work update.channel", unsetArgs(false), true],
+    ["config unset --dry-run --json --allow-exec update.channel", unsetArgs(true), true],
     [
       "models list --provider openai --all --local --json --plain",
       { provider: "openai", all: true, local: true, json: true, plain: true },
