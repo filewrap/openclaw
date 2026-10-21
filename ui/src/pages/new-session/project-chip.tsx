@@ -1,4 +1,4 @@
-import { createMemo, Errored, For, Loading, Show } from "solid-js";
+import { action, createMemo, createOptimistic, Errored, For, Loading, Show } from "solid-js";
 import { Icon } from "../../components/solid/icon.tsx";
 import { formatUiError } from "../../lib/format-error.ts";
 import { canCallGatewayMethod } from "../../lib/gateway-methods.ts";
@@ -8,7 +8,7 @@ import { readSessionMethodAccess } from "../../lib/session-method-access.ts";
 import { nativeListener } from "../../lib/solid-native-listener.ts";
 import { SessionMenuItem } from "./cloud-target-view.tsx";
 import { findBrowsableDeviceFolderHost } from "./device-placement.ts";
-import type { ProjectBrowserFocus } from "./draft-place-browser.ts";
+import type { BrowserProjectRegistration, ProjectBrowserFocus } from "./draft-place-browser.ts";
 import { parentFolderDisplayName } from "./path.ts";
 import { SessionPicker } from "./picker.tsx";
 import { PlaceBrowser } from "./place-browser.tsx";
@@ -21,6 +21,51 @@ export function ProjectChip(props: {
   nativeTerminal: boolean;
   focus?: ProjectBrowserFocus;
 }) {
+  const browser = createMemo(() => props.params.place.browser);
+  const connectionEpoch = createMemo(() => props.params.gateway.connectionEpoch);
+  const registration = createMemo(() => {
+    const owner = browser();
+    const epoch = connectionEpoch();
+    const [saving, setSaving] = createOptimistic(false);
+    return { browser: owner, epoch, saving, setSaving };
+  });
+  const presentRegistration = action(function* (
+    view: ReturnType<typeof registration>,
+    receipt: BrowserProjectRegistration,
+  ) {
+    if (
+      view.browser === props.params.place.browser &&
+      view.epoch === props.params.gateway.connectionEpoch &&
+      receipt.isCurrent()
+    ) {
+      view.setSaving(true);
+    }
+    yield Promise.race([receipt.completed, receipt.retired]);
+  });
+  const registerProject = async (path: string) => {
+    const view = registration();
+    let receipt: BrowserProjectRegistration | undefined;
+    const completed = view.browser.registerBrowserProject(path, (started) => {
+      receipt = started;
+    });
+    if (!receipt) {
+      return completed;
+    }
+    // Publish the admitted owner operation before joining its presentation action.
+    await Promise.resolve();
+    try {
+      await presentRegistration(view, receipt);
+    } catch (error) {
+      if (
+        view.browser === props.params.place.browser &&
+        view.epoch === props.params.gateway.connectionEpoch &&
+        receipt.isCurrent()
+      ) {
+        view.browser.browser.error = formatUiError(error);
+        props.params.onChange();
+      }
+    }
+  };
   const label = () =>
     props.params.place.deviceFolder ? t("newSession.deviceFolder") : props.state.label;
   const applyFolder = (folder: string) => {
@@ -153,10 +198,10 @@ export function ProjectChip(props: {
             id: "new-session-place-browser",
             label: view().browserLabel,
             registerProjectPath: props.params.place.browser.browserProjectPath,
-            registeringProject: props.params.place.browser.browserRegistering,
+            registeringProject:
+              registration().saving() || props.params.place.browser.browserRegistering,
             onBack: () => props.params.place.browser.showRoot(),
-            onRegisterProject: (path) =>
-              void props.params.place.browser.registerBrowserProject(path),
+            onRegisterProject: (path) => void registerProject(path),
             onClose: () => props.params.place.browser.close(),
             onApplyFolder: applyFolder,
           }}

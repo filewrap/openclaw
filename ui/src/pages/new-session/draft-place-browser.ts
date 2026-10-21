@@ -26,6 +26,12 @@ type ProjectSearchRead = Readonly<{
   completed: Promise<ProjectSearchOutcome>;
 }>;
 
+export type BrowserProjectRegistration = Readonly<{
+  completed: Promise<void>;
+  retired: Promise<void>;
+  isCurrent: () => boolean;
+}>;
+
 type DraftPickerKind = "where" | "project" | "checkout";
 export type ProjectBrowserFocus = Partial<Record<"browse" | "path", HTMLElement>>;
 
@@ -63,7 +69,11 @@ export class DraftPlaceBrowser {
   // Empty lists the Gateway host; otherwise the paired device whose folders are listed.
   private browserNodeIdValue = "";
   private browserProjectPathValue: string | null = null;
-  private browserRegistration: object | null = null;
+  private browserRegistration: {
+    retire: () => void;
+    client: GatewayBrowserClient;
+    epoch: number;
+  } | null = null;
   private openPopoverValue: DraftPickerKind | null = null;
   private focusRequestId = 0;
   private projectSearchTimer: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -133,6 +143,15 @@ export class DraftPlaceBrowser {
   }
 
   synchronize() {
+    const registration = this.browserRegistration;
+    if (
+      registration &&
+      (!this.gateway.connected ||
+        registration.client !== this.gateway.client ||
+        registration.epoch !== this.gateway.connectionEpoch)
+    ) {
+      this.retireRegistration();
+    }
     this.bindProjectCatalog();
     const args = this.projectSearchInput();
     if (!args.every((arg, index) => Object.is(arg, this.projectSearchArgs[index]))) {
@@ -424,7 +443,10 @@ export class DraftPlaceBrowser {
     this.focusProjectView("path");
   }
 
-  async registerBrowserProject(path: string) {
+  async registerBrowserProject(
+    path: string,
+    onStarted?: (registration: BrowserProjectRegistration) => void,
+  ) {
     const snapshot = this.read();
     const gatewaySnapshot = snapshot.context?.gateway.snapshot;
     const client = gatewaySnapshot?.client;
@@ -438,36 +460,45 @@ export class DraftPlaceBrowser {
       return;
     }
     const listing = this.browser.listing;
-    const operation = {};
+    const retirement = Promise.withResolvers<void>();
+    const epoch = this.gateway.connectionEpoch;
+    const operation = { retire: retirement.resolve, client, epoch };
     this.browserRegistration = operation;
-    const isCurrentRegistration = () =>
-      this.browserRegistration === operation &&
+    const isCurrentBrowser = () =>
+      this.gateway.connected &&
       this.browser.listing === listing &&
       this.browserProjectPath === path &&
-      client === this.gateway.client;
+      client === this.gateway.client &&
+      epoch === this.gateway.connectionEpoch;
+    const isCurrentRegistration = () =>
+      this.browserRegistration === operation && isCurrentBrowser();
     this.browser.error = null;
     this.callbacks.changed();
-    try {
-      const project = await client.request<ProjectsRegisterResult>("projects.register", { path });
-      if (!isCurrentRegistration()) {
-        return;
+    const completed = (async () => {
+      try {
+        const project = await client.request<ProjectsRegisterResult>("projects.register", { path });
+        if (!isCurrentRegistration()) {
+          return;
+        }
+        await this.refreshProjects(true);
+        if (!isCurrentRegistration()) {
+          return;
+        }
+        this.callbacks.onSelectProject(project.id);
+        this.close();
+      } catch (error) {
+        if (isCurrentRegistration()) {
+          this.browser.error = formatUiError(error);
+        }
+      } finally {
+        if (this.browserRegistration === operation) {
+          this.browserRegistration = null;
+          this.callbacks.changed();
+        }
       }
-      await this.refreshProjects(true);
-      if (!isCurrentRegistration()) {
-        return;
-      }
-      this.callbacks.onSelectProject(project.id);
-      this.close();
-    } catch (error) {
-      if (isCurrentRegistration()) {
-        this.browser.error = formatUiError(error);
-      }
-    } finally {
-      if (this.browserRegistration === operation) {
-        this.browserRegistration = null;
-        this.callbacks.changed();
-      }
-    }
+    })();
+    onStarted?.({ completed, retired: retirement.promise, isCurrent: isCurrentBrowser });
+    await completed;
   }
 
   private transitionPopover(kind: DraftPickerKind, showing: boolean) {
@@ -490,6 +521,7 @@ export class DraftPlaceBrowser {
     this.focusRequestId += 1;
     this.environmentQueryValue = "";
     this.browser.reset();
+    this.retireRegistration();
     this.clearProjectSearchTimer();
     this.projectCatalogCleanup?.();
     this.projectCatalogCleanup = undefined;
@@ -504,11 +536,16 @@ export class DraftPlaceBrowser {
     this.browserOpenValue = false;
     this.browserNodeIdValue = "";
     this.browserProjectPathValue = null;
-    this.browserRegistration = null;
+    this.retireRegistration();
     if (closePopover) {
       this.openPopoverValue = null;
     }
     this.callbacks.changed();
+  }
+
+  private retireRegistration() {
+    this.browserRegistration?.retire();
+    this.browserRegistration = null;
   }
 
   private clearProjectSearchTimer() {
