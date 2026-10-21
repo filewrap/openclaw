@@ -356,6 +356,17 @@ type AbortTestServer = {
   canceled: string[];
 };
 
+function nodeReplies(model: Record<string, unknown>, contextWindow: number, content: string) {
+  return {
+    "/api/tags": { models: [model] },
+    "/api/show": {
+      capabilities: ["completion", "tools"],
+      model_info: { "test.context_length": contextWindow },
+    },
+    "/api/chat": { model: model.name, message: { content }, done_reason: "stop" },
+  };
+}
+
 async function withAbortTestServer(
   stallPath: string,
   run: (server: AbortTestServer) => Promise<void>,
@@ -363,6 +374,11 @@ async function withAbortTestServer(
 ): Promise<void> {
   const requests: string[] = [];
   const canceled: string[] = [];
+  const replies = nodeReplies(
+    { name: "node-local:small", digest: "sha256:node-local-small", size: 512 },
+    8192,
+    "node-only inference",
+  );
   let stalls = 0;
   await withServer(
     (request: IncomingMessage, response: ServerResponse) => {
@@ -377,25 +393,13 @@ async function withAbortTestServer(
         });
         return;
       }
-
       response.setHeader("Content-Type", "application/json");
-      if (requestPath === "/api/tags") {
-        return sendJson(response, {
-          models: [{ name: "node-local:small", digest: "sha256:node-local-small", size: 512 }],
-        });
-      }
-      if (requestPath === "/api/show") {
-        return sendJson(response, {
-          capabilities: ["completion", "tools"],
-          model_info: { "test.context_length": 8192 },
-        });
-      }
-      if (requestPath === "/api/chat") {
-        return sendJson(response, {
-          model: "node-local:small",
-          message: { content: "node-only inference" },
-          done_reason: "stop",
-        });
+      if (
+        requestPath === "/api/tags" ||
+        requestPath === "/api/show" ||
+        requestPath === "/api/chat"
+      ) {
+        return sendJson(response, replies[requestPath]);
       }
       response.statusCode = 404;
       sendJson(response, { error: "not found" });
@@ -527,6 +531,7 @@ async function withDelayedOllamaServer(
   run: (baseUrl: string, requestedPaths: string[]) => Promise<void>,
 ): Promise<void> {
   const requestedPaths: string[] = [];
+  const replies = nodeReplies({ name: CHAT_MODEL }, 32_768, "within the requested deadline");
   const handleRequest = async (request: IncomingMessage, response: ServerResponse) => {
     const requestPath = request.url;
     if (requestPath !== "/api/tags" && requestPath !== "/api/show" && requestPath !== "/api/chat") {
@@ -534,11 +539,8 @@ async function withDelayedOllamaServer(
       return;
     }
     requestedPaths.push(requestPath);
-    const bodyChunks: Buffer[] = [];
-    for await (const chunk of request) {
-      bodyChunks.push(Buffer.from(chunk));
-    }
-    if (requestPath !== "/api/tags" && Buffer.concat(bodyChunks).length === 0) {
+    const body = await text(request);
+    if (requestPath !== "/api/tags" && body.length === 0) {
       throw new Error("Ollama deadline test received an empty POST body");
     }
     const delayMs = delays[requestPath];
@@ -551,20 +553,7 @@ async function withDelayedOllamaServer(
       return;
     }
     response.setHeader("Content-Type", "application/json");
-    if (requestPath === "/api/tags") {
-      return sendJson(response, { models: [{ name: CHAT_MODEL }] });
-    }
-    if (requestPath === "/api/show") {
-      return sendJson(response, {
-        capabilities: ["completion", "tools"],
-        model_info: { "test.context_length": 32_768 },
-      });
-    }
-    sendJson(response, {
-      model: CHAT_MODEL,
-      message: { content: "within the requested deadline" },
-      done_reason: "stop",
-    });
+    sendJson(response, replies[requestPath]);
   };
   await withServer(
     (request, response) => {

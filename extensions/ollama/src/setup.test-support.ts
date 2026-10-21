@@ -1,7 +1,9 @@
 import type { WizardPrompter } from "openclaw/plugin-sdk/setup";
 import { jsonResponse, requestBodyText, requestUrl } from "openclaw/plugin-sdk/test-env";
 import { vi } from "vitest";
+import { createRuntimeSpies } from "../../test-support/runtime-spies.js";
 import type { OllamaTagModel } from "./provider-models.js";
+import { configureOllamaNonInteractive, promptAndConfigureOllama } from "./setup.js";
 
 export const baseUrl = "http://127.0.0.1:11434";
 
@@ -65,4 +67,35 @@ export function createOllamaFetchMock(params: {
     }
     throw new Error(`Unexpected fetch: ${url}`);
   });
+}
+
+export async function configureInteractive(
+  options: Parameters<typeof createOllamaFetchMock>[0],
+  overrides: Partial<WizardPrompter> = {},
+) {
+  const fetchMock = createOllamaFetchMock(options);
+  vi.stubGlobal("fetch", fetchMock);
+  const prompter = createLocalPrompter(overrides);
+  const result = await promptAndConfigureOllama({ cfg: {}, prompter });
+  return { result, prompter, fetchMock };
+}
+
+export function startNonInteractive(
+  options: Parameters<typeof createOllamaFetchMock>[0],
+  nextConfig: Parameters<typeof configureOllamaNonInteractive>[0]["nextConfig"] = {},
+) {
+  const fetchMock = createOllamaFetchMock(options);
+  vi.stubGlobal("fetch", fetchMock);
+  const runtime = createRuntimeSpies();
+  return {
+    fetchMock,
+    runtime,
+    nextConfig,
+    configure: (opts: Parameters<typeof configureOllamaNonInteractive>[0]["opts"] = {}) =>
+      configureOllamaNonInteractive({
+        nextConfig,
+        runtime,
+        opts: { customBaseUrl: baseUrl, ...opts },
+      }),
+  };
 }

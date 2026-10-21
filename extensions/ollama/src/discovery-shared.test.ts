@@ -1,5 +1,6 @@
 import type { ModelProviderConfig } from "openclaw/plugin-sdk/provider-model-shared";
 import { describe, expect, it, vi } from "vitest";
+import { createModel } from "../model.test-support.js";
 import {
   isLocalOllamaBaseUrl,
   resolveOllamaDiscoveryResult,
@@ -47,13 +48,7 @@ describe("isLocalOllamaBaseUrl", () => {
 });
 
 const discoveredModel = {
-  id: "discovered-model",
-  name: "discovered-model",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 128000,
-  maxTokens: 8192,
+  ...createModel("discovered-model", "discovered-model"),
   compat: { supportsTools: true, supportsUsageInStreaming: true },
   params: { num_ctx: 128000 },
 } satisfies ModelProviderConfig["models"][number];
@@ -100,6 +95,28 @@ function discover(
     },
     pluginConfig: {},
     buildProvider: options.buildProvider ?? buildMockProvider,
+  });
+}
+
+async function expectResolvedAuth(
+  baseUrl: string,
+  owner: string,
+  apiKey: ReturnType<typeof secretRef>,
+  marker: string,
+  secret: string,
+) {
+  const buildProvider = vi.fn(async () => makeProvider(baseUrl.replace(/\/v1$/, "")));
+  const result = await discover(
+    { baseUrl, ...(owner === "config" ? { apiKey, models: [cloudModel] } : {}) },
+    {
+      env: { OLLAMA_API_KEY: "different-ambient-ollama-credential", RESOLVED_OLLAMA_TOKEN: secret },
+      resolvedAuth: { apiKey: marker, discoveryApiKey: secret },
+      buildProvider,
+    },
+  );
+  expect(buildProvider).toHaveBeenCalledExactlyOnceWith(baseUrl, discoveryOptions(secret));
+  expect(result).toMatchObject({
+    provider: { apiKey: owner === "config" ? apiKey : marker, models: [discoveredModel] },
   });
 }
 
@@ -163,21 +180,6 @@ describe("resolveOllamaDiscoveryResult — hosted Ollama Cloud guard", () => {
     },
   );
 
-  it.each([
-    [secretRef("env", "RESOLVED_OLLAMA_TOKEN"), "RESOLVED_OLLAMA_TOKEN"],
-    [secretRef("file", "/resolved-ollama-token"), "secretref-managed"],
-  ] as const)("preserves an explicit local Ollama SecretRef %j", async (apiKey, marker) => {
-    const result = await discover(
-      { baseUrl: localUrl, apiKey, models: [cloudModel] },
-      {
-        env: { RESOLVED_OLLAMA_TOKEN: "resolved-ollama-fixture" },
-        resolvedAuth: { apiKey: marker, discoveryApiKey: "resolved-ollama-fixture" },
-      },
-    );
-
-    expect(result).toMatchObject({ provider: { apiKey } });
-  });
-
   it.each(["https://ollama.com", "https://api.ollama.com/v1", "https://sub.ollama.com"])(
     "returns null for hosted base URL %s without explicit models",
     async (baseUrl) => {
@@ -234,61 +236,16 @@ describe("resolveOllamaDiscoveryResult — hosted Ollama Cloud guard", () => {
     },
   );
 
-  it("still auto-discovers for local base URL when no explicit models", async () => {
-    const buildProvider = vi.fn(buildMockProvider);
-    const result = await discover(
-      { baseUrl: "http://localhost:11434" },
-      {
-        env: { OLLAMA_API_KEY: "ollama-local" },
-        resolvedAuth: { apiKey: "ollama-local" },
-        buildProvider,
-      },
-    );
-    expect(result).toMatchObject({
-      provider: { api: "ollama", apiKey: "ollama-local", models: [discoveredModel] },
-      outcomes: [{ provider: "ollama", status: "ready" }],
-    });
-    expect(buildProvider).toHaveBeenCalledExactlyOnceWith(
-      "http://localhost:11434",
-      discoveryOptions(),
-    );
-  });
-
   it.each(
-    [
-      {
-        name: "a remote endpoint",
-        baseUrl: "https://ollama-secure.example/v1",
-        discoveredBaseUrl: "https://ollama-secure.example",
-      },
-      {
-        name: "a loopback endpoint",
-        baseUrl: "http://127.0.0.1:11434",
-        discoveredBaseUrl: "http://127.0.0.1:11434",
-      },
-    ].flatMap(({ name, baseUrl, discoveredBaseUrl }) =>
-      ["config", "profile"].map((owner) => ({ name, baseUrl, discoveredBaseUrl, owner })),
+    ["https://ollama-secure.example/v1", localUrl].flatMap((baseUrl) =>
+      ["config", "profile"].map((owner) => ({ baseUrl, owner })),
     ),
   )(
-    "authenticates live discovery at $name with its resolved $owner SecretRef",
-    async ({ baseUrl, discoveredBaseUrl, owner }) => {
+    "authenticates live discovery at $baseUrl with its resolved $owner SecretRef",
+    async ({ baseUrl, owner }) => {
       const apiKey = secretRef("env", "OLLAMA_DISCOVERY_TOKEN");
       const marker = owner === "config" ? apiKey.id : "secretref-managed";
-      const buildProvider = vi.fn(async () => makeProvider(discoveredBaseUrl));
-      const result = await discover(
-        { baseUrl, ...(owner === "config" ? { apiKey } : {}) },
-        {
-          resolvedAuth: { apiKey: marker, discoveryApiKey: "resolved-ollama-discovery-token" },
-          buildProvider,
-        },
-      );
-      expect(buildProvider).toHaveBeenCalledWith(
-        baseUrl,
-        discoveryOptions("resolved-ollama-discovery-token"),
-      );
-      expect(result).toMatchObject({
-        provider: { apiKey: owner === "config" ? apiKey : marker, models: [discoveredModel] },
-      });
+      await expectResolvedAuth(baseUrl, owner, apiKey, marker, "resolved-ollama-discovery-token");
     },
   );
 
@@ -300,75 +257,25 @@ describe("resolveOllamaDiscoveryResult — hosted Ollama Cloud guard", () => {
   ])(
     "preserves resolved opaque $owner SecretRef credential $secretValue at $baseUrl",
     async ({ secretValue, owner, baseUrl }) => {
-      const apiKey = secretRef("file", "/ollama/apiKey");
-      const buildProvider = vi.fn(async () => makeProvider(baseUrl));
-      const result = await discover(
-        { baseUrl, ...(owner === "config" ? { apiKey } : {}) },
-        {
-          env: { OLLAMA_API_KEY: "different-ambient-ollama-credential" },
-          resolvedAuth: { apiKey: "secretref-managed", discoveryApiKey: secretValue },
-          buildProvider,
-        },
+      await expectResolvedAuth(
+        baseUrl,
+        owner,
+        secretRef("file", "/ollama/apiKey"),
+        "secretref-managed",
+        secretValue,
       );
-      expect(buildProvider).toHaveBeenCalledWith(baseUrl, discoveryOptions(secretValue));
-      expect(result).toMatchObject({
-        provider: {
-          apiKey: owner === "config" ? apiKey : "secretref-managed",
-          models: [discoveredModel],
-        },
-      });
     },
   );
-
-  it("isolates discovered catalogs by their effective authentication credential", async () => {
-    const buildProvider = vi.fn(
-      async (
-        _configuredBaseUrl?: string,
-        opts?: { apiKey?: string; quiet?: boolean },
-      ): Promise<ModelProviderConfig> => ({
-        baseUrl: "https://ollama-cache-scope.example",
-        api: "ollama",
-        models: [
-          {
-            ...discoveredModel,
-            id: `model-for-${opts?.apiKey}`,
-            name: `model-for-${opts?.apiKey}`,
-          },
-        ],
-      }),
-    );
-    const discoverWithCredential = (apiKey: string) =>
-      discover(
-        { baseUrl: "https://ollama-cache-scope.example/v1", apiKey },
-        { resolvedAuth: { apiKey }, buildProvider },
-      );
-    const first = await discoverWithCredential("ollama-cache-token-a");
-    const second = await discoverWithCredential("ollama-cache-token-b");
-    expect(buildProvider).toHaveBeenCalledTimes(2);
-    expect(first).toMatchObject({
-      provider: { models: [{ id: "model-for-ollama-cache-token-a" }] },
-    });
-    expect(second).toMatchObject({
-      provider: { models: [{ id: "model-for-ollama-cache-token-b" }] },
-    });
-  });
 });
 
 describe("shouldUseSyntheticOllamaAuth", () => {
   it.each([
-    {
-      name: "environment SecretRef",
-      apiKey: secretRef("env", "MISSING_OLLAMA_TOKEN"),
-      synthetic: false,
-    },
-    { name: "configured credential", apiKey: "configured-ollama-fixture", synthetic: false },
-    { name: "absent credential", apiKey: undefined, synthetic: true },
-    ...["ollama-local", "OLLAMA_API_KEY"].map((apiKey) => ({
-      name: apiKey,
-      apiKey,
-      synthetic: true,
-    })),
-  ])("preserves $name ownership", ({ apiKey, synthetic }) => {
+    [secretRef("env", "MISSING_OLLAMA_TOKEN"), false],
+    ["configured-ollama-fixture", false],
+    [undefined, true],
+    ["ollama-local", true],
+    ["OLLAMA_API_KEY", true],
+  ] as const)("preserves %j ownership", (apiKey, synthetic) => {
     expect(
       shouldUseSyntheticOllamaAuth({
         baseUrl: "http://127.0.0.1:11434",

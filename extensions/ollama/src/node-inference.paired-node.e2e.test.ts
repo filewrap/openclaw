@@ -147,9 +147,6 @@ describe("Ollama paired-node Gateway inference", () => {
                 gatewayToken,
                 readinessDeadline,
                 role: "operator",
-                clientName: "test",
-                mode: "test",
-                scopes: ["operator.admin", "operator.pairing", "operator.read", "operator.write"],
               }),
             {
               timeout: remainingPhaseTimeoutMs(readinessDeadline, "Gateway readiness"),
@@ -172,11 +169,6 @@ describe("Ollama paired-node Gateway inference", () => {
           gatewayToken,
           readinessDeadline,
           role: "node",
-          clientName: "node-host",
-          mode: "node",
-          platform: "macos",
-          displayName: NODE_DISPLAY_NAME,
-          caps: ["local-inference"],
           commands: [...commandsByName.keys()],
           onEvent: (event) => {
             if (event.event !== "node.invoke.request") {
@@ -354,20 +346,15 @@ function remainingPhaseTimeoutMs(deadline: number, phase: string): number {
   return remainingMs;
 }
 
-async function connectClient(params: {
-  gatewayPort: number;
-  gatewayToken: string;
-  readinessDeadline: number;
-  role: "operator" | "node";
-  clientName: "test" | "node-host";
-  mode: "test" | "node";
-  scopes?: string[];
-  platform?: string;
-  displayName?: string;
-  caps?: string[];
-  commands?: string[];
-  onEvent?: (event: { event: string; payload?: unknown }) => void;
-}): Promise<GatewayClient> {
+async function connectClient(
+  params: Pick<ConstructorParameters<typeof GatewayClient>[0], "commands" | "onEvent"> & {
+    gatewayPort: number;
+    gatewayToken: string;
+    readinessDeadline: number;
+    role: "operator" | "node";
+  },
+): Promise<GatewayClient> {
+  const isNode = params.role === "node";
   // Leave the shared readiness deadline available for another handshake attempt.
   const timeoutMs = Math.min(
     CONNECT_ATTEMPT_TIMEOUT_MS,
@@ -392,13 +379,13 @@ async function connectClient(params: {
       url: `ws://127.0.0.1:${params.gatewayPort}`,
       token: params.gatewayToken,
       role: params.role,
-      clientName: params.clientName,
-      clientDisplayName: params.displayName ?? "ollama-paired-node-e2e",
+      clientName: isNode ? "node-host" : "test",
+      clientDisplayName: isNode ? NODE_DISPLAY_NAME : "ollama-paired-node-e2e",
       clientVersion: "1.0.0",
-      platform: params.platform ?? process.platform,
-      mode: params.mode,
-      scopes: params.scopes ?? [],
-      caps: params.caps,
+      platform: isNode ? "macos" : process.platform,
+      mode: isNode ? "node" : "test",
+      scopes: isNode ? [] : ["operator.admin", "operator.pairing", "operator.read", "operator.write"],
+      caps: isNode ? ["local-inference"] : undefined,
       commands: params.commands,
       requestTimeoutMs: INFERENCE_TIMEOUT_MS,
       onEvent: params.onEvent,
