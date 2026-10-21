@@ -48,6 +48,23 @@ function expectRequest(
 ) {
   expect(client.request).toHaveBeenCalledWith(method, fields, { timeoutMs: undefined });
 }
+function expectCli(args: string[]) {
+  expect(cli).toHaveBeenCalledWith({ ...options, timeoutMs: undefined, args });
+}
+function stageAttachment(command: string, checkArgs: (args: string[]) => void) {
+  let stagedPath = "";
+  cli.mockImplementationOnce(async ({ args }: { args: string[] }) => {
+    stagedPath = args[args.indexOf("--file") + 1] ?? "";
+    expect(args[0]).toBe(command);
+    checkArgs(args);
+    await expect(readFile(stagedPath)).resolves.toEqual(Buffer.from(file.buffer));
+    return { guid: "p:0/sent-message" };
+  });
+  return async () => {
+    await expect(access(dirname(stagedPath))).rejects.toMatchObject({ code: "ENOENT" });
+    return basename(stagedPath);
+  };
+}
 function rpc(result: Record<string, unknown>) {
   const client = {
     request: vi.fn().mockResolvedValue(result),
@@ -127,9 +144,7 @@ describe("imessage actions runtime", () => {
   it.each([
     {
       method: "tapback",
-      send: withOptions({ ...messageTarget, reaction: "like" }, (params) =>
-        api.sendReaction(params),
-      ),
+      send: withOptions({ ...messageTarget, reaction: "like" }, api.sendReaction),
       fields: wireFields({ reaction: "like" }),
       args: ["tapback", ...messageArgs, "--kind", "like", "--part", "0"],
     },
@@ -138,22 +153,20 @@ describe("imessage actions runtime", () => {
       rpcMethod: "tapback",
       send: withOptions(
         { ...messageTarget, reaction: "love", remove: true, partIndex: 2 },
-        (params) => api.sendReaction(params),
+        api.sendReaction,
       ),
       fields: wireFields({ reaction: "love", part_index: 2, remove: true }),
       args: ["tapback", ...messageArgs, "--kind", "love", "--part", "2", "--remove"],
     },
     {
       method: "message.unsend",
-      send: withOptions({ ...messageTarget, partIndex: 3 }, (params) => api.unsendMessage(params)),
+      send: withOptions({ ...messageTarget, partIndex: 3 }, api.unsendMessage),
       fields: wireFields({ part_index: 3 }),
       args: ["unsend", ...messageArgs, "--part", "3"],
     },
     {
       method: "group.removeParticipant",
-      send: withOptions({ ...chatTarget, address: "+15550000123" }, (params) =>
-        api.removeParticipant(params),
-      ),
+      send: withOptions({ ...chatTarget, address: "+15550000123" }, api.removeParticipant),
       fields: { chat_guid: "chat-guid", address: "+15550000123" },
       args: ["chat-remove-member", ...chatArgs, "--address", "+15550000123"],
     },
@@ -162,7 +175,7 @@ describe("imessage actions runtime", () => {
     async ({ method, rpcMethod, send, fields, args }) => {
       cli.mockResolvedValue({ ok: true });
       await send(options);
-      expect(cli).toHaveBeenCalledWith({ ...options, timeoutMs: undefined, args });
+      expectCli(args);
       const client = rpc({ ok: true });
       await send(remote);
       expectRequest(client, rpcMethod ?? method, fields);
@@ -212,7 +225,7 @@ describe("imessage actions runtime", () => {
   it.each([
     {
       method: "send.attachment",
-      send: withOptions({ ...chatTarget, ...file }, (params) => api.sendAttachment(params)),
+      send: withOptions({ ...chatTarget, ...file }, api.sendAttachment),
       fields: {},
     },
     {
@@ -224,7 +237,7 @@ describe("imessage actions runtime", () => {
           replyToMessageId: "message-guid",
           attachment: { kind: "buffer" as const, ...file },
         },
-        (params) => api.sendRichMessage(params),
+        api.sendRichMessage,
       ),
       fields: {
         text: "caption",
@@ -235,7 +248,7 @@ describe("imessage actions runtime", () => {
     },
     {
       method: "group.setIcon",
-      send: withOptions({ ...chatTarget, ...file }, (params) => api.setGroupIcon(params)),
+      send: withOptions({ ...chatTarget, ...file }, api.setGroupIcon),
       fields: {},
     },
   ])(
@@ -274,24 +287,20 @@ describe("imessage actions runtime", () => {
       replyToMessageId: "parent-guid",
     });
     expect(cli).toHaveBeenCalledOnce();
-    expect(cli).toHaveBeenCalledWith({
-      ...options,
-      timeoutMs: undefined,
-      args: [
-        "poll",
-        "send",
-        ...chatArgs,
-        "--question",
-        "Approval details",
-        "--option",
-        "Allow",
-        "--option",
-        "allow",
-        "--reply-to",
-        "parent-guid",
-        "--no-comment",
-      ],
-    });
+    expectCli([
+      "poll",
+      "send",
+      ...chatArgs,
+      "--question",
+      "Approval details",
+      "--option",
+      "Allow",
+      "--option",
+      "allow",
+      "--reply-to",
+      "parent-guid",
+      "--no-comment",
+    ]);
     expect(result).toEqual({
       messageId: "poll-guid",
       pollOptions: [
@@ -352,14 +361,9 @@ describe("imessage actions runtime", () => {
   });
 
   it("preserves local rich attachment filenames, bytes and effect arguments until cleanup", async () => {
-    let stagedPath = "";
-    cli.mockImplementationOnce(async ({ args }: { args: string[] }) => {
-      stagedPath = args[args.indexOf("--file") + 1] ?? "";
-      expect(args[0]).toBe("send-rich");
+    const finish = stageAttachment("send-rich", (args) => {
       expect(args[args.indexOf("--effect") + 1]).toBe("com.apple.MobileSMS.expressivesend.impact");
       expect(args[args.indexOf("--reply-to") + 1]).toBe("parent-guid");
-      await expect(readFile(stagedPath)).resolves.toEqual(Buffer.from(file.buffer));
-      return { guid: "p:0/sent-message" };
     });
     await api.sendRichMessage({
       ...chat,
@@ -368,28 +372,20 @@ describe("imessage actions runtime", () => {
       effectId: "com.apple.MobileSMS.expressivesend.impact",
       attachment: { kind: "buffer", ...file, filename: "Family photo.png" },
     });
-    expect(basename(stagedPath)).toBe("Family photo.png");
-    await expect(access(dirname(stagedPath))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await finish()).toBe("Family photo.png");
   });
 
   it("contains and bounds long untrusted upload names while retaining their extension", async () => {
-    let stagedPath = "";
-    cli.mockImplementationOnce(async ({ args }: { args: string[] }) => {
-      stagedPath = args[args.indexOf("--file") + 1] ?? "";
-      expect(args[0]).toBe("send-attachment");
-      expect(args).toContain("--audio");
-      await expect(readFile(stagedPath)).resolves.toEqual(Buffer.from(file.buffer));
-      return { guid: "p:0/sent-message" };
-    });
+    const finish = stageAttachment("send-attachment", (args) => expect(args).toContain("--audio"));
     await api.sendAttachment({
       ...chat,
       ...file,
       filename: "../../..\\..\\" + "📎".repeat(120) + ".pdf",
       asVoice: true,
     });
-    expect(basename(stagedPath)).toMatch(/^📎+\.pdf$/u);
-    expect(Buffer.byteLength(basename(stagedPath), "utf8")).toBeLessThanOrEqual(240);
-    await expect(access(dirname(stagedPath))).rejects.toMatchObject({ code: "ENOENT" });
+    const filename = await finish();
+    expect(filename).toMatch(/^📎+\.pdf$/u);
+    expect(Buffer.byteLength(filename, "utf8")).toBeLessThanOrEqual(240);
   });
 
   it("isolates cached chat lists by resolved remote host", async () => {
