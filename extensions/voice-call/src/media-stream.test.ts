@@ -42,36 +42,56 @@ function seedStreamSession(
   });
 }
 
+async function withServer(handler: MediaStreamHandler, run: (url: string) => Promise<void>) {
+  const server = await startWsServer(handler);
+  try {
+    await run(server.url);
+  } finally {
+    await server.close();
+  }
+}
+
+async function closeWs(...sockets: WebSocket[]) {
+  await Promise.all(
+    sockets.map((ws) => {
+      const closed = waitForClose(ws);
+      ws.close();
+      return closed;
+    }),
+  );
+}
+
+function sendMedia(ws: WebSocket, payload: string, streamSid?: string) {
+  ws.send(JSON.stringify({ event: "media", streamSid, media: { payload } }));
+}
+
 describe("MediaStreamHandler security hardening", () => {
   it("wraps malformed Twilio media stream JSON with an owned parser error", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const handler = createHandler();
-    const server = await startWsServer(handler);
-
     try {
-      const ws = await connectWs(server.url);
-      ws.send("{not json");
+      await withConnection(handler, async (ws) => {
+        ws.send("{not json");
 
-      await vi.waitFor(() => {
-        expect(errorSpy).toHaveBeenCalledWith(
-          "[MediaStream] Error processing message:",
-          expect.objectContaining({
-            message: "Twilio media stream message was malformed JSON",
-          }),
-        );
+        await vi.waitFor(() => {
+          expect(errorSpy).toHaveBeenCalledWith(
+            "[MediaStream] Error processing message:",
+            expect.objectContaining({
+              message: "Twilio media stream message was malformed JSON",
+            }),
+          );
+        });
+        const error = errorSpy.mock.calls.find(
+          ([message]) => message === "[MediaStream] Error processing message:",
+        )?.[1];
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(SyntaxError);
+        expect((error as Error).cause).toBeInstanceOf(SyntaxError);
+
+        await closeWs(ws);
       });
-      const error = errorSpy.mock.calls.find(
-        ([message]) => message === "[MediaStream] Error processing message:",
-      )?.[1];
-      expect(error).toBeInstanceOf(Error);
-      expect(error).not.toBeInstanceOf(SyntaxError);
-      expect((error as Error).cause).toBeInstanceOf(SyntaxError);
-
-      ws.close();
-      await waitForClose(ws);
     } finally {
       errorSpy.mockRestore();
-      await server.close();
     }
   });
 
@@ -120,13 +140,7 @@ describe("MediaStreamHandler security hardening", () => {
         expect(talkEvents().map((event) => event.type)).toContain("session.ready"),
       );
 
-      ws.send(
-        JSON.stringify({
-          event: "media",
-          streamSid: "MZ-talk",
-          media: { payload: Buffer.from("hello").toString("base64") },
-        }),
-      );
+      sendMedia(ws, Buffer.from("hello").toString("base64"), "MZ-talk");
       await vi.waitFor(() => expect(Buffer.concat(sentAudio).toString()).toBe("hello"));
 
       callbacks?.onSpeechStart?.();
@@ -143,8 +157,7 @@ describe("MediaStreamHandler security hardening", () => {
       handler.clearTtsQueue("MZ-talk", "barge-in");
       await activePlayback;
 
-      ws.close();
-      await waitForClose(ws);
+      await closeWs(ws);
       await vi.waitFor(() =>
         expect(talkEvents().map((event) => event.type)).toContain("session.closed"),
       );
@@ -291,22 +304,17 @@ describe("MediaStreamHandler security hardening", () => {
       maxPendingConnections: 1,
       maxPendingConnectionsPerIp: 1,
     });
-    const server = await startWsServer(handler);
-
-    try {
-      const first = await connectWs(server.url);
-      const second = await connectWs(server.url);
+    await withServer(handler, async (url) => {
+      const first = await connectWs(url);
+      const second = await connectWs(url);
       const secondClosed = await waitForClose(second);
 
       expect(secondClosed.code).toBe(1013);
       expect(secondClosed.reason).toContain("Too many pending");
       expect(first.readyState).toBe(WebSocket.OPEN);
 
-      first.close();
-      await waitForClose(first);
-    } finally {
-      await server.close();
-    }
+      await closeWs(first);
+    });
   });
 
   it("uses resolved client IPs for per-IP pending limits", async () => {
@@ -316,11 +324,9 @@ describe("MediaStreamHandler security hardening", () => {
       maxPendingConnectionsPerIp: 1,
       resolveClientIp: (request) => String(request.headers["x-forwarded-for"] ?? ""),
     });
-    const server = await startWsServer(handler);
-
-    try {
+    await withServer(handler, async (url) => {
       const connectFrom = async (ip: string) => {
-        const ws = new WebSocket(server.url, { headers: { "x-forwarded-for": ip } });
+        const ws = new WebSocket(url, { headers: { "x-forwarded-for": ip } });
         await withTimeout(
           new Promise((resolve) => {
             ws.once("open", resolve);
@@ -334,15 +340,8 @@ describe("MediaStreamHandler security hardening", () => {
       expect(first.readyState).toBe(WebSocket.OPEN);
       expect(second.readyState).toBe(WebSocket.OPEN);
 
-      const firstClosed = waitForClose(first);
-      const secondClosed = waitForClose(second);
-      first.close();
-      second.close();
-      await firstClosed;
-      await secondClosed;
-    } finally {
-      await server.close();
-    }
+      await closeWs(first, second);
+    });
   });
 
   it("counts in-flight upgrades against the max connection cap", () => {
@@ -416,10 +415,8 @@ describe("MediaStreamHandler security hardening", () => {
       maxPendingConnections: 10,
       maxPendingConnectionsPerIp: 10,
     });
-    const server = await startWsServer(handler);
-    const serverUrl = new URL(server.url);
-
-    try {
+    await withServer(handler, async (url) => {
+      const serverUrl = new URL(url);
       await withTimeout(
         new Promise<void>((resolve, reject) => {
           const socket = net.createConnection(
@@ -446,13 +443,10 @@ describe("MediaStreamHandler security hardening", () => {
         }),
       );
 
-      const ws = await connectWs(server.url);
+      const ws = await connectWs(url);
       expect(ws.readyState).toBe(WebSocket.OPEN);
-      ws.close();
-      await waitForClose(ws);
-    } finally {
-      await server.close();
-    }
+      await closeWs(ws);
+    });
   });
 
   it("clears pending state after valid start", async () => {
@@ -479,10 +473,8 @@ describe("MediaStreamHandler security hardening", () => {
       const second = await connectWs(url);
       expect(second.readyState).toBe(WebSocket.OPEN);
 
-      second.close();
-      await waitForClose(second);
-      ws.close();
-      await waitForClose(ws);
+      await closeWs(second);
+      await closeWs(ws);
     });
   });
 
@@ -523,13 +515,7 @@ describe("MediaStreamHandler security hardening", () => {
       sendStart(ws, "MZ-early-media", "CA-early-media");
 
       await withTimeout(sttConnectStarted.promise);
-      ws.send(
-        JSON.stringify({
-          event: "media",
-          streamSid: "MZ-early-media",
-          media: { payload: Buffer.from("early").toString("base64") },
-        }),
-      );
+      sendMedia(ws, Buffer.from("early").toString("base64"), "MZ-early-media");
       await withTimeout(audioReceived.promise);
 
       expect(Buffer.concat(receivedAudio).toString()).toBe("early");
@@ -623,23 +609,17 @@ describe("MediaStreamHandler security hardening", () => {
     await withConnection(handler, async (ws) => {
       sendStart(ws, "MZ-base64", "CA-base64");
       for (const payload of ["!!!not-valid-base64!!!", "   \t\n  "]) {
-        ws.send(JSON.stringify({ event: "media", media: { payload } }));
+        sendMedia(ws, payload);
       }
-      ws.send(JSON.stringify({ event: "media", media: { payload: "-_8" } }));
-      ws.send(
-        JSON.stringify({
-          event: "media",
-          media: { payload: Buffer.from("valid").toString("base64") },
-        }),
-      );
+      sendMedia(ws, "-_8");
+      sendMedia(ws, Buffer.from("valid").toString("base64"));
 
       await vi.waitFor(() =>
         expect(sentAudio).toEqual([Buffer.from([0xfb, 0xff]), Buffer.from("valid")]),
       );
       expect(ws.readyState).toBe(WebSocket.OPEN);
 
-      ws.close();
-      await waitForClose(ws);
+      await closeWs(ws);
     });
   });
 });

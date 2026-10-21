@@ -118,6 +118,8 @@ const providerEnv = [
   "NGROK_AUTHTOKEN",
   "NGROK_DOMAIN",
 ];
+const valid = { valid: true, errors: [] };
+const errorPrefix = "plugins.entries.voice-call.config.";
 
 describe("validateProviderConfig", () => {
   const clearProviderEnv = () => {
@@ -133,7 +135,7 @@ describe("validateProviderConfig", () => {
     for (const { provider, values, env } of providerCredentials) {
       clearProviderEnv();
       const fromConfig = { ...createBaseConfig(provider), [provider]: values };
-      expect(validateProviderConfig(fromConfig)).toEqual({ valid: true, errors: [] });
+      expect(validateProviderConfig(fromConfig)).toEqual(valid);
       clearProviderEnv();
       env.forEach((name, index) => vi.stubEnv(name, Object.values(values)[index]));
       if (provider === "twilio") {
@@ -146,7 +148,7 @@ describe("validateProviderConfig", () => {
       if (provider === "twilio") {
         expect(fromEnv.fromNumber).toBe("+15550001234");
       }
-      expect(validateProviderConfig(fromEnv)).toEqual({ valid: true, errors: [] });
+      expect(validateProviderConfig(fromEnv)).toEqual(valid);
     }
   });
 
@@ -177,14 +179,14 @@ describe("validateProviderConfig", () => {
       Object.keys(values).forEach((key, index) => {
         if (key !== "publicKey") {
           expect(result.errors).toContain(
-            `plugins.entries.voice-call.config.${provider}.${key} is required (or set ${env[index]} env)`,
+            `${errorPrefix}${provider}.${key} is required (or set ${env[index]} env)`,
           );
         }
       });
       if (provider === "twilio") {
         expect(config.fromNumber).toBeUndefined();
         expect(result.errors).toContain(
-          "plugins.entries.voice-call.config.fromNumber is required (or set TWILIO_FROM_NUMBER env)",
+          `${errorPrefix}fromNumber is required (or set TWILIO_FROM_NUMBER env)`,
         );
       }
     }
@@ -210,7 +212,7 @@ describe("validateProviderConfig", () => {
     });
 
     expect(config.twilio?.authToken).toEqual(envRef("TWILIO_AUTH_TOKEN"));
-    expect(validateProviderConfig(config)).toEqual({ valid: true, errors: [] });
+    expect(validateProviderConfig(config)).toEqual(valid);
     expect(() => resolveTwilioAuthToken(config)).toThrow(
       'plugins.entries.voice-call.config.twilio.authToken: unresolved SecretRef "env:default:TWILIO_AUTH_TOKEN"',
     );
@@ -221,7 +223,7 @@ describe("validateProviderConfig", () => {
     const config = resolveVoiceCallConfig(
       createBaseConfig("twilio", { twilio: { accountSid: "AC123" } }),
     );
-    expect(validateProviderConfig(config)).toEqual({ valid: true, errors: [] });
+    expect(validateProviderConfig(config)).toEqual(valid);
   });
   it("requires a public key unless signature verification is skipped", () => {
     const missingPublicKey = createBaseConfig("telnyx", {
@@ -231,30 +233,24 @@ describe("validateProviderConfig", () => {
     const missingPublicKeyResult = validateProviderConfig(missingPublicKey);
     expect(missingPublicKeyResult.valid).toBe(false);
     expect(missingPublicKeyResult.errors).toContain(
-      "plugins.entries.voice-call.config.telnyx.publicKey is required (or set TELNYX_PUBLIC_KEY env)",
+      `${errorPrefix}telnyx.publicKey is required (or set TELNYX_PUBLIC_KEY env)`,
     );
 
     const withPublicKey = {
       ...missingPublicKey,
       telnyx: { ...missingPublicKey.telnyx, publicKey: "public-key" },
     };
-    expect(validateProviderConfig(withPublicKey)).toEqual({ valid: true, errors: [] });
+    expect(validateProviderConfig(withPublicKey)).toEqual(valid);
 
     const skippedVerification = {
       ...missingPublicKey,
       inboundPolicy: "disabled" as const,
       skipSignatureVerification: true,
     };
-    expect(validateProviderConfig(skippedVerification)).toEqual({
-      valid: true,
-      errors: [],
-    });
+    expect(validateProviderConfig(skippedVerification)).toEqual(valid);
   });
   it("skips validation when enabled is false", () => {
-    expect(validateProviderConfig(createBaseConfig("twilio", { enabled: false }))).toEqual({
-      valid: true,
-      errors: [],
-    });
+    expect(validateProviderConfig(createBaseConfig("twilio", { enabled: false }))).toEqual(valid);
   });
   it.each([
     [
@@ -281,29 +277,20 @@ describe("validateProviderConfig", () => {
     const config = normalizeVoiceCallConfig({ ...createBaseConfig("twilio"), ...input });
     const result = validateProviderConfig(config);
     expect(result.valid).toBe(false);
-    expect(result.errors).toContain(`plugins.entries.voice-call.config.${error}`);
+    expect(result.errors).toContain(`${errorPrefix}${error}`);
   });
 
-  it("accepts realtime.enabled with provider=telnyx", () => {
-    const config = createBaseConfig("telnyx");
+  it.each(["telnyx", "mock"] as const)("accepts realtime.enabled with provider=%s", (provider) => {
+    const config = createBaseConfig(provider);
     config.realtime.enabled = true;
     config.inboundPolicy = "allowlist";
-
     const result = validateProviderConfig(config);
-
     expect(result.errors).not.toContain(
       'plugins.entries.voice-call.config.provider must be "twilio", "telnyx", or "mock" when realtime.enabled is true',
     );
-  });
-
-  it("accepts realtime.enabled with provider=mock", () => {
-    const config = createBaseConfig("mock");
-    config.realtime.enabled = true;
-    config.inboundPolicy = "allowlist";
-
-    const result = validateProviderConfig(config);
-
-    expect(result).toEqual({ valid: true, errors: [] });
+    if (provider === "mock") {
+      expect(result).toEqual(valid);
+    }
   });
   it("accepts streaming.enabled with provider=twilio", () => {
     const config = createBaseConfig("twilio");
@@ -313,7 +300,7 @@ describe("validateProviderConfig", () => {
       authToken: { source: "env", provider: "default", id: "TWILIO_AUTH_TOKEN" },
     };
 
-    expect(validateProviderConfig(config)).toEqual({ valid: true, errors: [] });
+    expect(validateProviderConfig(config)).toEqual(valid);
   });
 });
 
@@ -455,30 +442,24 @@ describe("resolveVoiceCallConfig session routing", () => {
   });
 
   it("resolves per-number inbound route overrides over global voice settings", () => {
+    const route = {
+      inboundGreeting: "Silver Fox Cards, how can I help?",
+      agentId: "cards",
+      responseModel: "openai/gpt-5.5",
+      responseSystemPrompt: "You are a baseball card expert.",
+      responseTimeoutMs: 20000,
+    };
     const config = sessionConfig({
       inboundGreeting: "Hello from global.",
       agentId: "main",
       responseModel: "openai/gpt-5.4-mini",
       responseSystemPrompt: "Global voice assistant.",
       responseTimeoutMs: 10000,
-      tts: {
-        provider: "openai",
-        providers: {
-          openai: { voice: "coral", speed: 1 },
-        },
-      },
+      tts: { provider: "openai", providers: { openai: { voice: "coral", speed: 1 } } },
       numbers: {
         "+15550001111": {
-          inboundGreeting: "Silver Fox Cards, how can I help?",
-          agentId: "cards",
-          responseModel: "openai/gpt-5.5",
-          responseSystemPrompt: "You are a baseball card expert.",
-          responseTimeoutMs: 20000,
-          tts: {
-            providers: {
-              openai: { apiKey: "resolved-route-key", voice: "alloy" },
-            },
-          },
+          ...route,
+          tts: { providers: { openai: { apiKey: "resolved-route-key", voice: "alloy" } } },
         },
       },
     });
@@ -486,14 +467,7 @@ describe("resolveVoiceCallConfig session routing", () => {
     const effective = resolveVoiceCallEffectiveConfig(config, "+1 (555) 000-1111");
     expect(effective).toMatchObject({
       numberRouteKey: "+15550001111",
-      config: {
-        inboundGreeting: "Silver Fox Cards, how can I help?",
-        agentId: "cards",
-        responseModel: "openai/gpt-5.5",
-        responseSystemPrompt: "You are a baseball card expert.",
-        responseTimeoutMs: 20000,
-        tts: { provider: "openai" },
-      },
+      config: { ...route, tts: { provider: "openai" } },
     });
     expect(effective.config.tts?.providers?.openai).toEqual({
       apiKey: "resolved-route-key",
@@ -505,11 +479,7 @@ describe("resolveVoiceCallConfig session routing", () => {
   it("falls back to global voice settings when no per-number route matches", () => {
     const config = sessionConfig({
       inboundGreeting: "Hello from global.",
-      numbers: {
-        "+15550001111": {
-          inboundGreeting: "Hello from route.",
-        },
-      },
+      numbers: { "+15550001111": { inboundGreeting: "Hello from route." } },
     });
 
     const effective = resolveVoiceCallEffectiveConfig(config, "+15550002222");

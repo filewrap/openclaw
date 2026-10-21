@@ -8,10 +8,10 @@ import type { MediaStreamHandler } from "./media-stream.js";
 import {
   createHandler,
   sendStart,
-  startWsServer,
   waitForAbort,
+  withConnection,
 } from "./media-stream.test-support.js";
-import { connectWs, waitForClose, withTimeout } from "./websocket-test-support.js";
+import { waitForClose, withTimeout } from "./websocket-test-support.js";
 
 const requireRecord = createRequireRecord("record", "expected-label-record");
 const nextWsMessage = (ws: WebSocket): Promise<Record<string, unknown>> =>
@@ -47,21 +47,23 @@ async function withPlaybackStream(
     shouldAcceptStream: () => true,
     onConnect,
   });
-  const server = await startWsServer(handler);
-  let ws: WebSocket | undefined;
-  try {
-    ws = await connectWs(server.url);
-    sendStart(ws, streamSid, callSid);
-    await vi.waitFor(() => expect(onConnect).toHaveBeenCalledOnce());
-    await run(handler, ws, events);
-    if (ws.readyState !== WebSocket.CLOSED) {
-      ws.close();
-      await waitForClose(ws);
+  await withConnection(handler, async (ws) => {
+    try {
+      sendStart(ws, streamSid, callSid);
+      await vi.waitFor(() => expect(onConnect).toHaveBeenCalledOnce());
+      await run(handler, ws, events);
+      if (ws.readyState !== WebSocket.CLOSED) {
+        ws.close();
+        await waitForClose(ws);
+      }
+    } finally {
+      ws.terminate();
     }
-  } finally {
-    ws?.terminate();
-    await server.close();
-  }
+  });
+}
+
+function echoMark(ws: WebSocket, streamSid: string, name: string) {
+  ws.send(JSON.stringify({ event: "mark", streamSid, mark: { name } }));
 }
 
 describe("MediaStreamHandler playback marks", () => {
@@ -83,13 +85,7 @@ describe("MediaStreamHandler playback marks", () => {
       await Promise.resolve();
       expect(completed).toBe(false);
 
-      ws.send(
-        JSON.stringify({
-          event: "mark",
-          streamSid: "MZ-mark",
-          mark: { name: "tts-complete" },
-        }),
-      );
+      echoMark(ws, "MZ-mark", "tts-complete");
       await withTimeout(playback);
       expect(completed).toBe(true);
     });
@@ -106,13 +102,7 @@ describe("MediaStreamHandler playback marks", () => {
       await withTimeout(playback);
       expect(talkEvents().some((event) => event.type === "output.audio.done")).toBe(false);
 
-      ws.send(
-        JSON.stringify({
-          event: "mark",
-          streamSid: "MZ-clear-mark",
-          mark: { name: "tts-cleared" },
-        }),
-      );
+      echoMark(ws, "MZ-clear-mark", "tts-cleared");
       ws.close();
       await waitForClose(ws);
       expect(talkEvents().some((event) => event.type === "output.audio.done")).toBe(false);
