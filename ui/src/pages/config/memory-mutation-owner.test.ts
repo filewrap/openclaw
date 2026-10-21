@@ -475,7 +475,7 @@ describe("Memory plugin mutation ownership", () => {
         oldReply.reject(new Error("retired add-on failure"));
         await waitForSolid(() => expect(setEnabled).toHaveBeenCalledTimes(2));
         await Promise.allSettled(runExternalMutation.mock.results.map(({ value }) => value));
-        await flush();
+        flush();
         expect(element.textContent).not.toContain("retired add-on failure");
       } finally {
         oldReply.resolve(committed("active-memory", false));
