@@ -1,4 +1,3 @@
-// Connect CLI tests cover accepted targets and handoff to the canonical node runtime.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { Command } from "commander";
@@ -57,6 +56,28 @@ function setupCode(): string {
   return encodePairingSetupCode(payload);
 }
 
+function joinResponse(contentType = "application/json", finalUrl?: string) {
+  const release = vi.fn().mockResolvedValue(undefined);
+  mocks.fetchWithSsrFGuard.mockResolvedValueOnce({
+    response: new Response(JSON.stringify(payload), { headers: { "content-type": contentType } }),
+    finalUrl,
+    release,
+  });
+  return release;
+}
+
+function expectFailure(message: string, { consent = false, service = false } = {}) {
+  expect(mocks.runtime.error).toHaveBeenCalledWith(message);
+  expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
+  expect(mocks.runNodeHost).not.toHaveBeenCalled();
+  if (consent) {
+    expect(mocks.mutateConfigFileWithRetry).not.toHaveBeenCalled();
+  }
+  if (service) {
+    expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
+  }
+}
+
 async function runConnect(args: string[]): Promise<void> {
   const program = new Command();
   program.exitOverride();
@@ -82,14 +103,7 @@ describe("connect cli", () => {
     ["text/html", false],
     ["application/json-seq", false],
   ])("recognizes the join response media type %s", async (contentType, accepted) => {
-    const release = vi.fn().mockResolvedValue(undefined);
-    mocks.fetchWithSsrFGuard.mockResolvedValueOnce({
-      response: new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "content-type": contentType },
-      }),
-      release,
-    });
+    const release = joinResponse(contentType);
 
     await runConnect([`https://gateway.example/j/${"a".repeat(22)}`]);
 
@@ -107,14 +121,7 @@ describe("connect cli", () => {
 
   it("maps an HTTPS join URL into the existing node foreground runtime", async () => {
     const target = `https://gateway.example/openclaw-gw/j/${"a".repeat(22)}`;
-    mocks.fetchWithSsrFGuard.mockResolvedValueOnce({
-      response: new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "content-type": "application/json; charset=utf-8" },
-      }),
-      finalUrl: target,
-      release: vi.fn().mockResolvedValue(undefined),
-    });
+    joinResponse("application/json; charset=utf-8", target);
 
     await runConnect([target, "--display-name", "Build Node"]);
 
@@ -186,17 +193,14 @@ describe("connect cli", () => {
         }
       }
 
-      expect(mocks.runtime.error).toHaveBeenCalledWith(
+      expectFailure(
         [
           "Connect target is required. Join URLs and setup codes are single-use.",
           `If this machine is still paired with wss://gateway.example:443, reconnect with the saved pairing: ${reconnect}`,
           `Otherwise, mint a join URL on the Gateway host with ${profile ? `openclaw --profile ${profile}` : "openclaw"} devices join-code, then run: ${pair}`,
         ].join("\n"),
+        { consent: true, service: true },
       );
-      expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
-      expect(mocks.runNodeHost).not.toHaveBeenCalled();
-      expect(mocks.mutateConfigFileWithRetry).not.toHaveBeenCalled();
-      expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
     },
   );
 
@@ -204,11 +208,9 @@ describe("connect cli", () => {
     await runConnect(["--session-host"]);
 
     expect(mocks.loadResumableNodeHostGateway).toHaveBeenCalledOnce();
-    expect(mocks.runtime.error).toHaveBeenCalledWith(
+    expectFailure(
       "Connect target is required. To pair this machine, mint a join URL on the Gateway host with openclaw devices join-code, then run: openclaw connect <join-url> --session-host",
     );
-    expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
-    expect(mocks.runNodeHost).not.toHaveBeenCalled();
   });
 
   it.skipIf(process.platform === "win32").each(["setup-code "])(
@@ -271,11 +273,7 @@ describe("connect cli", () => {
   ])("rejects incompatible flags: $args", async ({ args, message }) => {
     await runConnect([setupCode(), ...args]);
 
-    expect(mocks.runtime.error).toHaveBeenCalledWith(message);
-    expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
-    expect(mocks.runNodeHost).not.toHaveBeenCalled();
-    expect(mocks.mutateConfigFileWithRetry).not.toHaveBeenCalled();
-    expect(mocks.runNodeDaemonInstall).not.toHaveBeenCalled();
+    expectFailure(message, { consent: true, service: true });
   });
 
   it("forwards repeatable command restrictions through service connect", async () => {
@@ -370,12 +368,8 @@ describe("connect cli", () => {
   it("refuses plain HTTP join URLs for non-loopback gateways", async () => {
     await runConnect([`http://gateway.example/j/${"a".repeat(22)}`]);
 
-    expect(mocks.runtime.error).toHaveBeenCalledWith(
-      "Plain HTTP join URLs are allowed only for loopback gateways.",
-    );
-    expect(mocks.runtime.exit).toHaveBeenCalledWith(1);
+    expectFailure("Plain HTTP join URLs are allowed only for loopback gateways.");
     expect(mocks.fetchWithSsrFGuard).not.toHaveBeenCalled();
-    expect(mocks.runNodeHost).not.toHaveBeenCalled();
   });
 
   it("sends Cloudflare Access credentials on the pinned HTTPS join request", async () => {
@@ -392,14 +386,7 @@ describe("connect cli", () => {
       },
     });
     const target = `https://gateway.example/j/${"a".repeat(22)}`;
-    mocks.fetchWithSsrFGuard.mockResolvedValueOnce({
-      response: new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-      finalUrl: target,
-      release: vi.fn(async () => undefined),
-    });
+    joinResponse("application/json", target);
 
     await runConnect([target]);
 

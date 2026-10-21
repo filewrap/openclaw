@@ -22,13 +22,8 @@ const mocks = vi.hoisted(() => ({
 const { runAcpClientInteractive, serveAcpGateway, defaultRuntime } = mocks;
 const errors = () => defaultRuntime.error.mock.calls.map(([message]) => String(message));
 
-vi.mock("../acp/client.js", () => ({
-  runAcpClientInteractive: (opts: AcpClientOptions) => mocks.runAcpClientInteractive(opts),
-}));
-
-vi.mock("../acp/server.js", () => ({
-  serveAcpGateway: (opts: AcpGatewayOptions) => mocks.serveAcpGateway(opts),
-}));
+vi.mock("../acp/client.js", () => ({ runAcpClientInteractive: mocks.runAcpClientInteractive }));
+vi.mock("../acp/server.js", () => ({ serveAcpGateway: mocks.serveAcpGateway }));
 
 vi.mock("../runtime.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../runtime.js")>();
@@ -108,9 +103,7 @@ describe("acp cli option collisions", () => {
   });
 
   it("formats client errors with formatErrorMessage instead of String(err) (#83904)", async () => {
-    runAcpClientInteractive.mockImplementationOnce(async () => {
-      throw { code: 42, why: "boom" } as unknown as Error;
-    });
+    runAcpClientInteractive.mockRejectedValueOnce({ code: 42, why: "boom" });
     await parseAcp(["client"]);
 
     expect(errors()).toContain('{"code":42,"why":"boom"}');

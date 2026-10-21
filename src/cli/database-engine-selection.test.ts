@@ -5,7 +5,10 @@ import { getDatabaseEngineSelection } from "../infra/database-engine/context.js"
 import { resetDatabaseEngineSelectionForTest } from "../infra/database-engine/context.test-support.js";
 import * as nodeSqlite from "../infra/node-sqlite.js";
 import { withEnvAsync } from "../test-utils/env.js";
-import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import {
+  type OpenClawTestState,
+  withOpenClawTestState,
+} from "../test-utils/openclaw-test-state.js";
 import { prepareCliDatabaseEngine } from "./database-engine-selection.js";
 
 beforeEach(() => {
@@ -16,6 +19,15 @@ afterEach(() => {
   resetDatabaseEngineSelectionForTest();
   vi.restoreAllMocks();
 });
+
+async function expectUnselected(state: OpenClawTestState) {
+  expect(getDatabaseEngineSelection()).toBeUndefined();
+  await expect(fs.access(state.statePath("state", "openclaw.sqlite"))).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+}
+
+const prepare = (...args: string[]) => prepareCliDatabaseEngine(["node", "openclaw", ...args]);
 
 const database = {
   engine: "postgres",
@@ -87,7 +99,7 @@ describe("one-shot CLI engine selection", () => {
             plugins: { enabled: false },
           });
           delete process.env.OPENCLAW_CONFIG_PATH;
-          await prepareCliDatabaseEngine(["node", "openclaw", ...args]);
+          await prepare(...args);
           expect(process.env.OPENCLAW_CONFIG_PATH).toBe(target);
           expect(getDatabaseEngineSelection()).toMatchObject({
             effectiveEngines: { state: "postgres", agent: "postgres" },
@@ -138,9 +150,7 @@ describe("one-shot CLI engine selection", () => {
           await fs.writeFile(state.statePath("included.json"), "{ invalid config");
         }
 
-        await expect(
-          prepareCliDatabaseEngine(["node", "openclaw", ...(args ?? ["models", "list"])]),
-        ).rejects.toMatchObject({
+        await expect(prepare(...(args ?? ["models", "list"]))).rejects.toMatchObject({
           code,
           message: expect.stringContaining(`${heading} ${state.configPath}:\n`),
         });
@@ -194,11 +204,8 @@ describe("one-shot CLI engine selection", () => {
     await withOpenClawTestState({ label: "cli-engine-deferred" }, async (state) => {
       await state.writeConfig({ database, plugins: { enabled: false } });
       delete process.env.OPENCLAW_TEST_CLI_DSN;
-      await prepareCliDatabaseEngine(["node", "openclaw", ...args]);
-      expect(getDatabaseEngineSelection()).toBeUndefined();
-      await expect(fs.access(state.statePath("state", "openclaw.sqlite"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
+      await prepare(...args);
+      await expectUnselected(state);
     });
   });
 
@@ -207,11 +214,8 @@ describe("one-shot CLI engine selection", () => {
     async ({ args }) => {
       await withOpenClawTestState({ label: "cli-recovery-invalid-source" }, async (state) => {
         await fs.writeFile(state.configPath, '{"database":{"engine":"postgres"}, broken');
-        expect(await prepareCliDatabaseEngine(["node", "openclaw", ...args])).toBe(false);
-        expect(getDatabaseEngineSelection()).toBeUndefined();
-        await expect(fs.access(state.statePath("state", "openclaw.sqlite"))).rejects.toMatchObject({
-          code: "ENOENT",
-        });
+        expect(await prepare(...args)).toBe(false);
+        await expectUnselected(state);
       });
     },
   );
@@ -234,13 +238,8 @@ describe("one-shot CLI engine selection", () => {
     await withOpenClawTestState({ label: "cli-cleanup-engine-selection" }, async (state) => {
       await state.writeConfig({ database, plugins: { enabled: false } });
       delete process.env.OPENCLAW_TEST_CLI_DSN;
-      await expect(prepareCliDatabaseEngine(["node", "openclaw", ...args])).rejects.toThrow(
-        "SecretRef is unresolved",
-      );
-      expect(getDatabaseEngineSelection()).toBeUndefined();
-      await expect(fs.access(state.statePath("state", "openclaw.sqlite"))).rejects.toMatchObject({
-        code: "ENOENT",
-      });
+      await expect(prepare(...args)).rejects.toThrow("SecretRef is unresolved");
+      await expectUnselected(state);
     });
   });
 
@@ -267,15 +266,7 @@ describe("one-shot CLI engine selection", () => {
         await fs.writeFile(databasePath, "unopened synthetic store");
         const sqliteOpen = vi.spyOn(nodeSqlite, "openNodeSqliteDatabase");
         const postgresOpen = vi.spyOn(databaseEngineAdapters.postgres, "openConnection");
-        expect(
-          await prepareCliDatabaseEngine([
-            "node",
-            "openclaw",
-            "doctor",
-            "--non-interactive",
-            "--json",
-          ]),
-        ).toBe(true);
+        expect(await prepare("doctor", "--non-interactive", "--json")).toBe(true);
         expect(getDatabaseEngineSelection()).toBeUndefined();
         expect(sqliteOpen).not.toHaveBeenCalled();
         expect(postgresOpen).not.toHaveBeenCalled();
@@ -293,7 +284,7 @@ describe("one-shot CLI engine selection", () => {
       async (state) => {
         await state.writeConfig({ database, plugins: { enabled: false } });
         delete process.env.OPENCLAW_TEST_CLI_DSN;
-        expect(await prepareCliDatabaseEngine(["node", "openclaw", "doctor"])).toBe(false);
+        expect(await prepare("doctor")).toBe(false);
         expect(getDatabaseEngineSelection()).toBeUndefined();
       },
     );
@@ -303,16 +294,9 @@ describe("one-shot CLI engine selection", () => {
     await withOpenClawTestState({ label: "doctor-credentials-invalid-config" }, async (state) => {
       const raw = '{"database":{"engine":"postgres"}, broken';
       await fs.writeFile(state.configPath, raw);
-      expect(
-        await prepareCliDatabaseEngine([
-          "node",
-          "openclaw",
-          "doctor",
-          "--client-credentials",
-          "--repair",
-          "--non-interactive",
-        ]),
-      ).toBe(false);
+      expect(await prepare("doctor", "--client-credentials", "--repair", "--non-interactive")).toBe(
+        false,
+      );
       expect(getDatabaseEngineSelection()).toBeUndefined();
       expect(await fs.readFile(state.configPath, "utf8")).toBe(raw);
       await expect(fs.access(state.statePath("state", "openclaw.sqlite"))).rejects.toMatchObject({
@@ -331,7 +315,7 @@ describe("one-shot CLI engine selection", () => {
       expect(
         // Handoff lock journals are temp-scoped; do not borrow another test's ledger.
         await withEnvAsync({ TMPDIR: state.root, TMP: state.root, TEMP: state.root }, () =>
-          prepareCliDatabaseEngine(["node", "openclaw", "doctor", "--fix", "--non-interactive"]),
+          prepare("doctor", "--fix", "--non-interactive"),
         ),
       ).toBe(true);
       expect(getDatabaseEngineSelection()).toBeUndefined();

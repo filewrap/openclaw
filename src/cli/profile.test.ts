@@ -26,32 +26,28 @@ function expectServiceSelectors(env: NodeJS.ProcessEnv, selectors: (string | und
 }
 
 describe("parseCliProfileArgs", () => {
-  it.each<[string[], string | null, string[]?]>([
-    [["--no-color", "gateway", "--dev", "--allow-unconfigured"], null],
-    [["qa", "matrix", "--profile", "fast", "--fail-fast"], null],
-    [
-      ["qa", "run", "--profile=release", "--output", "qa-report.md"],
-      "release",
-      ["qa", "run", "--output", "qa-report.md"],
-    ],
+  const argv = (args: string) => ["node", "openclaw", ...args.split(" ")];
+  it.each<[string, string | null, string?]>([
+    ["--no-color gateway --dev --allow-unconfigured", null],
+    ["qa matrix --profile fast --fail-fast", null],
+    ["qa run --profile=release --output qa-report.md", "release", "qa run --output qa-report.md"],
   ])(
     "selects the root profile without consuming command-local flags: %j",
     (args, profile, remaining = args) => {
-      expect(parseCliProfileArgs(["node", "openclaw", ...args])).toEqual({
+      expect(parseCliProfileArgs(argv(args))).toEqual({
         ok: true,
         profile,
-        argv: ["node", "openclaw", ...remaining],
+        argv: argv(remaining),
       });
     },
   );
 
-  it.each([
-    ["--profile"],
-    ["--dev", "--profile", "work", "status"],
-    ["--profile", "work", "--dev", "status"],
-  ])("rejects invalid profile options: %j", (...args) => {
-    expect(parseCliProfileArgs(["node", "openclaw", ...args]).ok).toBe(false);
-  });
+  it.each(["--profile", "--dev --profile work status", "--profile work --dev status"])(
+    "rejects invalid profile options: %s",
+    (args) => {
+      expect(parseCliProfileArgs(argv(args)).ok).toBe(false);
+    },
+  );
 });
 
 describe("applyCliProfileEnv", () => {
