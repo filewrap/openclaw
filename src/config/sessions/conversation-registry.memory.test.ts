@@ -48,6 +48,8 @@ async function commit<Key extends keyof SessionActorStorageWrites>(
 ) {
   return readSessionActorStorageResult(await mutate(...args));
 }
+const patch = (actor: SessionActor, fields: Partial<SessionEntry>) =>
+  commit(actor, "session.entry.patch", { operation: { kind: "fields", patch: fields } });
 
 vi.mock("node:sqlite", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:sqlite")>()),
@@ -164,14 +166,10 @@ describe("memory conversation registry", () => {
     });
     const resumed = await read(initial!.conversationRef);
     expect(resumed).toEqual({ ...initial, lastSeenAt: 2 });
-    await commit(actor, "session.entry.patch", {
-      operation: { kind: "fields", patch: { totalTokens: 42, updatedAt: 3 } },
-    });
+    await patch(actor, { totalTokens: 42, updatedAt: 3 });
     expect(await read(initial!.conversationRef)).toEqual(resumed);
     expect(await primary(created.sessionId)).toEqual(resumed);
-    const updated = await commit(actor, "session.entry.patch", {
-      operation: { kind: "fields", patch: { label: "renamed", updatedAt: 2 } },
-    });
+    const updated = await patch(actor, { label: "renamed", updatedAt: 2 });
     expect(await read(initial!.conversationRef)).toMatchObject({
       conversationRef: initial!.conversationRef,
       peerId: "canonical-ops",
@@ -218,12 +216,12 @@ describe("memory conversation registry", () => {
       expected: { sessionId: "first" },
       conversationAlternatives: [[{ conversationRef: conversation.conversationRef, sessionKey }]],
     };
-    const patch = () =>
+    const guardedPatch = () =>
       mutate(actor, "session.entry.patch", {
         operation: { kind: "fields", patch: { label: "allowed" } },
         guards: { sources: [source] },
       });
-    expect((await patch()).kind).toBe("committed");
+    expect((await guardedPatch()).kind).toBe("committed");
     const sent = vi.fn();
     const send = () =>
       withConversationAuthority(
@@ -236,10 +234,8 @@ describe("memory conversation registry", () => {
       );
     await send();
     expect(sent).toHaveBeenCalledOnce();
-    await commit(actor, "session.entry.patch", {
-      operation: { kind: "fields", patch: { delivery: entry("channel:new").delivery } },
-    });
-    expect(await patch()).toMatchObject({
+    await patch(actor, { delivery: entry("channel:new").delivery });
+    expect(await guardedPatch()).toMatchObject({
       kind: "rolled-back",
       error: { message: "Session source changed before entry mutation" },
     });

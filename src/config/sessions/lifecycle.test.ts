@@ -71,12 +71,9 @@ it("uses the physical SQLite mutation watermark instead of event timestamps", as
 
   expect(entry.updatedAt).toBe(registryTimestampMs);
   const sql = observeHostDataSql();
-  try {
-    expect(await check(entry, sessionKey)).toBe(true);
-    expect(sql.queries).toEqual([]);
-  } finally {
-    sql.restore();
-  }
+  using _ = { [Symbol.dispose]: () => sql.restore() };
+  expect(await check(entry, sessionKey)).toBe(true);
+  expect(sql.queries).toEqual([]);
 });
 
 it.each(["done", "failed", "legacy"] as const)(
