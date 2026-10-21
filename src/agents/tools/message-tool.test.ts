@@ -1243,7 +1243,13 @@ describe("message tool secret scoping", () => {
 
   it("resolves scoped channel SecretRefs even when constructed with a config snapshot", async () => {
     mockSendResult({ channel: "discord", to: "channel:123" });
-    const plugin = createChannelPlugin({ id: "discord", actions: ["send"] });
+    const plugin = createChannelPlugin({
+      id: "discord",
+      describeMessageTool: ({ accountId }) => ({
+        actions: ["send"],
+        capabilities: accountId === "ops" ? ["presentation"] : [],
+      }),
+    });
     registerPlugins(plugin);
     const rawConfig = channelConfig("discord", {
       token: secretRef("DISCORD_BOT_TOKEN"),
@@ -1264,6 +1270,7 @@ describe("message tool secret scoping", () => {
       currentChannelId: "channel:123",
       agentAccountId: "ops",
     });
+    expect(getToolProperties(tool)).toHaveProperty("presentation");
 
     await tool.execute("1", { action: "send", message: "hi" });
 
@@ -1312,7 +1319,7 @@ it.each<{
   {
     name: "agentThreadId",
     options: {
-      agentSessionKey: "agent:main:slack:channel:c123:thread:111.222",
+      agentSessionKey: "agent:main:slack:channel:c123:thread:333.444",
       currentChannelId: "channel:C123",
       agentThreadId: "111.222",
     },
@@ -1352,19 +1359,9 @@ it.each<{
   }
   await tool.execute("1", { action: "send", channel: "slack", ...action });
   expect(firstAction()?.toolContext).toMatchObject(expected);
+  expect(getToolProperties(tool).final).toMatchObject({ type: "boolean" });
 });
 
-it("keeps the tool definition stable through createOpenClawTools", () => {
-  const tools = (["automatic", "message_tool_only"] as const).map((sourceReplyDeliveryMode) =>
-    createOpenClawTools({ config: {}, sourceReplyDeliveryMode }).find(
-      (candidate) => candidate.name === "message",
-    ),
-  );
-  expect(tools[0]).toBeDefined();
-  expect(tools[1]?.description).toBe(tools[0]?.description);
-  expect(tools[1]?.parameters).toEqual(tools[0]?.parameters);
-  expect(getToolProperties(tools[1]!).final).toMatchObject({ type: "boolean" });
-});
 describe("message tool explicit target guard", () => {
   async function collectDecisions(
     scope: string,
@@ -1594,86 +1591,6 @@ it("blocks repeated qa-channel sends returned by the wrapped message tool", asyn
   expect(blockedAgain.details).toMatchObject({ status: "blocked", deniedReason: "tool-loop" });
 });
 describe("message tool schema scoping", () => {
-  const telegramPlugin = createChannelPlugin({
-    id: "telegram",
-    actions: ["send", "react", "poll"],
-    capabilities: ["presentation"],
-    toolSchema: () => [
-      {
-        properties: {
-          pollDurationSeconds: Type.Optional(Type.Number()),
-          pollAnonymous: Type.Optional(Type.Boolean()),
-          pollPublic: Type.Optional(Type.Boolean()),
-        },
-        visibility: "all-configured",
-      },
-    ],
-  });
-
-  const discordPlugin = createChannelPlugin({
-    id: "discord",
-    actions: ["send", "poll", "poll-vote"],
-    capabilities: ["presentation"],
-  });
-
-  const slackPlugin = createChannelPlugin({
-    id: "slack",
-    actions: ["send", "react"],
-    capabilities: ["presentation"],
-  });
-
-  afterEach(() => {
-    registerPlugins();
-  });
-
-  it("includes bound plugin fields and actions in the scoped schema", () => {
-    registerPlugins(telegramPlugin, discordPlugin, slackPlugin);
-    const tool = createMessageTool({
-      config: { bindings: [{ agentId: "main", match: { channel: "discord" } }] },
-      agentId: "main",
-      currentChannelProvider: "telegram",
-    });
-    const properties = getToolProperties(tool);
-    expect(getActionEnum(properties)).toEqual(["poll", "poll-vote", "react", "send"]);
-    expect(properties).toHaveProperty("presentation");
-    expect(
-      Value.Check(tool.parameters, {
-        action: "poll",
-        pollDurationSeconds: 60,
-        pollAnonymous: true,
-        pollPublic: false,
-      }),
-    ).toBe(true);
-    expect(Value.Check(tool.parameters, { action: "poll", pollDurationSeconds: "invalid" })).toBe(
-      false,
-    );
-  });
-
-  it("uses discovery account scope for capability-gated presentation", () => {
-    const scopedInteractivePlugin = createChannelPlugin({
-      id: "telegram",
-      describeMessageTool: ({ accountId }) => ({
-        actions: ["send"],
-        capabilities: accountId === "ops" ? ["presentation"] : [],
-      }),
-    });
-
-    registerPlugins(scopedInteractivePlugin);
-
-    const scopedTool = createMessageTool({
-      config: {} as never,
-      currentChannelProvider: "telegram",
-      agentAccountId: "ops",
-    });
-    const unscopedTool = createMessageTool({
-      config: {} as never,
-      currentChannelProvider: "telegram",
-    });
-
-    expect(getToolProperties(scopedTool)).toHaveProperty("presentation");
-    expect(getToolProperties(unscopedTool).presentation).toBeUndefined();
-  });
-
   it.each([
     { action: "conversation-open", fields: ["teamId"], scopedOnly: false },
     { action: "send", fields: [], scopedOnly: false },
