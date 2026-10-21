@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import chromeExtensionManifest from "../../../chrome-extension/manifest.json" with { type: "json" };
 import type { ProfileContext } from "../server-context.js";
 import { makeBrowserProfile } from "../server-context.test-harness.js";
-import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
+import { createRouteFixture } from "./request.test-support.js";
 
 const graphics = vi.hoisted(() => ({ endpoint: vi.fn(), read: vi.fn() }));
 
@@ -96,24 +96,19 @@ async function callRoute(params: {
   forProfile?: () => unknown;
   expectedStatus?: number;
 }) {
-  const { app, getHandlers, postHandlers } = createBrowserRouteApp();
-  registerBrowserBasicRoutes(app, {
+  const routes = createRouteFixture();
+  registerBrowserBasicRoutes(routes.app, {
     state: () => params.state,
     forProfile: params.forProfile ?? params.state.forProfile,
   } as never);
 
-  const handlers = params.route === "/start" ? postHandlers : getHandlers;
-  const handler = handlers.get(params.route ?? "/");
-  expect(handler).toBeTypeOf("function");
-
-  const response = createBrowserRouteResponse();
-  await handler?.(
+  const response = await routes.request(
+    params.route === "/start" ? "post" : "get",
+    params.route ?? "/",
     {
-      params: {},
       query: params.query ?? { profile: params.state.forProfile().profile.name },
       ...(params.signal ? { signal: params.signal } : {}),
     },
-    response.res,
   );
   expect(response.statusCode).toBe(params.expectedStatus ?? 200);
   return responseBodyRecord(response);

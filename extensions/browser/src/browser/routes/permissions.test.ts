@@ -4,7 +4,7 @@ import {
   BrowserProfileUnavailableError,
   type BrowserNoDisplayErrorMetadata,
 } from "../errors.js";
-import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
+import { createRouteFixture } from "./request.test-support.js";
 
 type Send = (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 const cdpMocks = vi.hoisted(() => ({
@@ -44,7 +44,7 @@ const mediaRequest = {
   optionalPermissions,
 };
 function expectGrant(
-  response: ReturnType<typeof createBrowserRouteResponse>,
+  response: Awaited<ReturnType<ReturnType<typeof createRouteFixture>["request"]>>,
   grantMethod: "playwright" | "cdp",
   unsupportedPermissions: string[] = [],
 ) {
@@ -68,7 +68,7 @@ async function callGrant(
     ensureBrowserAvailable?: () => Promise<void>;
   } = {},
 ) {
-  const { app, postHandlers } = createBrowserRouteApp();
+  const routes = createRouteFixture();
   const profileCtx = {
     profile: {
       name: "openclaw",
@@ -80,21 +80,16 @@ async function callGrant(
     },
     ensureBrowserAvailable: vi.fn(options.ensureBrowserAvailable ?? (async () => {})),
   };
-  registerBrowserPermissionRoutes(app, {
+  registerBrowserPermissionRoutes(routes.app, {
     state: () => ({
       resolved: { ssrfPolicy: options.ssrfPolicy ?? { allowPrivateNetwork: false } },
     }),
     forProfile: () => profileCtx,
     listProfiles: vi.fn(async () => []),
   } as never);
-  const handler = postHandlers.get("/permissions/grant");
-  expect(handler).toBeTypeOf("function");
-
-  const response = createBrowserRouteResponse();
-  await handler?.(
-    { params: {}, query: {}, body: { origin, permissions: ["audioCapture"], ...body } },
-    response.res,
-  );
+  const response = await routes.request("post", "/permissions/grant", {
+    body: { origin, permissions: ["audioCapture"], ...body },
+  });
   return { response, profileCtx };
 }
 
@@ -140,8 +135,8 @@ describe("browser permission routes", () => {
       { commandTimeoutMs: 1234, lookup: undefined, signal: expect.any(AbortSignal) },
     );
     expect(cdpMocks.send).toHaveBeenCalledWith("Browser.grantPermissions", {
-      origin: "https://meet.google.com",
-      permissions: ["audioCapture", "videoCapture", "speakerSelection"],
+      origin,
+      permissions: [...requiredPermissions, ...optionalPermissions],
     });
   });
 
@@ -216,13 +211,11 @@ describe("browser permission routes", () => {
       }
       return {};
     });
-
     const { response } = await callGrant({ ...mediaRequest, origin });
-
     expectGrant(response, "cdp", optionalPermissions);
     expect(cdpMocks.send).toHaveBeenNthCalledWith(2, "Browser.grantPermissions", {
-      origin: "https://meet.google.com",
-      permissions: ["audioCapture", "videoCapture"],
+      origin,
+      permissions: requiredPermissions,
     });
   });
 });

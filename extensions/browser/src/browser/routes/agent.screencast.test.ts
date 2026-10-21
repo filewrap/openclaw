@@ -11,8 +11,9 @@ import {
   markBrowserRuntimeStopping,
 } from "../server-context.lifecycle.js";
 import { makeBrowserProfile, makeBrowserServerState } from "../server-context.test-harness.js";
+import { expectResponseContaining, runRoute } from "./agent-route.test-support.js";
 import { registerBrowserAgentScreencastRoutes } from "./agent.screencast.js";
-import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
+import { createBrowserRouteApp } from "./test-helpers.js";
 import type { BrowserRequest } from "./types.js";
 
 const pw = vi.hoisted(() => ({ available: true }));
@@ -59,14 +60,8 @@ function setup(options: { existingSession?: boolean; url?: string; listedUrl?: s
     state,
     runtime,
     ensureTabAvailable,
-    request: async (
-      body: Record<string, unknown> = {},
-      requester?: BrowserRequest["requester"],
-    ) => {
-      const response = createBrowserRouteResponse();
-      await route({ params: {}, query: {}, body, requester }, response.res);
-      return response;
-    },
+    request: (body: Record<string, unknown> = {}, requester?: BrowserRequest["requester"]) =>
+      runRoute(route, { body, requester }),
   };
 }
 
@@ -94,8 +89,7 @@ describe("browser screencast mint route", () => {
     }
     const response = await request({}, requester);
     expect(connection.signal.aborted).toBe(abort);
-    expect(response.statusCode).toBe(401);
-    expect(response.body).toMatchObject({ code: "SCREENCAST_REQUESTER_GONE" });
+    expectResponseContaining(response, { code: "SCREENCAST_REQUESTER_GONE" }, 401);
     expect(response.body).not.toHaveProperty("token");
   });
 
@@ -120,12 +114,15 @@ describe("browser screencast mint route", () => {
   ])("reports $reason as unsupported", async ({ existingSession, playwright, reason }) => {
     pw.available = playwright;
     const response = await setup({ existingSession }).request();
-    expect(response.statusCode).toBe(501);
-    expect(response.body).toMatchObject({
-      error: expect.any(String),
-      code: "SCREENCAST_UNSUPPORTED",
-      reason,
-    });
+    expectResponseContaining(
+      response,
+      {
+        error: expect.any(String),
+        code: "SCREENCAST_UNSUPPORTED",
+        reason,
+      },
+      501,
+    );
   });
 
   it("mints an expiring token scoped to the resolved target with bounded capture options", async () => {
@@ -134,8 +131,7 @@ describe("browser screencast mint route", () => {
     const response = await request({ targetId: "t1", maxWidth: 17, maxHeight: 9000, quality: 99 });
     const body = response.body as { token: string; wsPath: string; expiresAtMs: number };
 
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toMatchObject({
+    expectResponseContaining(response, {
       token: expect.stringMatching(/^[a-f0-9]{48}$/),
       wsPath: `/browser/screencast?token=${body.token}`,
       targetId: "resolved-tab",
@@ -169,8 +165,7 @@ describe("browser screencast mint route", () => {
 
   it("blocks minting for a disallowed current tab through the shared route guard", async () => {
     const response = await setup({ url: "http://127.0.0.1/private" }).request();
-    expect(response.statusCode).toBe(400);
-    expect(response.body).toMatchObject({ reason: "navigation_blocked" });
+    expectResponseContaining(response, { reason: "navigation_blocked" }, 400);
     expect(response.body).not.toHaveProperty("token");
   });
 
@@ -193,7 +188,6 @@ describe("browser screencast mint route", () => {
 
   it("redacts a newly blocked listed URL in the mint response", async () => {
     const response = await setup({ listedUrl: "http://127.0.0.1/private" }).request();
-    expect(response.statusCode).toBe(200);
-    expect(response.body).toMatchObject({ token: expect.any(String), url: undefined });
+    expectResponseContaining(response, { token: expect.any(String), url: undefined });
   });
 });

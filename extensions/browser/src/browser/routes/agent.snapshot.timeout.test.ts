@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createBrowserRouteApp, createBrowserRouteResponse } from "./test-helpers.js";
+import "./agent.snapshot-mocks.test-support.js";
+import { runRoute } from "./agent-route.test-support.js";
+import { createBrowserRouteApp } from "./test-helpers.js";
 
 const cdpMocks = vi.hoisted(() => ({
   captureScreenshot: vi.fn(),
@@ -34,22 +36,6 @@ vi.mock("../cdp.js", async (importOriginal) => ({
   captureScreenshot: cdpMocks.captureScreenshot,
 }));
 
-vi.mock("../screenshot.js", () => ({
-  DEFAULT_BROWSER_SCREENSHOT_MAX_BYTES: 128,
-  DEFAULT_BROWSER_SCREENSHOT_MAX_SIDE: 64,
-  normalizeBrowserScreenshot: vi.fn(async (buffer: Buffer) => ({
-    buffer,
-    sourceDimensions: null,
-    contentType: "image/png",
-  })),
-}));
-
-vi.mock("openclaw/plugin-sdk/media-runtime", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("openclaw/plugin-sdk/media-runtime")>()),
-  ensureMediaDir: vi.fn(async () => {}),
-  saveMediaBuffer: vi.fn(async () => ({ path: "/tmp/fake.png" })),
-}));
-
 vi.mock("./agent.shared.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./agent.shared.js")>()),
   requirePwAi: vi.fn(async () => pwMocks),
@@ -81,11 +67,7 @@ async function screenshot(body: Record<string, unknown> = {}) {
   registerBrowserAgentSnapshotRoutes(app, {
     state: () => ({ resolved: { extraArgs: [] }, profiles: browserRuntime.profiles }),
   } as never);
-  const handler = postHandlers.get("/screenshot");
-  expect(handler).toBeTypeOf("function");
-  const response = createBrowserRouteResponse();
-  await handler?.({ params: {}, query: {}, body: { type: "png", ...body } }, response.res);
-  return response;
+  return await runRoute(postHandlers.get("/screenshot"), { body: { type: "png", ...body } });
 }
 
 describe("browser agent snapshot timeout routing", () => {

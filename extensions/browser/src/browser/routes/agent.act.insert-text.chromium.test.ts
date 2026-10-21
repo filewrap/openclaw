@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { registerBrowserAgentActRoutes } from "./agent.act.js";
 import { withChromiumPage } from "./chromium.test-support.js";
 
+function selectInput(element: Element) {
+  const input = element as HTMLInputElement;
+  input.focus();
+  input.setSelectionRange(7, 10);
+}
+
 describe.runIf(process.env.OPENCLAW_BROWSER_PASTE_E2E === "1")("Chromium focused paste", () => {
   it("inserts at the selection in password, multiline, editable, and cross-origin fields", async () => {
     await withChromiumPage(
@@ -27,11 +33,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_PASTE_E2E === "1")("Chromium focused
           ["#multiline", "  first 🦞\nsecond  "],
         ] as const) {
           const field = page.locator(selector);
-          await field.evaluate((element) => {
-            const input = element as HTMLInputElement;
-            input.focus();
-            input.setSelectionRange(7, 10);
-          });
+          await field.evaluate(selectInput);
           await paste(text);
           expect(await field.inputValue()).toBe(`before-${text}-after`);
         }
@@ -51,11 +53,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_PASTE_E2E === "1")("Chromium focused
         expect(await editable.textContent()).toBe("before-editable 🦞-after");
 
         const frameField = page.frameLocator("iframe").locator("#frame");
-        await frameField.evaluate((element) => {
-          const input = element as HTMLInputElement;
-          input.focus();
-          input.setSelectionRange(7, 10);
-        });
+        await frameField.evaluate(selectInput);
         await paste("iframe 🦞");
         expect(await frameField.inputValue()).toBe("before-iframe 🦞-after");
         expect(await page.locator("#password").inputValue()).toBe("before-  p🦞ss  -after");

@@ -181,6 +181,13 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
         nodes: { ref: string; role: string; name: string }[];
       };
     }
+    const capture = async (query: Record<string, unknown>, signal?: AbortSignal) =>
+      ok(await snapshot(query, signal));
+    async function expectClick(ref: string | undefined, value: string) {
+      const action = await click(ref);
+      expect(action.statusCode, JSON.stringify(action.body)).toBe(200);
+      expect(await page.locator("output").textContent()).toBe(value);
+    }
 
     it.each(cases)(
       "preserves %s identity",
@@ -225,14 +232,12 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
             }
           });
         });
-        const result = ok(
-          await snapshot({
-            interactive: true,
-            selector: "#selected",
-            ...(fixtureCase.frame ? { frame: "#frame" } : {}),
-            depth: fixtureCase.depth,
-          }),
-        );
+        const result = await capture({
+          interactive: true,
+          selector: "#selected",
+          ...(fixtureCase.frame ? { frame: "#frame" } : {}),
+          depth: fixtureCase.depth,
+        });
         const refs = [...result.snapshot.matchAll(/\[ref=([^\]]+)\]/g)]
           .map((match) => match[1]!)
           .filter(
@@ -302,12 +307,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
           } else {
             await older;
           }
-          const newerBody = ok(
-            await snapshot({
-              selector: "#b",
-              interactive: true,
-            }),
-          );
+          const newerBody = await capture({ selector: "#b", interactive: true });
           const ref = expectDefined(
             Object.entries(newerBody.refs).find(([, value]) => value.name === "B")?.[0],
             "B snapshot ref",
@@ -316,10 +316,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
           await settled.promise;
           await older;
           await markersGone();
-          const action = await click(ref);
-          const clicked = await page.locator("output").textContent();
-          expect(action.statusCode, JSON.stringify(action.body)).toBe(200);
-          expect(clicked).toBe("b");
+          await expectClick(ref, "b");
         } finally {
           marking.resolve();
           await older;
@@ -422,21 +419,18 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
       routes = routeApp(proxyUrl, "clear");
       let older: ReturnType<typeof call> | undefined;
       try {
-        ok(await snapshot({ selector: "#b" }));
+        await capture({ selector: "#b" });
         const controller = new AbortController();
         armed = true;
         older = snapshot({ selector: "#a", timeoutMs: 10_000 }, controller.signal);
         await atBarrier(entered.promise, older, "missing native clear barrier");
         controller.abort(new Error("cancel after native pre-clear read"));
-        const newer = ok(await snapshot({ selector: "#b" }));
+        const newer = await capture({ selector: "#b" });
         const ref = Object.keys(newer.refs)[0]!;
         release();
         await older;
         await markersGone();
-        const action = await click(ref);
-        const clicked = await page.locator("output").textContent();
-        expect(action.statusCode, JSON.stringify(action.body)).toBe(200);
-        expect(clicked).toBe("b");
+        await expectClick(ref, "b");
       } finally {
         release();
         await older;
@@ -488,7 +482,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
           });
           observer.observe(document.body, { attributes: true, subtree: true });
         });
-        const result = ok(await snapshot({ format, interactive: true }));
+        const result = await capture({ format, interactive: true });
         expect(await page.locator("#second").count()).toBe(0);
         const refs =
           format === "aria"
@@ -510,12 +504,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
           document.querySelector("output")!.textContent = "outside";
         }),
       );
-      const result = ok(
-        await snapshot({
-          selector: "#selected",
-          interactive: true,
-        }),
-      );
+      const result = await capture({ selector: "#selected", interactive: true });
       const ref = Object.keys(result.refs)[0];
       await page.locator("#selected").evaluate((el) => el.remove());
       const action = await click(ref);
@@ -530,12 +519,7 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
         `<a href="https://parent.test/docs">Parent docs</a><iframe id="frame" src="http://localhost:${fixturePort}/child"></iframe>`,
       );
       await page.frameLocator("#frame").getByRole("link").waitFor();
-      const result = ok(
-        await snapshot({
-          frame: "#frame",
-          urls: true,
-        }),
-      );
+      const result = await capture({ frame: "#frame", urls: true });
       expect(result.snapshot).toContain("Frame docs -> https://frame.test/docs");
       expect(result.snapshot).not.toContain("https://parent.test/docs");
     });
