@@ -37,13 +37,8 @@ vi.mock("../../agents/auth-profiles.js", () => ({
   resolveAuthStatePathForDisplay: mocks.resolveAuthStatePathForDisplay,
 }));
 
-vi.mock("./load-config.js", () => ({
-  loadModelsConfig: mocks.loadModelsConfig,
-}));
-
-vi.mock("./shared.js", () => ({
-  resolveModelsTargetAgent: mocks.resolveModelsTargetAgent,
-}));
+vi.mock("./load-config.js", () => ({ loadModelsConfig: mocks.loadModelsConfig }));
+vi.mock("./shared.js", () => ({ resolveModelsTargetAgent: mocks.resolveModelsTargetAgent }));
 
 const NOW = Date.parse("2026-08-30T00:00:00.000Z");
 
@@ -62,6 +57,10 @@ async function listBoth() {
 
 function expectProfile(json: unknown, profile: Record<string, unknown>) {
   expect(json).toMatchObject({ profiles: [expect.objectContaining(profile)] });
+}
+
+function summary(id: string, type: string, fields = {}) {
+  return { id, label: id, provider: id.split(":")[0], type, ...fields };
 }
 
 function setOAuthProfile(
@@ -167,12 +166,7 @@ describe("modelsAuthListCommand", () => {
         },
         { trustConfigIdentity: true },
       );
-      const identity = {
-        id: "my-gateway:manual",
-        label: "my-gateway:manual",
-        provider: "my-gateway",
-        type: "api_key",
-      };
+      const identity = summary("my-gateway:manual", "api_key");
       if (bypassed) {
         expect(json).toMatchObject({ profiles: [identity] });
         expect(text.at(-1)).toBe("- my-gateway:manual [my-gateway/api_key]");
@@ -300,11 +294,7 @@ describe("modelsAuthListCommand", () => {
           email: "user@example.com",
         }),
         "openai:api-key-backup": createApiKeyCredential("openai", "sk-secret"),
-        "anthropic:manual": {
-          type: "token",
-          provider: "anthropic",
-          token: "token-secret",
-        },
+        "anthropic:manual": { type: "token", provider: "anthropic", token: "token-secret" },
       });
       if (expires === 8_700_000_000_000_000) {
         store.usageStats = { "openai:user@example.com": { cooldownUntil: expires } };
@@ -322,20 +312,11 @@ describe("modelsAuthListCommand", () => {
           agentId: "main",
           authStatePath: "/tmp/openclaw/agents/main/openclaw-agent.sqlite",
           profiles: [
-            {
-              id: "openai:api-key-backup",
-              label: "openai:api-key-backup",
-              provider: "openai",
-              type: "api_key",
-            },
-            {
+            summary("openai:api-key-backup", "api_key"),
+            summary("openai:user@example.com", "oauth", {
               email: "user@example.com",
               ...expectedExpiry,
-              id: "openai:user@example.com",
-              label: "openai:user@example.com",
-              provider: "openai",
-              type: "oauth",
-            },
+            }),
           ],
           provider: "openai",
         },
