@@ -27,13 +27,7 @@ describe("OpenClaw state snapshot sanitizer", () => {
 
   afterEach(() => database.close());
 
-  it("redacts the exec approvals socket token without dropping policy", () => {
-    const raw = JSON.stringify({
-      version: 1,
-      socket: { path: "/tmp/exec.sock", token: "secret-token" },
-      defaults: { security: "allowlist" },
-      agents: {},
-    });
+  function sanitize(raw: string) {
     database
       .prepare(
         `INSERT INTO exec_approvals_config (
@@ -43,12 +37,21 @@ describe("OpenClaw state snapshot sanitizer", () => {
         ) VALUES (?, ?, '/stale.sock', 1, 'full', 'always', 'full', 1, 9, 9, 1)`,
       )
       .run("current", raw);
-
     sanitizeOpenClawGlobalStateSnapshot(database);
-
-    const row = database
+    return database
       .prepare("SELECT * FROM exec_approvals_config WHERE config_key = 'current'")
       .get() as ApprovalRow;
+  }
+
+  it("redacts the exec approvals socket token without dropping policy", () => {
+    const row = sanitize(
+      JSON.stringify({
+        version: 1,
+        socket: { path: "/tmp/exec.sock", token: "secret-token" },
+        defaults: { security: "allowlist" },
+        agents: {},
+      }),
+    );
     expect(row).toMatchObject({
       socket_path: "/tmp/exec.sock",
       has_socket_token: 0,
@@ -88,21 +91,7 @@ describe("OpenClaw state snapshot sanitizer", () => {
       "nested-secret-token",
     ],
   ])("replaces %s policy with a fail-closed secret-free document", (_label, raw, secret) => {
-    database
-      .prepare(
-        `INSERT INTO exec_approvals_config (
-          config_key, raw_json, socket_path, has_socket_token,
-          default_security, default_ask, default_ask_fallback, auto_allow_skills,
-          agent_count, allowlist_count, updated_at_ms
-        ) VALUES (?, ?, '/stale.sock', 1, 'full', 'always', 'full', 1, 9, 9, 1)`,
-      )
-      .run("current", raw);
-
-    sanitizeOpenClawGlobalStateSnapshot(database);
-
-    const row = database
-      .prepare("SELECT * FROM exec_approvals_config WHERE config_key = 'current'")
-      .get() as Record<string, unknown> & { raw_json: string };
+    const row = sanitize(raw);
     expect(row).toMatchObject({
       socket_path: null,
       has_socket_token: 0,
