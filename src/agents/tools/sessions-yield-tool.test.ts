@@ -118,9 +118,9 @@ describe("sessions_yield tool", () => {
     expect(onYield).not.toHaveBeenCalled();
   });
 
-  it("reports children an earlier turn already waits for instead of the generic error", async () => {
-    const pendingChildren = [
-      {
+  it.each([
+    {
+      child: {
         runId: "run-child",
         childSessionKey: "agent:main:dashboard:child",
         label: "Work session",
@@ -128,43 +128,32 @@ describe("sessions_yield tool", () => {
         state: "running" as const,
         wakeArmed: true,
       },
-    ];
-    const { onYield, execute } = setup({ claimYield: () => ({ pendingChildren }) });
-    const result = await execute();
-
-    expect(isToolResultError(result)).toBe(false);
-    expect(result.details).toMatchObject({
-      status: "already_pending",
       message:
         "An earlier turn of this session already yielded for 1 child session whose completion is still pending: Work session (agent:main:dashboard:child), running, started 2026-09-21T02:50:52.000Z. Their completion will arrive in this session as a later turn; do not re-spawn, re-send, or poll to wake them. This turn owns no new claim, so no yield is needed: end this turn normally.",
-    });
-    expect(result.details).toHaveProperty("pendingChildren", pendingChildren);
-    expect(onYield).not.toHaveBeenCalled();
-  });
-
-  it("tells the model a paused child needs a continuation instead of promising completion", async () => {
-    const { onYield, execute } = setup({
-      claimYield: () => ({
-        pendingChildren: [
-          {
-            runId: "run-paused",
-            childSessionKey: "agent:main:subagent:worker",
-            startedAt: Date.UTC(2026, 8, 21, 3, 0, 0),
-            state: "paused" as const,
-            wakeArmed: false,
-          },
-        ],
-      }),
-    });
-
-    const result = await execute();
-    expect(result.details).toMatchObject({
-      status: "already_pending",
+    },
+    {
+      child: {
+        runId: "run-paused",
+        childSessionKey: "agent:main:subagent:worker",
+        startedAt: Date.UTC(2026, 8, 21, 3, 0, 0),
+        state: "paused" as const,
+        wakeArmed: false,
+      },
       message:
         "1 child session spawned by an earlier turn of this session is paused by its own sessions_yield and will not complete until an incoming continuation arrives: agent:main:subagent:worker, paused, started 2026-09-21T03:00:00.000Z. An authorized caller can send that continuation with sessions_send; owning a child does not grant that tool. Otherwise the work stays waiting. This turn owns no new claim, so no yield is needed: end this turn normally.",
-    });
-    expect(onYield).not.toHaveBeenCalled();
-  });
+    },
+  ])(
+    "explains the earlier $child.state child without claiming a new yield",
+    async ({ child, message }) => {
+      const pendingChildren = [child];
+      const { onYield, execute } = setup({ claimYield: () => ({ pendingChildren }) });
+      const result = await execute();
+      expect(isToolResultError(result)).toBe(false);
+      expect(result.details).toMatchObject({ status: "already_pending", message });
+      expect(result.details).toHaveProperty("pendingChildren", pendingChildren);
+      expect(onYield).not.toHaveBeenCalled();
+    },
+  );
 
   it("passes explicit message intent to its owner without treating private text as intent", async () => {
     const claimYield = vi.fn(() => true);
