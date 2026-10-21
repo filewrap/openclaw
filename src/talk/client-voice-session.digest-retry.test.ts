@@ -44,9 +44,8 @@ import { clientVoiceSessionTesting as testing } from "./client-voice-session.tes
 import { VoiceTranscriptOperationRegistry } from "./voice-transcript.js";
 
 // Install digest mocks before the persistence graph loads.
-const { useClientVoiceDigestHarness, withClientVoiceDigestSettlement } = await vi.hoisted(
-  () => import("./client-voice-session.digest-harness.test-support.js"),
-);
+const { useClientVoiceDigestHarness, withClientVoiceDigestSettlement, fakeDigestTimers } =
+  await vi.hoisted(() => import("./client-voice-session.digest-harness.test-support.js"));
 const mainTarget = { agentId: "main", sessionKey: "agent:main:main" };
 const advanceRetention = () =>
   vi.advanceTimersByTimeAsync(testing.digestDeliveryPolicy.failureRetentionMs + 1);
@@ -70,6 +69,7 @@ describe("client voice session lifecycle", () => {
     closeVoice,
     recoverStale,
     recordEffect,
+    expectSend,
   } = harness;
 
   it("does not replay or mark a partially delivered digest after expiry and re-record", async () => {
@@ -82,19 +82,15 @@ describe("client voice session lifecycle", () => {
         receipt: { platformMessageIds: ["partial-message"], parts: [], sentAt: 123 },
         error: new Error("partial delivery"),
       }));
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      try {
-        await closeVoice(voiceSessionId);
-        await settle();
-        await advanceRetention();
-        await closeVoice(voiceSessionId);
-        await recoverStale();
-        await settle();
-        expect(send).toHaveBeenCalledOnce();
-        expect(readRecord(voiceSessionId)?.digestDeliveredAt).toBeUndefined();
-      } finally {
-        vi.useRealTimers();
-      }
+      using _ = fakeDigestTimers();
+      await closeVoice(voiceSessionId);
+      await settle();
+      await advanceRetention();
+      await closeVoice(voiceSessionId);
+      await recoverStale();
+      await settle();
+      expect(send).toHaveBeenCalledOnce();
+      expect(readRecord(voiceSessionId)?.digestDeliveredAt).toBeUndefined();
     });
   });
 
@@ -220,9 +216,7 @@ describe("client voice session lifecycle", () => {
         releaseSend.resolve();
         await withinTest(Promise.race([Promise.all(drains), failed.promise]), signal);
         setTestEnvValue("OPENCLAW_STATE_DIR", harness.stateDir);
-        expect(send).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({ to: "channel:original-voice" }),
-        );
+        expectSend({ to: "channel:original-voice" });
         expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
       } finally {
         releaseSend.resolve();
@@ -278,12 +272,10 @@ describe("client voice session lifecycle", () => {
         expect(send).not.toHaveBeenCalled();
         await completeRun("run-2");
         await settle();
-        expect(send).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({
-            to,
-            payloads: [{ text: "Voice call changes\n- message: succeeded\n- message: succeeded" }],
-          }),
-        );
+        expectSend({
+          to,
+          payloads: [{ text: "Voice call changes\n- message: succeeded\n- message: succeeded" }],
+        });
         expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
 
         await closeVoice(voiceSessionId, { sessionKey });
@@ -350,13 +342,11 @@ describe("client voice session lifecycle", () => {
           effects: [{ runId: binding.runId, toolCallId: "queued-effect", status: "succeeded" }],
           digestDeliveredAt: expect.any(Number),
         });
-        expect(send).toHaveBeenCalledExactlyOnceWith(
-          expect.objectContaining({
-            to,
-            durability: "required",
-            payloads: [{ text: "Voice call changes\n- message: succeeded" }],
-          }),
-        );
+        expectSend({
+          to,
+          durability: "required",
+          payloads: [{ text: "Voice call changes\n- message: succeeded" }],
+        });
         releaseReplay();
         expect(resolveClientVoiceRunBinding(binding.runId)).toEqual(
           replacement ? successor : undefined,
@@ -398,27 +388,23 @@ describe("client voice session lifecycle", () => {
       const voiceSessionId = await seedDigest();
       send.mockRejectedValueOnce(new Error("channel offline"));
 
-      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      try {
-        await closeVoice(voiceSessionId);
-        await settle();
+      using _ = fakeDigestTimers();
+      await closeVoice(voiceSessionId);
+      await settle();
 
-        // The run can register before config arrives; an identical replay must
-        // still re-arm the closed session's digest, not return at binding reuse.
-        const binding = { ...mainTarget, voiceSessionId, runId: "late-run" };
-        await registerRun(binding);
-        await registerRun({ ...binding, config: {} });
-        await settle();
-        await advanceRetention();
+      // The run can register before config arrives; an identical replay must
+      // still re-arm the closed session's digest, not return at binding reuse.
+      const binding = { ...mainTarget, voiceSessionId, runId: "late-run" };
+      await registerRun(binding);
+      await registerRun({ ...binding, config: {} });
+      await settle();
+      await advanceRetention();
 
-        await recordMutation(voiceSessionId, "late-run");
-        await completeRun("late-run");
-        await settle();
-        expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
-        expect(send).toHaveBeenCalledTimes(2);
-      } finally {
-        vi.useRealTimers();
-      }
+      await recordMutation(voiceSessionId, "late-run");
+      await completeRun("late-run");
+      await settle();
+      expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
+      expect(send).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -428,13 +414,11 @@ describe("client voice session lifecycle", () => {
       await closeVoice(delivered);
       await closeVoice(delivered);
       await settle();
-      expect(send).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({
-          durability: "required",
-          requireUnknownSendReconciliation: true,
-          payloads: [{ text: "Voice call changes\n- message: succeeded" }],
-        }),
-      );
+      expectSend({
+        durability: "required",
+        requireUnknownSendReconciliation: true,
+        payloads: [{ text: "Voice call changes\n- message: succeeded" }],
+      });
 
       for (const [voiceSessionId, route] of [
         ["voice-webchat", { channel: "webchat", to: "browser" }],

@@ -74,6 +74,10 @@ function createRunTarget(runId = "owned-run") {
   return { runId, signal: new AbortController().signal, isCurrent: () => true };
 }
 
+function createOwner(abort = vi.fn(() => true)) {
+  return { runId: "owned-run", sessionId: "owned-session", sessionKey: "global", abort };
+}
+
 describe("classifyRealtimeVoiceAgentControlText", () => {
   it("keeps ambiguous active-call speech out of automatic steering", () => {
     const safeDefault = {
@@ -134,12 +138,7 @@ describe("controlRealtimeVoiceAgentRun", () => {
       const deps = createDeps({ activeSessionId: "another-agent-session" });
       const abort = vi.fn(() => true);
       const cancelRun = route === "provided callback" ? vi.fn(async () => true) : undefined;
-      const resolveActiveEmbeddedRunOwnerByRunId = vi.fn(() => ({
-        runId: "owned-run",
-        sessionId: "owned-session",
-        sessionKey: "global",
-        abort,
-      }));
+      const resolveActiveEmbeddedRunOwnerByRunId = vi.fn(() => createOwner(abort));
       const result = await control(
         {
           sessionKey: "global",
@@ -241,12 +240,7 @@ describe("controlRealtimeVoiceAgentRun", () => {
       },
       {
         ...deps,
-        resolveActiveEmbeddedRunOwnerByRunId: () => ({
-          runId: "owned-run",
-          sessionId: "owned-session",
-          sessionKey: "global",
-          abort: () => true,
-        }),
+        resolveActiveEmbeddedRunOwnerByRunId: () => createOwner(),
       },
     );
     expect(result).toMatchObject({

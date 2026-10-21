@@ -58,7 +58,7 @@ describe("voice consult concrete store ownership", () => {
     const sessionKey = "agent:main:voice-preparation";
     const storePath = state.statePath("consult", "sessions.sqlite");
     const target = { agentId: "main", sessionKey, storePath };
-    const run = () => consult({ ...target, messageProvider: "voice" });
+    const run = () => consult({ ...target, messageProvider: "voice", senderIsOwner: true });
 
     const revisions = [
       ["workspace", "telegram", "chat:initial", "initial-account"],
@@ -69,11 +69,14 @@ describe("voice consult concrete store ownership", () => {
         sessionId: "voice-session",
         updatedAt: revision + 1,
         permissionMode,
+        toolOverrides: { webSearch: false },
         delivery: normalizeSessionDeliveryState({ context: { channel, to, accountId } }),
       });
       await expect(run()).resolves.toEqual({ text: "Checked" });
       expect(runEmbeddedAgent.mock.calls[revision]?.[0]).toMatchObject({
         permissionMode,
+        toolOverrides: { webSearch: false },
+        traceAuthorized: false,
         messageProvider: channel,
         messageTo: to,
         agentAccountId: accountId,

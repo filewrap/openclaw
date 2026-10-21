@@ -59,6 +59,7 @@ const { useClientVoiceSessionHarness } = await vi.hoisted(
 
 describe("client voice session worker contract", () => {
   const { releaseHeldWrites, sessionTurnMocks } = useClientVoiceSessionHarness();
+  const appendTurn = sessionTurnMocks.appendExpectedSessionTranscriptTurn;
   const target = { agentId: "main", sessionKey: "agent:main:main" };
   const readRecord = (voiceSessionId: string) =>
     clientVoiceSessionTesting.readRecord(target.agentId, voiceSessionId);
@@ -66,6 +67,14 @@ describe("client voice session worker contract", () => {
     params: Partial<Parameters<typeof createOrResumeClientVoiceSession>[0]> = {},
     writer?: Parameters<typeof createOrResumeClientVoiceSession>[1],
   ) => createOrResumeClientVoiceSession({ ...target, origin: "client", ...params }, writer);
+  async function seededVoice() {
+    await seedSession(target.sessionKey);
+    return createVoice();
+  }
+  const closeVoice = (voiceSessionId: string) =>
+    closeClientVoiceSession({ ...target, voiceSessionId, config: {} });
+  const flushVoice = (voiceSessionId: string) =>
+    flushClientVoiceSessionWrites({ ...target, voiceSessionId });
   const appendTranscript = (voiceSessionId: string, entryId: string, text: string) =>
     appendClientVoiceTranscript({
       ...target,
@@ -185,7 +194,7 @@ describe("client voice session worker contract", () => {
       await createVoice({ voiceSessionId });
       await recordMutation(voiceSessionId);
       await appendTranscript(voiceSessionId, "user-1", "Send the update");
-      await closeClientVoiceSession({ ...target, voiceSessionId, config: {} });
+      await closeVoice(voiceSessionId);
       expect(observation.queries.filter((sql) => /\bcache_entries\b/i.test(sql))).toEqual([]);
     } finally {
       observation.restore();
@@ -270,12 +279,10 @@ describe("client voice session worker contract", () => {
         expect(await outcome).toEqual({ ok: true });
         expect(released).toEqual(["source", "writer"]);
         expect(voiceSessionId).toEqual(expect.any(String));
-        expect(clientVoiceSessionTesting.readRecord(target.agentId, voiceSessionId!)).toMatchObject(
-          {
-            status: "open",
-            ...(operation === "consult" ? { consultRunIds: [runId] } : {}),
-          },
-        );
+        expect(readRecord(voiceSessionId!)).toMatchObject({
+          status: "open",
+          ...(operation === "consult" ? { consultRunIds: [runId] } : {}),
+        });
         if (operation === "consult") {
           expect(resolveClientVoiceRunBinding(runId)).toEqual({ ...target, voiceSessionId });
           expect(releaseRun).toEqual(expect.any(Function));
@@ -295,8 +302,7 @@ describe("client voice session worker contract", () => {
   );
 
   it("preserves transcript, flush, and close acknowledgements when writer cleanup fails", async () => {
-    await seedSession(target.sessionKey);
-    const voiceSessionId = await createVoice();
+    const voiceSessionId = await seededVoice();
     const cleanupError = new Error("synthetic accepted voice writer cleanup failure");
     const capture = voiceWriters.captureClientVoiceSessionWriter;
     const captureSpy = vi
@@ -316,12 +322,8 @@ describe("client voice session worker contract", () => {
           "Keep the committed transcript acknowledgement",
         ),
       ).resolves.toBeUndefined();
-      await expect(
-        flushClientVoiceSessionWrites({ ...target, voiceSessionId }),
-      ).resolves.toBeUndefined();
-      await expect(
-        closeClientVoiceSession({ ...target, voiceSessionId, config: {} }),
-      ).resolves.toBeUndefined();
+      await expect(flushVoice(voiceSessionId)).resolves.toBeUndefined();
+      await expect(closeVoice(voiceSessionId)).resolves.toBeUndefined();
       await close.drain();
       expect(readRecord(voiceSessionId)).toMatchObject({
         status: "closed",
@@ -660,7 +662,7 @@ describe("client voice session worker contract", () => {
       expect(atDrain?.effects).toEqual(expectedEffects);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("admission is closed"));
       await flushOriginalWorker();
-      await flushClientVoiceSessionWrites({ agentId: target.agentId, voiceSessionId });
+      await flushVoice(voiceSessionId);
       expect(readRecord(voiceSessionId)?.effects).toEqual([]);
       setTestEnvValue("OPENCLAW_STATE_DIR", originalStateDir);
       expect(readRecord(voiceSessionId)?.effects).toEqual(expectedEffects);
@@ -688,20 +690,19 @@ describe("client voice session worker contract", () => {
     } finally {
       observation.restore();
     }
-    await closeClientVoiceSession({ ...binding, config: {} });
+    await closeVoice(voiceSessionId);
     expect(() => assertClientVoiceSessionOpen(binding)).toThrow("voice session is closed");
     expect(readRecord(voiceSessionId)?.transcriptCapable).toBe(true);
   });
 
   it("rejects a transcript after another connection closes the admitted call", async () => {
-    await seedSession(target.sessionKey);
-    const voiceSessionId = await createVoice();
+    const voiceSessionId = await seededVoice();
     expect(assertClientVoiceSessionOpen({ ...target, voiceSessionId })).toBe("client");
     mutateForeignVoice(voiceSessionId, "'$.status', 'closed', '$.closedAt', 42");
     await expect(
       appendTranscript(voiceSessionId, "foreign-close", "This call has already closed"),
     ).rejects.toThrow("voice session is closed");
-    expect(sessionTurnMocks.appendExpectedSessionTranscriptTurn).not.toHaveBeenCalled();
+    expect(appendTurn).not.toHaveBeenCalled();
     expect(readRecord(voiceSessionId)).toMatchObject({
       status: "closed",
       closedAt: 42,
@@ -710,8 +711,7 @@ describe("client voice session worker contract", () => {
   });
 
   it("publishes transcripts only after their voice bookkeeping commits", async () => {
-    await seedSession(target.sessionKey);
-    const voiceSessionId = await createVoice();
+    const voiceSessionId = await seededVoice();
     const observed: Array<{
       transcript: ReturnType<typeof readSessionTranscriptMessageEvents>;
       voice: ReturnType<typeof clientVoiceSessionTesting.readRecord>;
@@ -854,14 +854,13 @@ describe("client voice session worker contract", () => {
   );
 
   it("rolls back the transcript when voice ownership changes after reservation", async () => {
-    await seedSession(target.sessionKey);
-    const voiceSessionId = await createVoice();
+    const voiceSessionId = await seededVoice();
     const actualAppend = sessionTurnMocks.actualAppendSessionTranscriptTurn;
     if (!actualAppend) {
       throw new Error("expected the real transcript append implementation");
     }
     let reserved: ReturnType<typeof clientVoiceSessionTesting.readRecord>;
-    sessionTurnMocks.appendExpectedSessionTranscriptTurn.mockImplementationOnce(async (...args) => {
+    appendTurn.mockImplementationOnce(async (...args) => {
       reserved = readRecord(voiceSessionId);
       mutateForeignVoice(voiceSessionId, "'$.sessionKey', ?", "agent:main:replacement");
       return actualAppend(...args);

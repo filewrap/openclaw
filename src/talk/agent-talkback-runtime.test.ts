@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import { createRealtimeVoiceAgentTalkbackQueue } from "./agent-talkback-runtime.js";
 
 beforeEach(() => vi.useFakeTimers());
@@ -23,13 +24,10 @@ function createQueue(params: Pick<QueueParams, "consult"> & Partial<QueueParams>
 }
 
 async function createPendingQueue(debounceMs = 1) {
-  let resolve!: (value: { text: string }) => void;
-  const pending = new Promise<{ text: string }>((done) => {
-    resolve = done;
-  });
+  const pending = createDeferred<{ text: string }>();
   const consult = vi
     .fn<QueueParams["consult"]>()
-    .mockImplementationOnce(() => pending)
+    .mockImplementationOnce(() => pending.promise)
     .mockResolvedValue({ text: "queued-answer" });
   const fixture = createQueue({ consult, debounceMs });
   fixture.queue.enqueue("first");
@@ -38,7 +36,7 @@ async function createPendingQueue(debounceMs = 1) {
     ...fixture,
     consult,
     finish: async () => {
-      resolve({ text: "first-answer" });
+      pending.resolve({ text: "first-answer" });
       await vi.runAllTimersAsync();
     },
   };
@@ -124,10 +122,7 @@ describe("realtime voice agent talkback queue", () => {
 
   it("cancels pending debounced work on close", async () => {
     const consult = vi.fn(async () => ({ text: "answer" }));
-    const { queue } = createQueue({
-      debounceMs: 100,
-      consult,
-    });
+    const { queue } = createQueue({ debounceMs: 100, consult });
 
     queue.enqueue("question");
     queue.close();

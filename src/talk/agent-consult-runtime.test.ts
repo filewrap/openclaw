@@ -134,11 +134,7 @@ const forkConsult = (runtime: TestRuntime, params: Partial<ConsultParams> = {}) 
 function requireEmbeddedAgentCall(
   runEmbeddedAgent: ReturnType<typeof createAgentRuntime>["runEmbeddedAgent"],
 ): RunEmbeddedAgentParams {
-  const params = runEmbeddedAgent.mock.calls[0]?.[0];
-  if (!params) {
-    throw new Error("Expected embedded OpenClaw agent call");
-  }
-  return params;
+  return expectDefined(runEmbeddedAgent.mock.calls[0]?.[0], "embedded OpenClaw agent call");
 }
 
 function expectPositiveTimestamp(value: unknown) {
@@ -353,25 +349,6 @@ describe("realtime voice agent consult runtime", () => {
     );
   });
 
-  it("carries current voice session permissions without enabling owner trace", async () => {
-    const { runtime, runEmbeddedAgent, sessionStore } = createAgentRuntime();
-    sessionStore["agent:main:voice"] = {
-      sessionId: "voice-session",
-      updatedAt: 1,
-      permissionMode: "workspace",
-      toolOverrides: { webSearch: false },
-    };
-    await runConsult(runtime, {
-      sessionKey: "agent:main:voice",
-      senderIsOwner: true,
-    });
-    expect(requireEmbeddedAgentCall(runEmbeddedAgent)).toMatchObject({
-      permissionMode: "workspace",
-      toolOverrides: { webSearch: false },
-      traceAuthorized: false,
-    });
-  });
-
   it.each(["consult", "requester"])(
     "fails closed before forking or dispatching from a locked %s session",
     async (lockedSession) => {
@@ -461,36 +438,36 @@ describe("realtime voice agent consult runtime", () => {
     expect(cleanup).toHaveBeenCalledOnce();
   });
 
-  it("returns a speakable fallback when the embedded agent has no visible text", async () => {
-    const warn = vi.fn();
-    const { runtime } = createAgentRuntime([
-      setReplyPayloadMetadata({ text: "Earlier answer." }, { precedingInputAnswer: true }),
-      { text: "hidden", isReasoning: true },
-    ]);
-
-    const result = await runConsult(runtime, {
-      logger: { warn },
-      fallbackText: "Let me verify that first.",
-    });
-
-    expect(result).toEqual({ text: "Let me verify that first." });
-    expect(warn).toHaveBeenCalledWith(
-      "[talk] agent consult produced no answer: agent returned no speakable text",
-    );
-  });
-
-  it("returns a yielded acknowledgement immediately without waiting for a visible final", async () => {
-    const warn = vi.fn();
-    const { runtime, runEmbeddedAgent } = createAgentRuntime();
-    runEmbeddedAgent.mockResolvedValueOnce({
+  it.each([
+    {
+      label: "a speakable fallback when the embedded agent has no visible text",
+      payloads: [
+        setReplyPayloadMetadata({ text: "Earlier answer." }, { precedingInputAnswer: true }),
+        { text: "hidden", isReasoning: true },
+      ],
+      meta: {},
+      expected: { text: "Let me verify that first." },
+      warning: "[talk] agent consult produced no answer: agent returned no speakable text",
+    },
+    {
+      label: "a yielded acknowledgement without waiting for a visible final",
       payloads: [],
       meta: { yielded: true, yieldAcknowledgment: "  Working on it.   I will report back.  " },
-    });
-
-    const result = await runConsult(runtime, { logger: { warn } });
-
-    expect(result).toEqual({ text: "Working on it. I will report back.", yielded: true });
-    expect(warn).not.toHaveBeenCalled();
+      expected: { text: "Working on it. I will report back.", yielded: true },
+      warning: undefined,
+    },
+  ])("returns $label", async ({ payloads, meta, expected, warning }) => {
+    const warn = vi.fn();
+    const { runtime, runEmbeddedAgent } = createAgentRuntime();
+    runEmbeddedAgent.mockResolvedValueOnce({ payloads, meta });
+    await expect(
+      runConsult(runtime, { logger: { warn }, fallbackText: "Let me verify that first." }),
+    ).resolves.toEqual(expected);
+    if (warning) {
+      expect(warn).toHaveBeenCalledWith(warning);
+    } else {
+      expect(warn).not.toHaveBeenCalled();
+    }
   });
 
   it("forks requester context and inherits its required creator isolation", async () => {
@@ -533,7 +510,6 @@ describe("realtime voice agent consult runtime", () => {
       sessionStore["agent:main:subagent:google-meet:meet-1"],
       "forked voice session",
     );
-    expect(forkedEntry).toBeDefined();
     expect(forkedEntry).toStrictEqual({
       sessionId: "forked-session",
       spawnedBy: "agent:main:main",

@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { afterEach, beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, expect, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import {
@@ -116,6 +116,11 @@ export function useClientVoiceDigestHarness() {
         ...params,
         voiceSessionId,
       }),
+    expectSend(properties: object) {
+      expect(sendDurableMessageBatch).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining(properties),
+      );
+    },
     recoverStale: (params: Partial<Parameters<typeof closeStaleClientVoiceSessions>[0]> = {}) =>
       closeStaleClientVoiceSessions({ agentId: "main", config: {}, ...params }),
     recordEffect(this: void, runId: string, toolCallId: string) {
@@ -138,6 +143,11 @@ export function useClientVoiceDigestHarness() {
       return stateDir;
     },
   };
+}
+
+export function fakeDigestTimers() {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  return { [Symbol.dispose]: () => vi.useRealTimers() };
 }
 
 /** Give each delivery attempt its real settlement barrier without sealing later test phases. */

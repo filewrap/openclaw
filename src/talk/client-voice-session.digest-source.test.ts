@@ -45,14 +45,15 @@ import {
 import { clientVoiceSessionTesting } from "./client-voice-session.test-support.js";
 
 // Install digest mocks before the persistence graph loads.
-const { useClientVoiceDigestHarness } = await vi.hoisted(
+const { useClientVoiceDigestHarness, fakeDigestTimers: fakeTimers } = await vi.hoisted(
   () => import("./client-voice-session.digest-harness.test-support.js"),
 );
 
 const harness = useClientVoiceDigestHarness();
 const target = { agentId: "main", sessionKey: "agent:main:main" };
 const {
-  sendDurableMessageBatch,
+  sendDurableMessageBatch: send,
+  expectSend,
   settleDigestAttempts,
   seedDigest,
   holdSend,
@@ -62,10 +63,6 @@ const {
   recordEffect,
 } = harness;
 
-function fakeTimers() {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  return { [Symbol.dispose]: () => vi.useRealTimers() };
-}
 const silenceWarnings = () => vi.spyOn(console, "warn").mockImplementation(() => {});
 async function displaceMetadata(savedPath: string, replacement: boolean) {
   const metadataPath = resolveOpenClawAgentSqlitePath(target);
@@ -100,7 +97,7 @@ it("records a missing conversation instead of silently completing its digest", a
   await closeVoice(voiceSessionId);
   await closing.drain();
   expect(warning).toHaveBeenCalledWith(expect.stringContaining("conversation not found"));
-  expect(sendDurableMessageBatch).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
 });
 
 it("does not retry an unknown digest marker when writer cleanup also fails", async () => {
@@ -124,7 +121,7 @@ it("does not retry an unknown digest marker when writer cleanup also fails", asy
     await closeVoice(voiceSessionId, target);
     await settleDigestAttempts();
     expect(attempts).toBe(1);
-    expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("settlement is unknown"));
     expect(readRecord(voiceSessionId)).toMatchObject({ status: "closed" });
     expect(readRecord(voiceSessionId)?.digestDeliveredAt).toBeUndefined();
@@ -164,9 +161,7 @@ it.each(["absent", "obsolete"])(
     const firstClose = prepareClientVoiceSessionClose();
     await closeVoice(voiceSessionId, { config });
     await firstClose.drain();
-    expect(sendDurableMessageBatch).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ to: "channel:custom-recipient" }),
-    );
+    expectSend({ to: "channel:custom-recipient" });
     expect(warning).toHaveBeenCalledWith(
       expect.stringContaining("synthetic delivery marker failure"),
     );
@@ -175,7 +170,7 @@ it.each(["absent", "obsolete"])(
     const retryClose = prepareClientVoiceSessionClose();
     await closeVoice(voiceSessionId);
     await retryClose.drain();
-    expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
     expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
     expect(readVoiceSessionRecord("main", voiceSessionId, { path: storePath })).toBeUndefined();
   },
@@ -370,7 +365,7 @@ it("delivers the completed source digest while a matching voice in another store
   await recordMutation(voiceSessionId, runA);
   await closeVoice(voiceSessionId, target);
   await settleDigestAttempts();
-  expect(sendDurableMessageBatch).not.toHaveBeenCalled();
+  expect(send).not.toHaveBeenCalled();
   try {
     setTestEnvValue("OPENCLAW_STATE_DIR", otherState);
     await seedSession(target.sessionKey, { channel: "discord", to: "channel:other-store" });
@@ -378,9 +373,7 @@ it("delivers the completed source digest while a matching voice in another store
     releaseB = await registerClientVoiceConsultRun({ ...target, voiceSessionId, runId: runB });
     await completeRun(runA);
     await settleDigestAttempts();
-    expect(sendDurableMessageBatch).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ to: "channel:original-store" }),
-    );
+    expectSend({ to: "channel:original-store" });
     expect(readVoiceSessionRecord("main", voiceSessionId, { env: originalEnv })).toMatchObject({
       status: "closed",
       consultRunIds: [runA],
@@ -426,7 +419,7 @@ it.for([false, true])(
       await fs.rename(savedPath, metadataPath);
       await closeVoice(voiceSessionId);
       await settleDigestAttempts();
-      expect({ untouched, sends: sendDurableMessageBatch.mock.calls.length }).toEqual({
+      expect({ untouched, sends: send.mock.calls.length }).toEqual({
         untouched: true,
         sends: 1,
       });
@@ -462,7 +455,7 @@ it("shares a confirmed send across context refresh while the first read waits", 
     releaseRead.resolve();
     await settleDigestAttempts();
     expect(warning).toHaveBeenCalledWith(expect.stringContaining(markerFailure.message));
-    expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledOnce();
     expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
   } finally {
     releaseRead.resolve();
@@ -482,7 +475,7 @@ it.each(["different path", "same path replacement"] as const)(
         ? path.join(harness.stateDir, "other-state")
         : harness.stateDir;
     const env = captureEnv(["OPENCLAW_STATE_DIR"]);
-    sendDurableMessageBatch.mockRejectedValueOnce(new Error("original channel offline"));
+    send.mockRejectedValueOnce(new Error("original channel offline"));
     try {
       using _ = fakeTimers();
       await closeVoice(voiceSessionId, { sessionKey });
@@ -498,11 +491,11 @@ it.each(["different path", "same path replacement"] as const)(
       expect(await recoverStale({ now: 6 * 60 * 60_000 + 2 })).toBe(1);
       await settleDigestAttempts();
       expect(readRecord(stale)?.status).toBe("closed");
-      expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+      expect(send).toHaveBeenCalledOnce();
 
       await createVoiceSession({ sessionKey, voiceSessionId });
       await expect(closeVoice(voiceSessionId, { sessionKey })).rejects.toThrow("physical source");
-      expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+      expect(send).toHaveBeenCalledOnce();
 
       if (replacement === "same path replacement") {
         await closeOpenClawAgentDatabasesAsync(harness.stateDir);
@@ -512,8 +505,8 @@ it.each(["different path", "same path replacement"] as const)(
       env.restore();
       await recoverStale();
       await settleDigestAttempts();
-      expect(sendDurableMessageBatch).toHaveBeenCalledTimes(2);
-      expect(sendDurableMessageBatch).toHaveBeenLastCalledWith(
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenLastCalledWith(
         expect.objectContaining({ to: "channel:original-store" }),
       );
       expect(readRecord(voiceSessionId)?.digestDeliveredAt).toEqual(expect.any(Number));
@@ -533,7 +526,7 @@ it("recovers current stale calls after shared storage retires a failed digest co
   const retired = await createVoiceSession({ now: 1 });
   await recordMutation(retired);
   await completeRun(`run-${retired}`);
-  sendDurableMessageBatch.mockRejectedValueOnce(new Error("channel offline"));
+  send.mockRejectedValueOnce(new Error("channel offline"));
   const failed = createDeferred();
   using _ = fakeTimers();
   using warning = vi.spyOn(console, "warn").mockImplementation((message) => {
@@ -544,7 +537,7 @@ it("recovers current stale calls after shared storage retires a failed digest co
   await closeVoice(retired, target);
   await withinTest(failed.promise, signal);
   await settleDigestAttempts();
-  expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledOnce();
   const agentPath = resolveOpenClawAgentSqlitePath(target);
   const identity = readDatabasePathIdentitySync(agentPath);
 
@@ -557,14 +550,14 @@ it("recovers current stale calls after shared storage retires a failed digest co
   await settleDigestAttempts();
   expect(readRecord(stale)?.status).toBe("closed");
   expect(readRecord(retired)?.digestDeliveredAt).toBeUndefined();
-  expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledOnce();
   await vi.advanceTimersByTimeAsync(
     clientVoiceSessionTesting.digestDeliveryPolicy.failureRetentionMs + 1,
   );
   expect(warning).toHaveBeenCalledWith(
     expect.stringContaining("voice mutation digest dropped after retry retention expired"),
   );
-  expect(sendDurableMessageBatch).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledOnce();
 });
 
 it.each([
