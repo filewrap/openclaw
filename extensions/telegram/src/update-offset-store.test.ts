@@ -100,17 +100,23 @@ describe("deleteTelegramUpdateOffset", () => {
     });
   });
 
-  it("invokes onRotationDetected for canonical offsets without bot identity", async () => {
-    await withStateDirEnv("openclaw-tg-offset-", async () => {
-      await updateOffsetStore.register("default", state(777, null));
-      await expectRotation("333333:token-c", {
-        reason: "legacy-state",
-        previousBotId: null,
-        currentBotId: "333333",
-        staleLastUpdateId: 777,
+  it.each([
+    [null, 777, "333333:token-c", "333333"],
+    ["111111", 999, "111111:any-secret", "111111"],
+  ] as const)(
+    "rejects unverifiable canonical identity %s",
+    async (previousBotId, id, token, currentBotId) => {
+      await withStateDirEnv("openclaw-tg-offset-", async () => {
+        await updateOffsetStore.register("default", state(id, previousBotId));
+        await expectRotation(token, {
+          reason: "legacy-state",
+          previousBotId,
+          currentBotId,
+          staleLastUpdateId: id,
+        });
       });
-    });
-  });
+    },
+  );
 
   it("tolerates read-only lookup failures but refuses account preparation without identity", async () => {
     await withStateDirEnv("openclaw-tg-offset-", async () => {
@@ -144,18 +150,6 @@ describe("deleteTelegramUpdateOffset", () => {
         previousBotId: "111111",
         currentBotId: "111111",
         staleLastUpdateId: 42,
-      });
-    });
-  });
-
-  it("treats canonical bot-id-only offsets as stale when token identity cannot be verified", async () => {
-    await withStateDirEnv("openclaw-tg-offset-", async () => {
-      await updateOffsetStore.register("default", state(999, "111111"));
-      await expectRotation("111111:any-secret", {
-        reason: "legacy-state",
-        previousBotId: "111111",
-        currentBotId: "111111",
-        staleLastUpdateId: 999,
       });
     });
   });

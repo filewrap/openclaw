@@ -97,11 +97,10 @@ describe("telegram session route", () => {
           ...(binding.agentId === "drafts" ? { session: { dmScope } } : {}),
         })),
       };
-      const route = await telegramPlugin.messaging?.resolveOutboundSessionRoute?.({
+      const route = await resolveRoute("12345", {
         cfg,
         agentId: "drafts",
         accountId: "drafts",
-        target: "12345",
         threadId: 21,
         currentSessionKey: "agent:drafts:telegram:direct:12345:thread:12345:10",
       });
@@ -124,40 +123,27 @@ describe("telegram session route", () => {
       });
 
       expect(inboundSessionKey).toBe(`${baseSessionKey}:thread:12345:21`);
-      expect(route?.sessionKey).toBe(inboundSessionKey);
-      expect(route?.baseSessionKey).toBe(baseSessionKey);
-      expect(route?.threadId).toBe(21);
+      expect(route).toMatchObject({ sessionKey: inboundSessionKey, baseSessionKey, threadId: 21 });
     },
   );
 
-  it("keeps fallback isolation when the named account is bound to another agent", async () => {
-    const route = await telegramPlugin.messaging?.resolveOutboundSessionRoute?.({
-      cfg: boundNamedAccountCfg,
-      agentId: "fallback",
-      accountId: "drafts",
-      target: "12345",
-    });
-
-    expect(route?.sessionKey).toBe("agent:fallback:telegram:drafts:direct:12345");
-  });
-
-  it("keeps the caller's agent for unbound destinations in an explicit multi-agent roster", async () => {
-    const route = await telegramPlugin.messaging?.resolveOutboundSessionRoute?.({
-      cfg: {
-        session: { dmScope: "per-channel-peer" },
-        agents: {
-          ownership: "explicit",
-          entries: { drafts: {}, other: {} },
-        },
-        channels: { telegram: { accounts: { default: {}, drafts: {} } } },
+  it.each([
+    ["fallback", boundNamedAccountCfg],
+    [
+      "drafts",
+      {
+        session: boundNamedAccountCfg.session,
+        channels: boundNamedAccountCfg.channels,
+        agents: { ownership: "explicit", entries: { drafts: {}, other: {} } },
       },
-      agentId: "drafts",
-      accountId: "drafts",
-      target: "12345",
-    });
-
-    expect(route?.sessionKey).toBe("agent:drafts:telegram:drafts:direct:12345");
-  });
+    ],
+  ] satisfies [string, RouteParams["cfg"]][])(
+    "keeps caller %s isolated when no binding selects it",
+    async (agentId, cfg) => {
+      const route = await resolveRoute("12345", { cfg, agentId, accountId: "drafts" });
+      expect(route?.sessionKey).toBe(`agent:${agentId}:telegram:drafts:direct:12345`);
+    },
+  );
 
   it.each(["direct-topic", "topic"])("keeps %s group routes distinct", async (scope) => {
     const target = `-100:${scope}:99`;

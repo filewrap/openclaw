@@ -1,5 +1,9 @@
 import path from "node:path";
-import type { OpenClawConfig, TelegramAccountConfig } from "openclaw/plugin-sdk/config-contracts";
+import type {
+  OpenClawConfig,
+  TelegramAccountConfig,
+  TelegramExecApprovalConfig,
+} from "openclaw/plugin-sdk/config-contracts";
 import {
   normalizeSessionDeliveryState,
   upsertSessionEntry,
@@ -23,8 +27,8 @@ type TelegramExecApprovalRequest = Parameters<
 >[0]["request"];
 
 function buildConfig(
-  execApprovals?: NonNullable<NonNullable<OpenClawConfig["channels"]>["telegram"]>["execApprovals"],
-  channelOverrides?: Partial<NonNullable<NonNullable<OpenClawConfig["channels"]>["telegram"]>>,
+  execApprovals?: TelegramExecApprovalConfig,
+  channelOverrides?: NonNullable<OpenClawConfig["channels"]>["telegram"],
 ): OpenClawConfig {
   return {
     channels: { telegram: { botToken: "tok", ...channelOverrides, execApprovals } },
@@ -176,73 +180,40 @@ describe("telegram exec approvals", () => {
   });
 
   it("only injects approval buttons on eligible telegram targets", () => {
-    const dmCfg = buildConfig({ enabled: true, approvers: ["123"], target: "dm" });
-    const channelCfg = buildConfig({ enabled: true, approvers: ["123"], target: "channel" });
-    const bothCfg = buildConfig({ enabled: true, approvers: ["123"], target: "both" });
-
-    expect(shouldInjectTelegramExecApprovalButtons({ cfg: dmCfg, to: "123" })).toBe(true);
-    expect(shouldInjectTelegramExecApprovalButtons({ cfg: dmCfg, to: "-100123" })).toBe(false);
-    expect(shouldInjectTelegramExecApprovalButtons({ cfg: channelCfg, to: "-100123" })).toBe(true);
-    expect(shouldInjectTelegramExecApprovalButtons({ cfg: channelCfg, to: "123" })).toBe(false);
-    expect(shouldInjectTelegramExecApprovalButtons({ cfg: bothCfg, to: "123" })).toBe(true);
-    expect(shouldInjectTelegramExecApprovalButtons({ cfg: bothCfg, to: "-100123" })).toBe(true);
+    const results = (["dm", "channel", "both"] as const).map((target) => {
+      const cfg = buildConfig({ enabled: true, approvers: ["123"], target });
+      return ["123", "-100123"].map((to) => shouldInjectTelegramExecApprovalButtons({ cfg, to }));
+    });
+    expect(results).toEqual([
+      [true, false],
+      [false, true],
+      [true, true],
+    ]);
   });
 
+  type Target = NonNullable<NonNullable<OpenClawConfig["approvals"]>["exec"]>["targets"];
+  const makeTarget = (to = "12345", accountId?: string, channel = "telegram") => ({
+    channel,
+    to,
+    accountId,
+  });
   it.each([
-    {
-      name: "normalizes a prefixed DM and account identity",
-      target: { channel: "telegram", to: "tg:12345", accountId: "Work Bot" },
-      accountId: "work-bot",
-      mode: "targets" as const,
-      expected: true,
-    },
-    {
-      name: "rejects a different sender at the same direct target",
-      target: { channel: "telegram", to: "12345" },
-      senderId: "99999",
-      mode: "targets" as const,
-      expected: false,
-    },
-    {
-      name: "rejects a different callback account",
-      target: { channel: "telegram", to: "12345", accountId: "work" },
-      accountId: "personal",
-      mode: "targets" as const,
-      expected: false,
-    },
-    {
-      name: "rejects foreign-channel targets",
-      target: { channel: "discord", to: "12345" },
-      mode: "targets" as const,
-      expected: false,
-    },
-    {
-      name: "rejects group targets even when the sender string matches",
-      target: { channel: "telegram", to: "-100123456" },
-      senderId: "-100123456",
-      mode: "targets" as const,
-      expected: false,
-    },
-    {
-      name: "does not authorize an inactive forwarding target",
-      target: { channel: "telegram", to: "12345" },
-      mode: "session" as const,
-      expected: false,
-    },
-    {
-      name: "allows an unscoped target from a named callback account",
-      target: { channel: "telegram", to: "12345" },
-      accountId: "any-account",
-      mode: "targets" as const,
-      expected: true,
-    },
-    {
-      name: "keeps target eligibility when the callback account is unspecified",
-      target: { channel: "telegram", to: "12345", accountId: "work" },
-      mode: "targets" as const,
-      expected: true,
-    },
-  ])("$name", ({ target, accountId, senderId = "12345", mode, expected }) => {
+    ["prefixed DM/account", true, makeTarget("tg:12345", "Work Bot"), "work-bot"],
+    ["different sender", false, makeTarget(), undefined, "99999"],
+    ["different account", false, makeTarget("12345", "work"), "personal"],
+    ["foreign channel", false, makeTarget("12345", undefined, "discord")],
+    ["group target", false, makeTarget("-100123456"), undefined, "-100123456"],
+    ["inactive forwarding", false, makeTarget(), undefined, undefined, "session"],
+    ["unscoped target", true, makeTarget(), "any-account"],
+    ["unspecified callback account", true, makeTarget("12345", "work")],
+  ] satisfies [
+    string,
+    boolean,
+    NonNullable<Target>[number],
+    string?,
+    string?,
+    ("targets" | "session")?,
+  ][])("checks %s", (_name, expected, target, accountId, senderId = "12345", mode = "targets") => {
     const cfg: OpenClawConfig = {
       channels: { telegram: { botToken: "tok" } },
       approvals: { exec: { enabled: true, mode, targets: [target] } },

@@ -100,37 +100,28 @@ describe("Telegram location message hooks", () => {
     expect(hookRunner.runInboundClaim).not.toHaveBeenCalled();
   });
 
-  it("emits the terminal edit when live-location sharing stops", () => {
-    emitLocation(
-      {
-        edit_date: 1_786_094_580,
-        location: { latitude: 43.8376, longitude: 18.4534 },
-      },
-      9003,
-    );
-
-    expectReceived({
-      location: expect.objectContaining({ isLive: false }),
-      providerUpdate: expect.objectContaining({ id: "9003", kind: "edited_message" }),
-    });
-    expect(hookRunner.runInboundClaim).not.toHaveBeenCalled();
-  });
-
-  it("emits edited channel-post live locations with their provider update kind", () => {
-    emitLocation(
+  it.each([
+    ["edited_message", 9003, { location: { latitude: 43.8376, longitude: 18.4534 } }, false],
+    [
+      "edited_channel_post",
+      9004,
       {
         chat: { id: -1001234, type: "supergroup", title: "Travel updates" },
-        edit_date: 1_786_094_580,
         from: { id: 789, is_bot: true, first_name: "Travel updates" },
       },
-      9004,
-      "edited_channel_post",
-    );
-
-    expectReceived({
-      providerUpdate: expect.objectContaining({ id: "9004", kind: "edited_channel_post" }),
-    });
-  });
+      true,
+    ],
+  ] satisfies ["edited_message" | "edited_channel_post", number, Partial<Message>, boolean][])(
+    "emits %s updates including terminal live-location edits",
+    (kind, id, fields, isLive) => {
+      emitLocation({ edit_date: 1_786_094_580, ...fields }, id, kind);
+      expectReceived({
+        location: expect.objectContaining({ isLive }),
+        providerUpdate: expect.objectContaining({ id: String(id), kind }),
+      });
+      expect(hookRunner.runInboundClaim).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not wait for plugin observers on the Telegram inbound path", () => {
     hookRunner.runMessageReceived.mockReturnValueOnce(new Promise(() => {}));

@@ -85,45 +85,20 @@ describe("resolveTelegramToken", () => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", "env-token");
     const accountTokenFile = createTokenFile("account-token.txt", "account-file-token\n");
     const channelTokenFile = createTokenFile("channel-token.txt", "channel-file-token\n");
-    const baseTelegramConfig = {
-      botToken: "channel-config-token",
-      tokenFile: channelTokenFile,
-      accounts: {
-        default: {
-          botToken: "account-config-token",
-          tokenFile: accountTokenFile,
-        },
-      },
-    };
-
-    const resolve = (telegram: Parameters<typeof config>[0]) =>
-      resolveTelegramToken(config(telegram));
-
-    expect(resolve(baseTelegramConfig)).toEqual({
-      token: "account-file-token",
-      source: "tokenFile",
-    });
-    expect(
-      resolve({
-        ...baseTelegramConfig,
-        accounts: { default: { botToken: "account-config-token" } },
-      }),
-    ).toEqual({ token: "account-config-token", source: "config" });
-    expect(resolve({ ...baseTelegramConfig, accounts: { default: {} } })).toEqual({
-      token: "channel-file-token",
-      source: "tokenFile",
-    });
-    expect(
-      resolve({
-        ...baseTelegramConfig,
-        tokenFile: undefined,
-        accounts: { default: {} },
-      }),
-    ).toEqual({ token: "channel-config-token", source: "config" });
-    expect(resolve({ accounts: { default: {} } })).toEqual({
-      token: "env-token",
-      source: "env",
-    });
+    const channel = { botToken: "channel-config-token", tokenFile: channelTokenFile };
+    const account = { botToken: "account-config-token", tokenFile: accountTokenFile };
+    for (const [root, selected, token, source] of [
+      [channel, account, "account-file-token", "tokenFile"],
+      [channel, { botToken: account.botToken }, "account-config-token", "config"],
+      [channel, {}, "channel-file-token", "tokenFile"],
+      [{ botToken: channel.botToken }, {}, "channel-config-token", "config"],
+      [{}, {}, "env-token", "env"],
+    ] as const) {
+      expect(resolveTelegramToken(config({ ...root, accounts: { default: selected } }))).toEqual({
+        token,
+        source,
+      });
+    }
   });
 
   it("does not use env token for non-default accounts", () => {
@@ -181,33 +156,24 @@ describe("resolveTelegramToken", () => {
     },
   );
 
-  it("throws when an env SecretRef points at a provider configured with another source", () => {
-    const cfg = config(
-      { botToken: envRef() },
+  it.each([
+    [
+      envRef(),
       { providers: { "telegram-env": { source: "file", path: "/tmp/secrets.json" } } },
-    );
-
-    expect(() => resolveTelegramToken(cfg)).toThrow(
       /Secret provider "telegram-env" has source "file" but ref requests "env"/i,
-    );
-  });
-
-  it("throws when an env SecretRef provider is not configured and not the default env alias", () => {
-    const cfg = config({ botToken: envRef("ops-env") });
-
-    expect(() => resolveTelegramToken(cfg)).toThrow(
+    ],
+    [
+      envRef("ops-env"),
+      undefined,
       /Secret provider "ops-env" is not configured \(ref: env:ops-env:TELEGRAM_BOT_TOKEN\)/i,
-    );
-  });
-
-  it("keeps strict runtime behavior for unresolved non-env SecretRefs", () => {
-    const cfg = config({
-      botToken: { source: "file", provider: "vault", id: "/telegram/bot-token" },
-    });
-
-    expect(() => resolveTelegramToken(cfg)).toThrow(
+    ],
+    [
+      { source: "file", provider: "vault", id: "/telegram/bot-token" },
+      undefined,
       /channels\.telegram\.botToken: unresolved SecretRef/i,
-    );
+    ],
+  ] as const)("rejects unavailable SecretRef %j", (botToken, secrets, error) => {
+    expect(() => resolveTelegramToken(config({ botToken }, secrets))).toThrow(error);
   });
 
   // Regression: https://github.com/openclaw/openclaw/issues/53876

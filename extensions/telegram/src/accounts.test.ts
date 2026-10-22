@@ -238,29 +238,15 @@ describe("mergeTelegramAccountConfig", () => {
 
 describe("resolveTelegramAccount groups inheritance (#30673)", () => {
   const groups = { "-100123": { requireMention: false } };
-  it.each<{
-    accounts: Record<string, TelegramAccountConfig>;
-    accountId: string;
-    expected: TelegramAccountConfig["groups"];
-  }>([
-    {
-      accounts: { default: { botToken: "123:default", groups: {} } },
-      accountId: "default",
-      expected: groups,
-    },
-    {
-      accounts: { default: { botToken: "123:default" }, dev: { botToken: "456:dev" } },
-      accountId: "dev",
-      expected: groups,
-    },
-    {
-      accounts: { default: { botToken: "123:default" }, dev: { botToken: "456:dev", groups: {} } },
-      accountId: "dev",
-      expected: {},
-    },
+  const defaultAccount = { botToken: "123:default" };
+  const dev = { botToken: "456:dev" };
+  it.each<[Record<string, TelegramAccountConfig>, string, TelegramAccountConfig["groups"]]>([
+    [{ default: { ...defaultAccount, groups: {} } }, "default", groups],
+    [{ default: defaultAccount, dev }, "dev", groups],
+    [{ default: defaultAccount, dev: { ...dev, groups: {} } }, "dev", {}],
   ])(
-    "inherits groups only when not explicitly isolated: $accountId $expected (#79427)",
-    ({ accounts, accountId, expected }) => {
+    "inherits groups only when not explicitly isolated: %j %s %j (#79427)",
+    (accounts, accountId, expected) => {
       const cfg = telegramConfig({ groups, accounts });
       expect(resolveTelegramAccount({ cfg, accountId }).config.groups).toEqual(expected);
     },

@@ -15,30 +15,17 @@ vi.mock("openclaw/plugin-sdk/secret-file-runtime", async (importOriginal) => ({
 
 describe("telegramPlugin reply threading", () => {
   it.each([
-    [
-      "first",
-      {
-        accounts: { sut: { tokenFile: "/tmp/must-not-read", replyToMode: "first" } },
-      },
-    ],
+    ["first", { accounts: { sut: { tokenFile: "/tmp/must-not-read", replyToMode: "first" } } }],
     [
       "all",
       {
         replyToMode: "all",
         accounts: {
-          sut: {
-            botToken: { source: "file", provider: "telegram_token", id: "value" },
-          },
+          sut: { botToken: { source: "file", provider: "telegram_token", id: "value" } },
         },
       },
     ],
-    [
-      "off",
-      {
-        replyToMode: "all",
-        accounts: { sut: { replyToMode: "off" } },
-      },
-    ],
+    ["off", { replyToMode: "all", accounts: { sut: { replyToMode: "off" } } }],
   ] satisfies [string, NonNullable<OpenClawConfig["channels"]>["telegram"]][])(
     "resolves reply mode %s without reading credentials",
     (expected, telegram) => {
@@ -82,11 +69,10 @@ describe("telegramPlugin reply threading", () => {
       context: { To: "telegram:-1001:topic:77", CurrentMessageId: "msg-1" },
     });
     expect(
-      telegramPlugin.threading?.resolveAutoThreadId?.({ cfg, to: "telegram:-1001", toolContext }),
-    ).toBe("77");
-    expect(
-      telegramPlugin.threading?.resolveAutoThreadId?.({ cfg, to: "telegram:-1002", toolContext }),
-    ).toBeUndefined();
+      ["telegram:-1001", "telegram:-1002"].map((to) =>
+        telegramPlugin.threading?.resolveAutoThreadId?.({ cfg, to, toolContext }),
+      ),
+    ).toEqual(["77", undefined]);
   });
 
   it.each([
