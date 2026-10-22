@@ -125,7 +125,6 @@ export const forcedUnitFastTestFiles = [
   "src/trajectory/metadata.test.ts",
   "src/tts/openai-compatible-speech-provider.test.ts",
   "src/tts/tts.test.ts",
-  "src/tts/status-config.test.ts",
   "src/tts/tts-config.test.ts",
   "packages/terminal-core/src/restore.test.ts",
   "packages/terminal-core/src/table.test.ts",

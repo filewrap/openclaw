@@ -69,7 +69,7 @@ afterEach(() => {
 
 function payloadRequest(
   payload: ReplyPayload,
-  prefsName: string,
+  prefsName = "runtime-payload",
 ): Parameters<typeof maybeApplyTtsToPayload>[0] {
   return {
     payload,
@@ -193,10 +193,8 @@ describe("TTS runtime provider fallback and delivery behavior", () => {
     );
 
     const result = await maybeApplyTtsToPayload({
-      payload,
+      ...payloadRequest(payload),
       cfg: createTtsConfig("tts-persisted-facts", { modelOverrides: { allowProvider: true } }),
-      channel: "telegram",
-      kind: "final",
       ttsAuto: "tagged",
     });
 
@@ -347,14 +345,7 @@ describe("TTS runtime provider fallback and delivery behavior", () => {
       throw new Error(text);
     });
     const result = await maybeApplyTtsToPayloadCore(
-      {
-        payload: {
-          text: "Visible answer [[tts:text]]Hidden expressive answer[[/tts:text]]",
-        },
-        cfg: createTtsConfig("openclaw-speech-core-visible-hidden-tts-provider-failure"),
-        channel: "telegram",
-        kind: "final",
-      },
+      payloadRequest({ text: "Visible answer [[tts:text]]Hidden expressive answer[[/tts:text]]" }),
       async () => "/unused.ogg",
     );
 

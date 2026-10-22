@@ -3647,7 +3647,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "src/tts/tts-request.resources.test.ts",
   "src/tts/tts-runtime-routing.test.ts",
   "src/tts/tts-summary.selection.test.ts",
-  "src/tts/tts-summary.static-catalog.test.ts",
   "src/tts/tts.test.ts",
   "src/tui/commands.test.ts",
   "src/tui/embedded-backend.test.ts",
