@@ -146,6 +146,36 @@ describe("Session Observer actions", () => {
     },
   );
 
+  it("clears the previous failure when a later toggle succeeds", async () => {
+    const page = await setup();
+    const retried = createDeferred<unknown>();
+    try {
+      page.observerToggle().click();
+      await waitForSolid(() => expect(page.outlet.textContent).toContain("Saving…"));
+      page.held.reject(new Error("Synthetic observer save failed"));
+      await waitForSolid(() => {
+        expect(page.outlet.textContent).toContain("Synthetic observer save failed");
+        expect(page.observerToggle().disabled).toBe(false);
+      });
+
+      page.request.mockImplementationOnce(() => retried.promise);
+      page.observerToggle().click();
+      await waitForSolid(() => expect(page.outlet.textContent).toContain("Saving…"));
+      retried.resolve({
+        config: { ...page.config, gateway: { controlUi: { sessionObserver: false } } },
+        hash: "retried",
+      });
+      await waitForSolid(() => {
+        expect(page.observerToggle().checked).toBe(false);
+        expect(page.observerToggle().disabled).toBe(false);
+        expect(page.outlet.textContent).not.toContain("Synthetic observer save failed");
+      });
+    } finally {
+      retried.resolve({ noop: true });
+      await page.dispose();
+    }
+  });
+
   it("keeps model selection optimistic and preserves the owner's fallback chain", async () => {
     const page = await setup();
     try {
