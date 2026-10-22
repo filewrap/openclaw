@@ -1,7 +1,14 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { beforeEach, expect, it, vi } from "vitest";
+import { resolveSignalAccount } from "./accounts.js";
 import { createSignalCliPathTextInput, signalSetupAdapter } from "./setup-core.js";
 import { signalSetupWizard } from "./setup-surface.js";
+import {
+  prepareSignalManagedNativeTransport,
+  probeSignalTransport,
+  writeSignalAccountTransport,
+} from "./setup-transport.js";
+import { detectSignalTransport as detectTransport } from "./transport-detection.js";
 
 function signalConfig(signal: NonNullable<OpenClawConfig["channels"]>["signal"]): OpenClawConfig {
   return { channels: { signal } };
@@ -19,7 +26,7 @@ type SignalConfig = NonNullable<NonNullable<OpenClawConfig["channels"]>["signal"
 const phone = "+15555550123";
 const url = "http://signal:8080";
 const container = (endpoint: string) => ({ kind: "container", url: endpoint }) as const;
-const external = (kind: "container" | "external-native" = "container") =>
+const externalConfig = (kind: "container" | "external-native" = "container") =>
   signalConfig({ account: "+15555550124", transport: { kind, url } });
 const invalidPhone =
   "Invalid E.164 phone number (must start with + and country code, e.g. +15555550123)";
@@ -51,9 +58,10 @@ beforeEach(() => detectSignalTransportMock.mockReset());
 
 it("uses setup-time container detection for a bare HTTP URL", async () => {
   detectSignalTransportMock.mockResolvedValue(container(url));
-  const input = await prepareInput({ signalNumber: phone, httpUrl: url });
+  const input = await prepareInput({ signalNumber: " +1 (555) 555-0123 ", httpUrl: url });
   const next = apply(input);
   expect(detectSignalTransportMock).toHaveBeenCalledWith({ url, account: phone });
+  expect(next?.account).toBe(phone);
   expect(next?.transport).toEqual(container(url));
 });
 
@@ -81,31 +89,6 @@ it("skips setup-time detection for an explicit transport kind", async () => {
   });
   expect(input.signalTransport).toBe("container");
   expect(detectSignalTransportMock).not.toHaveBeenCalled();
-});
-
-it("stores the canonical Signal number for the default account", () => {
-  expect(apply({ signalNumber: " +1 (555) 555-0123 " })?.account).toBe("+15555550123");
-});
-
-it("keeps promoted default-account policy scoped to that account", () => {
-  const next = apply(
-    { signalNumber: "+15555550124" },
-    signalConfig({
-      dmPolicy: "pairing",
-      transport: { kind: "managed-native", httpPort: 8080 },
-      accounts: {
-        default: { account: "+15555550123", dmPolicy: "disabled", allowFrom: ["+15555550125"] },
-      },
-    }),
-    "work",
-  );
-  expect(next).toMatchObject({ account: "+15555550123", dmPolicy: "pairing" });
-  expect(next?.allowFrom).toBeUndefined();
-  expect(next?.accounts?.default).toMatchObject({
-    dmPolicy: "disabled",
-    allowFrom: ["+15555550125"],
-  });
-  expect(next?.accounts?.default).not.toHaveProperty("account");
 });
 
 it("realigns an existing managed connection URL after a partial bind update", () => {
@@ -208,18 +191,249 @@ it("allows a container transport to reuse the configured Signal account", () => 
 
 it("does not materialize a CLI path for an external transport", async () => {
   const input = createSignalCliPathTextInput(async () => false);
-  const context = { cfg: external(), accountId: "default", credentialValues: {} };
+  const context = { cfg: externalConfig(), accountId: "default", credentialValues: {} };
   expect(await input.currentValue?.(context)).toBeUndefined();
   const wizardInput = signalSetupWizard.textInputs?.find((entry) => entry.inputKey === "cliPath");
   expect(await wizardInput?.shouldPrompt?.(context)).toBe(false);
 });
 
 it("reports an external transport as configured without checking signal-cli", async () => {
-  const cfg = external("external-native");
+  const cfg = externalConfig("external-native");
   const { status } = signalSetupWizard;
   const configured = await status.resolveConfigured({ cfg, accountId: "default" });
   const params = { cfg, accountId: "default", configured };
   await expect(status.resolveStatusLines?.(params)).resolves.toEqual(["Signal: configured"]);
   await expect(status.resolveSelectionHint?.(params)).resolves.toBe("configured");
   await expect(status.resolveQuickstartScore?.(params)).resolves.toBe(1);
+});
+
+type Transport = Parameters<typeof writeSignalAccountTransport>[0]["transport"];
+const native = (options: Omit<Extract<Transport, { kind: "managed-native" }>, "kind"> = {}) =>
+  ({ kind: "managed-native", ...options }) as const;
+const external = (endpoint: string) => ({ kind: "external-native", url: endpoint }) as const;
+const account = (transport?: Transport, number = "+15555550123") => ({
+  account: number,
+  transport,
+});
+const prepare = (
+  cfg: OpenClawConfig,
+  accountId = "work",
+  overrides?: Parameters<typeof prepareSignalManagedNativeTransport>[0]["overrides"],
+) => prepareSignalManagedNativeTransport({ cfg, accountId, overrides });
+const write = (cfg: OpenClawConfig, transport: Transport, accountId = "work") =>
+  writeSignalAccountTransport({ cfg, accountId, transport });
+const workPhone = "+15555550124";
+const bound = (httpPort: number) => account(native({ httpPort }));
+const named = (
+  entries: NonNullable<NonNullable<OpenClawConfig["channels"]>["signal"]>["accounts"],
+) => signalConfig({ accounts: entries });
+const root = (transport: Transport) => signalConfig({ transport });
+const prepared = (endpoint: string, httpHost: string, httpPort: number) =>
+  native({ url: endpoint, httpHost, httpPort });
+
+it("preserves sockets and does not reserve HTTP ports during setup", () => {
+  const transport = native({ socketPath: "/tmp/signal-private/daemon.sock" });
+  const cfg = { channels: { signal: { transport } } };
+  expect(prepare(cfg, "default")).toEqual(transport);
+  expect(prepare(cfg).httpPort).toBe(8080);
+  expect(
+    write(cfg, external("http://127.0.0.1:8080"), "http").channels?.signal?.accounts?.http
+      ?.transport,
+  ).toEqual({ kind: "external-native", url: "http://127.0.0.1:8080" });
+});
+
+it("prefers native deterministically when both endpoints are healthy", async () => {
+  const transport = await detectTransport({
+    url,
+    probeNative: vi.fn().mockResolvedValue({ ok: true }),
+    probeContainer: vi.fn().mockResolvedValue({ ok: true }),
+  });
+
+  expect(transport).toEqual(external(url));
+});
+
+it("selects container only when its endpoint is healthy", async () => {
+  const probeContainer = vi.fn().mockResolvedValue({ ok: true });
+  const transport = await detectTransport({
+    url: "http://signal:8080/",
+    account: "+15555550123",
+    probeNative: vi.fn().mockResolvedValue({ ok: false }),
+    probeContainer,
+  });
+
+  expect(transport).toEqual({ kind: "container", url: "http://signal:8080" });
+  expect(probeContainer).toHaveBeenCalledWith("http://signal:8080", 10_000, "+15555550123");
+});
+
+it("rejects an endpoint that matches neither transport", async () => {
+  await expect(
+    detectTransport({
+      url: "http://signal:8080",
+      probeNative: vi.fn().mockResolvedValue({ ok: false }),
+      probeContainer: vi.fn().mockResolvedValue({ ok: false }),
+    }),
+  ).rejects.toThrow("Signal transport not reachable at http://signal:8080");
+});
+
+it("rejects an explicitly requested port owned by another account", () => {
+  const cfg = signalConfig({
+    ...account(native({ httpPort: 8080 })),
+    accounts: { work: account(undefined, "+15555550124") },
+  });
+
+  expect(() => prepare(cfg, "work", { httpPort: 8080 })).toThrow(
+    "Signal managed native port 8080 is already reserved",
+  );
+});
+
+it("keeps sibling implicit allocation stable while updating an existing target", () => {
+  const cfg = signalConfig({
+    accounts: {
+      a: account(native({ httpPort: 8080 })),
+      b: account(native(), "+15555550124"),
+    },
+  });
+
+  const transport = prepare(cfg, "a", { cliPath: "/opt/signal-cli" });
+  const next = write(cfg, transport, "a");
+
+  expect(transport.httpPort).toBe(8080);
+  expect(resolveSignalAccount({ cfg: next, accountId: "b" }).transport).toMatchObject({
+    httpPort: 8081,
+  });
+});
+
+it.each([
+  [
+    "aligned connection",
+    signalConfig({
+      ...bound(8080),
+      accounts: {
+        work: account(native({ url: "http://127.0.0.1:8080", httpHost: "0.0.0.0" }), workPhone),
+      },
+    }),
+    "work",
+    undefined,
+    prepared("http://127.0.0.1:8081", "0.0.0.0", 8081),
+  ],
+  [
+    "independent HTTPS proxy",
+    root(native({ url: "https://127.0.0.1:8080" })),
+    "default",
+    undefined,
+    prepared("https://127.0.0.1:8080", "127.0.0.1", 8081),
+  ],
+  [
+    "IPv6 wildcard",
+    root(prepared("http://127.0.0.1:8080", "127.0.0.1", 8080)),
+    "default",
+    { httpHost: "::" },
+    prepared("http://[::1]:8080", "::", 8080),
+  ],
+] as const)("prepares %s", (_name, cfg, id, overrides, expected) => {
+  expect(prepare(cfg, id, overrides)).toEqual(expected);
+});
+it.each([
+  ["loopback alias", external("http://localhost.:8080")],
+  ["bind and connection ports", native({ url: "http://localhost:8080", httpPort: 8181 })],
+] as const)("reserves %s", (_name, transport) => {
+  expect(
+    prepare(named({ proxy: account(transport), work: account(undefined, workPhone) })).httpPort,
+  ).toBe(8081);
+});
+
+it.each([65_536])("rejects invalid preferred port %s", (httpPort) => {
+  expect(() => prepare({}, "work", { httpPort })).toThrow(
+    "Signal managed native port must be an integer between 1 and 65535.",
+  );
+});
+
+it("probes only the configured concrete transport", async () => {
+  const probeNative = vi.fn().mockResolvedValue({ ok: true });
+  const probeContainer = vi.fn().mockResolvedValue({ ok: true });
+
+  await expect(
+    probeSignalTransport({
+      cfg: {},
+      accountId: "default",
+      transport: { kind: "container", url: "http://signal:8080" },
+      account: "+15555550123",
+      probeNative,
+      probeContainer,
+    }),
+  ).resolves.toEqual({ ok: true });
+  expect(probeNative).not.toHaveBeenCalled();
+  expect(probeContainer).toHaveBeenCalledWith("http://signal:8080", 10_000, "+15555550123");
+});
+
+it("probes the allocated port for an implicit managed account transport", async () => {
+  const probeNative = vi.fn().mockResolvedValue({ ok: true });
+  const cfg = signalConfig({
+    ...account(native({ httpPort: 8080 })),
+    accounts: { work: account(undefined, "+15555550124") },
+  });
+
+  await expect(
+    probeSignalTransport({
+      cfg,
+      accountId: "work",
+      transport: { kind: "managed-native" },
+      probeNative,
+    }),
+  ).resolves.toEqual({ ok: true });
+  expect(probeNative).toHaveBeenCalledWith("http://127.0.0.1:8081", 10_000);
+});
+
+it("ignores the unconfigured implicit default account during endpoint collision checks", () => {
+  const next = write({}, external("http://localhost:8080"));
+
+  expect(next.channels?.signal?.accounts?.work?.transport).toEqual(
+    external("http://localhost:8080"),
+  );
+});
+
+it.each<[Transport, string, OpenClawConfig?, string?]>([
+  [external("ftp://signal.example"), "Signal transport URL unsupported protocol: ftp:"],
+  [external("http:/localhost:8080"), "Signal transport URL has a malformed HTTP scheme"],
+  [native({ httpHost: "bad host" }), "Signal transport host must be a hostname or IP address"],
+  [
+    native({ httpHost: "localhost:8181" }),
+    "Signal transport host must be a hostname or IP address",
+  ],
+  [
+    external("http://localhost:8181"),
+    'Signal external-native account "work" uses local port 8181, which conflicts with managed native account "default".',
+    signalConfig({ enabled: false, ...account(native({ httpPort: 8181 })) }),
+    "work",
+  ],
+  [
+    container("http://container:8080"),
+    "Signal container transport requires an account number for an enabled account.",
+    {},
+    "work",
+  ],
+  [
+    native({ httpPort: 8181 }),
+    'Signal managed native account "managed" binds port 8181, which conflicts with account "external" local transport endpoint.',
+    signalConfig({
+      account: phone,
+      accounts: { external: { transport: external("http://localhost:8181") } },
+    }),
+    "managed",
+  ],
+])("rejects invalid transport %j", (transport, error, cfg = {}, id = "default") => {
+  expect(() => write(cfg, transport, id)).toThrow(error);
+});
+
+it("allows a local external endpoint on a disabled sibling managed bind", () => {
+  const cfg = signalConfig({
+    account: "+15555550124",
+    accounts: { dormant: { enabled: false, ...account(native({ httpPort: 8181 })) } },
+  });
+  const next = write(cfg, { kind: "container", url: "http://localhost:8181" });
+
+  expect(next.channels?.signal?.accounts?.work?.transport).toEqual({
+    kind: "container",
+    url: "http://localhost:8181",
+  });
 });

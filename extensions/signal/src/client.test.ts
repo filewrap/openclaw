@@ -1,8 +1,10 @@
 import { Buffer } from "node:buffer";
 import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createRuntimeSpies } from "../../test-support/runtime-spies.js";
 import { signalCheck, signalRpcRequest, streamSignalEvents } from "./client.js";
 import { expectPreparedHandoff, useSignalHttpServer } from "./client.test-support.js";
+import { runSignalSseLoop, type SignalStatusSink } from "./sse-reconnect.js";
 
 vi.mock("openclaw/plugin-sdk/core", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/core")>()),
@@ -26,6 +28,57 @@ const sse = (body: string) =>
   });
 
 afterEach(() => vi.restoreAllMocks());
+
+it.each([
+  { status: 400, message: "Account Selection Required", requests: 1 },
+  { status: 503, message: "Try Again Later", requests: 2 },
+])("publishes the native HTTP $status lifecycle and makes $requests requests", async (expected) => {
+  const abort = new AbortController();
+  let requests = 0;
+  const statusSink = vi.fn<SignalStatusSink>(() => {
+    if (expected.status === 503 && requests === 2) {
+      abort.abort();
+    }
+  });
+  const baseUrl = await withSignalServer((_request, response) => {
+    requests += 1;
+    if (expected.status === 400 && requests === 2) {
+      abort.abort();
+    }
+    response.statusMessage = expected.message;
+    response.writeHead(expected.status, { "content-type": "text/plain" });
+    response.end("rejected\n");
+  });
+  await runSignalSseLoop({
+    baseUrl,
+    account: "+15555550100",
+    abortSignal: abort.signal,
+    runtime: createRuntimeSpies(),
+    onEvent: vi.fn(),
+    statusSink,
+    policy: expected.status === 503 ? { initialMs: 1, maxMs: 1, factor: 1, jitter: 0 } : undefined,
+  });
+  expect(requests).toBe(expected.requests);
+  const patches = statusSink.mock.calls.map(([patch]) => patch);
+  expect(patches).toEqual(
+    expected.status === 400
+      ? [
+          {
+            lifecycle: "blocked",
+            terminalDisconnect: true,
+            connected: false,
+            lastError:
+              "Signal daemon rejected the event stream: Signal SSE failed (400 Account Selection Required). Check the configured account and daemon URL, fix the daemon or proxy response, then restart the channel.",
+          },
+        ]
+      : Array.from({ length: 2 }, () =>
+          expect.objectContaining({ lifecycle: "recovering", connected: false }),
+        ),
+  );
+  if (expected.status === 503) {
+    expect(patches).not.toContainEqual(expect.objectContaining({ terminalDisconnect: true }));
+  }
+});
 
 describe("signalRpcRequest", () => {
   it.each([false, true])(

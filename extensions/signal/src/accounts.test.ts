@@ -34,36 +34,37 @@ const defaults: ResolvedSignalTransport = {
   startupTimeoutMs: 30_000,
 };
 const port = (httpPort: number, id = "work"): Check => [{ kind: "managed-native", httpPort }, id];
+const root = (options: Native): Signal => ({ transport: native(options) });
+const socket = { transport: native({ socketPath }) };
+const dormant = { enabled: false };
+const explicit = account({ httpPort: 8181 });
 
 it.each<Case>([
   [
     "socket encoding leaves HTTP port free",
-    { transport: native({ socketPath }), accounts: { http: { transport: native() } } },
+    { ...socket, accounts: { http: { transport: native() } } },
     [{ socketPath, baseUrl: socketUrl }],
     [{ baseUrl }, "http"],
   ],
   [
     "disabled socket sibling",
-    {
-      transport: native({ socketPath }),
-      accounts: { work: { enabled: false, transport: native({ socketPath }) } },
-    },
+    { ...socket, accounts: { work: { ...dormant, ...socket } } },
     [{ baseUrl: socketUrl }],
   ],
   ["omitted transport defaults", {}, [defaults, undefined, true]],
   [
     "independent connection URL",
-    { transport: native({ url: "http://127.0.0.1:8181", httpHost: "0.0.0.0", httpPort: 8181 }) },
+    root({ url: "http://127.0.0.1:8181", httpHost: "0.0.0.0", httpPort: 8181 }),
     http("http://127.0.0.1:8181", "0.0.0.0", 8181),
   ],
   [
     "bracketed IPv6 bind",
-    { transport: native({ httpHost: "[::1]", httpPort: 8181 }) },
+    root({ httpHost: "[::1]", httpPort: 8181 }),
     http("http://[::1]:8181", "::1", 8181),
   ],
   [
     "independent bind address",
-    { transport: native({ url: baseUrl, httpHost: "127.0.0.2" }) },
+    root({ url: baseUrl, httpHost: "127.0.0.2" }),
     http(baseUrl, "127.0.0.2", 8081),
   ],
   [
@@ -101,17 +102,10 @@ it.each<Case>([
   ],
   [
     "disabled explicit reservation",
-    accounts({
-      dormant: { ...account({ httpPort: 8181 }), enabled: false },
-      work: account({ httpPort: 8181 }),
-    }),
+    accounts({ dormant: { ...explicit, ...dormant }, work: explicit }),
     port(8181),
   ],
-  [
-    "unconfigured placeholder",
-    accounts({ placeholder: { enabled: false }, work: account() }),
-    port(8080),
-  ],
+  ["unconfigured placeholder", accounts({ placeholder: dormant, work: account() }), port(8080)],
   [
     "bind and connection reservations",
     accounts({
@@ -143,25 +137,11 @@ it.each<Case>([
 });
 
 it.each<[string, Signal, string, string?]>([
-  [
-    "duplicate enabled sockets",
-    {
-      transport: native({ socketPath }),
-      accounts: { work: { transport: native({ socketPath }) } },
-    },
-    "distinct socket path",
-  ],
-  [
-    "socket with HTTP options",
-    { transport: native({ socketPath, httpPort: 8080 }) },
-    "cannot be combined",
-  ],
+  ["duplicate enabled sockets", { ...socket, accounts: { work: socket } }, "distinct socket path"],
+  ["socket with HTTP options", root({ socketPath, httpPort: 8080 }), "cannot be combined"],
   [
     "duplicate explicit ports",
-    accounts({
-      personal: account({ httpPort: 8181 }),
-      work: account({ httpPort: 8181 }),
-    }),
+    accounts({ personal: explicit, work: explicit }),
     'Signal managed native accounts "work" and "personal" both bind port 8181.',
     "work",
   ],
@@ -169,7 +149,7 @@ it.each<[string, Signal, string, string?]>([
     "local external endpoint collision",
     accounts({
       proxy: { account: phone, transport: endpoint("container", "http://localhost:8181") },
-      work: account({ httpPort: 8181 }),
+      work: explicit,
     }),
     'Signal managed native account "work" binds port 8181, which conflicts with account "proxy" local transport endpoint.',
     "work",

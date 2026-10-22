@@ -2,7 +2,6 @@ import path from "node:path";
 import { createChannelIngressQueueForTests } from "openclaw/plugin-sdk/channel-ingress-test-runtime";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
-import type { MockFn } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { createOpenClawTestState, type OpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, beforeEach, vi } from "vitest";
 import type { SignalDaemonHandle } from "./daemon.js";
@@ -13,33 +12,34 @@ import type { SignalIngressMonitor } from "./signal-ingress.js";
 
 type SignalDaemonExitEvent = Awaited<SignalDaemonHandle["exited"]>;
 
-type SignalToolResultTestMocks = {
-  waitForTransportReadyMock: MockFn;
-  enqueueSystemEventMock: MockFn;
-  sendMock: MockFn;
-  replyMock: MockFn;
-  updateLastRouteMock: MockFn;
-  readAllowFromStoreMock: MockFn;
-  upsertPairingRequestMock: MockFn;
-  streamMock: MockFn;
-  signalCheckMock: MockFn;
-  signalRpcRequestMock: MockFn;
-  assertSignalDaemonEndpointAvailableMock: MockFn;
-  spawnSignalDaemonMock: MockFn;
-};
-
-const waitForTransportReadyMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const enqueueSystemEventMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const sendMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const replyMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const updateLastRouteMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const readAllowFromStoreMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const upsertPairingRequestMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const streamMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const signalCheckMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const signalRpcRequestMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const assertSignalDaemonEndpointAvailableMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
-const spawnSignalDaemonMock = vi.hoisted(() => vi.fn()) as unknown as MockFn;
+export const signalToolResultMocks = vi.hoisted(() => ({
+  waitForTransportReadyMock: vi.fn(),
+  enqueueSystemEventMock: vi.fn(),
+  sendMock: vi.fn(),
+  replyMock: vi.fn(),
+  updateLastRouteMock: vi.fn(),
+  readAllowFromStoreMock: vi.fn(),
+  upsertPairingRequestMock: vi.fn(),
+  streamMock: vi.fn(),
+  signalCheckMock: vi.fn(),
+  signalRpcRequestMock: vi.fn(),
+  assertSignalDaemonEndpointAvailableMock: vi.fn(),
+  spawnSignalDaemonMock: vi.fn(),
+}));
+const {
+  waitForTransportReadyMock,
+  enqueueSystemEventMock,
+  sendMock,
+  replyMock,
+  updateLastRouteMock,
+  readAllowFromStoreMock,
+  upsertPairingRequestMock,
+  streamMock,
+  signalCheckMock,
+  signalRpcRequestMock,
+  assertSignalDaemonEndpointAvailableMock,
+  spawnSignalDaemonMock,
+} = signalToolResultMocks;
 const signalToolResultSessionStore = vi.hoisted(() => ({ path: "" }));
 const signalToolResultIngressMonitor = vi.hoisted(() => ({
   current: undefined as SignalIngressMonitor | undefined,
@@ -115,32 +115,12 @@ export async function receiveSignalPayloads(params: {
   }
 }
 
-export function getSignalToolResultTestMocks(): SignalToolResultTestMocks {
-  return {
-    waitForTransportReadyMock,
-    enqueueSystemEventMock,
-    sendMock,
-    replyMock,
-    updateLastRouteMock,
-    readAllowFromStoreMock,
-    upsertPairingRequestMock,
-    streamMock,
-    signalCheckMock,
-    signalRpcRequestMock,
-    assertSignalDaemonEndpointAvailableMock,
-    spawnSignalDaemonMock,
-  };
-}
-
 let config: Record<string, unknown> = {};
 
-export function setSignalToolResultTestConfig(next: Record<string, unknown>) {
-  config = next;
-}
-
-export function createSignalToolResultConfig(
+export function configureSignalToolResultTest(
   overrides: Record<string, unknown> = {},
-): Record<string, unknown> {
+  messages?: Record<string, unknown>,
+) {
   const base = config as { channels?: Record<string, unknown> };
   const channels = base.channels ?? {};
   const signal = (channels.signal ?? {}) as Record<string, unknown>;
@@ -152,8 +132,9 @@ export function createSignalToolResultConfig(
           kind: "managed-native",
           ...(typeof httpPort === "number" ? { httpPort } : {}),
         };
-  return {
+  config = {
     ...base,
+    ...(messages ? { messages } : {}),
     channels: {
       ...channels,
       signal: {
@@ -168,16 +149,12 @@ export function createSignalToolResultConfig(
 }
 
 export function createMockSignalDaemonHandle(
-  overrides: {
-    stop?: MockFn;
-    exited?: Promise<SignalDaemonExitEvent>;
-  } = {},
+  overrides: Partial<SignalDaemonHandle> = {},
 ): SignalDaemonHandle {
-  const stop = overrides.stop ?? (vi.fn() as unknown as MockFn);
-  const exited = overrides.exited ?? new Promise<SignalDaemonExitEvent>(() => {});
   return {
-    stop: stop as unknown as () => Promise<void>,
-    exited,
+    stop: vi.fn(),
+    exited: new Promise<SignalDaemonExitEvent>(() => {}),
+    ...overrides,
   };
 }
 
@@ -387,18 +364,17 @@ export function installSignalToolResultTestHooks() {
       },
     };
 
-    sendMock.mockReset().mockResolvedValue(undefined);
-    replyMock.mockReset();
-    updateLastRouteMock.mockReset();
-    streamMock.mockReset();
-    signalCheckMock.mockReset().mockResolvedValue({ ok: true });
-    signalRpcRequestMock.mockReset().mockResolvedValue({});
-    assertSignalDaemonEndpointAvailableMock.mockReset().mockResolvedValue(undefined);
-    spawnSignalDaemonMock.mockReset().mockReturnValue(createMockSignalDaemonHandle());
-    readAllowFromStoreMock.mockReset().mockResolvedValue([]);
-    upsertPairingRequestMock.mockReset().mockResolvedValue({ code: "PAIRCODE", created: true });
-    waitForTransportReadyMock.mockReset().mockResolvedValue(undefined);
-    enqueueSystemEventMock.mockReset();
+    for (const mock of Object.values(signalToolResultMocks)) {
+      mock.mockReset();
+    }
+    sendMock.mockResolvedValue(undefined);
+    signalCheckMock.mockResolvedValue({ ok: true });
+    signalRpcRequestMock.mockResolvedValue({});
+    assertSignalDaemonEndpointAvailableMock.mockResolvedValue(undefined);
+    spawnSignalDaemonMock.mockReturnValue(createMockSignalDaemonHandle());
+    readAllowFromStoreMock.mockResolvedValue([]);
+    upsertPairingRequestMock.mockResolvedValue({ code: "PAIRCODE", created: true });
+    waitForTransportReadyMock.mockResolvedValue(undefined);
 
     resetSystemEventsForTest();
   });
