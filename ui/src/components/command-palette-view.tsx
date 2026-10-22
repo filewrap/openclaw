@@ -1,3 +1,4 @@
+import { createDeferred } from "@solidjs/signals";
 import type { JSX as SolidJSX } from "@solidjs/web";
 import {
   createMemo,
@@ -435,9 +436,10 @@ export function CommandPaletteView(props: { readProps: () => CommandPaletteProps
   const sessionRequest = createMemo(() => search().sessionSearchRead);
   const sessionRead = createMemo(() => sessionRequest()?.promise);
   const catalogRequest = createMemo(() => search().catalogSearchRead);
-  const catalogRead = createMemo(() => catalogRequest()?.promise);
+  // Readiness may lag; it must never hold synchronous catalog invalidation.
+  const catalogRead = createDeferred(() => catalogRequest()?.promise);
   const modelRequest = createMemo(() => search().modelSearchRead);
-  const modelRead = createMemo(() => modelRequest()?.promise);
+  const modelRead = createDeferred(() => modelRequest()?.promise);
   const optionElements = new Map<string, HTMLDivElement>();
   const activeElement = () => {
     const item = results().items[results().activeIndex];
