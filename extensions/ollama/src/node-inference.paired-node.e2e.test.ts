@@ -384,7 +384,9 @@ async function connectClient(
       clientVersion: "1.0.0",
       platform: isNode ? "macos" : process.platform,
       mode: isNode ? "node" : "test",
-      scopes: isNode ? [] : ["operator.admin", "operator.pairing", "operator.read", "operator.write"],
+      scopes: isNode
+        ? []
+        : ["operator.admin", "operator.pairing", "operator.read", "operator.write"],
       caps: isNode ? ["local-inference"] : undefined,
       commands: params.commands,
       requestTimeoutMs: INFERENCE_TIMEOUT_MS,
