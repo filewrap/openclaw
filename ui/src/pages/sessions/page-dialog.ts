@@ -9,7 +9,7 @@ import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts"
 /** Type-only, so the dialog itself stays behind its lazy boundary. */
 type InputDialogOpener = (typeof import("../../components/input-dialog.ts"))["showInputDialog"];
 
-export function createSessionsDialog(onError: (message: string) => void) {
+export function createSessionsDialog(onError: (error: unknown) => void) {
   /** Only one dialog is open at a time; disconnect closes whichever it is. */
   let currentLifetime: AbortController | null = null;
 
@@ -27,7 +27,7 @@ export function createSessionsDialog(onError: (message: string) => void) {
       try {
         ({ showInputDialog } = await import("../../components/input-dialog.ts"));
       } catch (error) {
-        onError(formatUiError(error));
+        onError(error);
         return null;
       }
       const resolved = options();
@@ -56,7 +56,7 @@ export function createSessionsDialog(onError: (message: string) => void) {
   ) {
     if (!scope) {
       onError(t("sessionsView.actionRequiresConnection"));
-      return;
+      return undefined;
     }
     const initialValue = resolveSessionRenameValue(row);
     return open(() => ({

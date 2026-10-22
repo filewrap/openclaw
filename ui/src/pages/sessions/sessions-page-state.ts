@@ -168,8 +168,8 @@ export function createSessionsPage(
       if (binding) {
         applyListSnapshot(binding, binding.sessions.listSnapshot(binding.query));
       }
-      if (outcome && outcome !== "stale") {
-        state.error = typeof outcome === "object" ? formatUiError(outcome.error) : null;
+      if (outcome && typeof outcome === "object") {
+        state.error = outcome.error;
       }
     },
   });
@@ -325,7 +325,7 @@ export function createSessionsPage(
     if (!isRequestScopeCurrent(scope)) {
       return "stale";
     }
-    state.error = formatUiError(error);
+    state.error = error;
     return { status: "failed", error };
   }
 
@@ -857,17 +857,17 @@ export function createSessionsPage(
     // otherwise create a store entry for arbitrary dropped text.
     const session = state.result?.sessions.find((row) => row.key === key);
     if (!session) {
-      return;
+      return undefined;
     }
     // Dropping a row onto its own section is a no-op; skip the patch round-trip.
     const current = session.category?.trim() || null;
     const promote = !isSubagentSessionKey(session.key) && !isPinnableUiSessionRow(session);
     if (current === category && !promote) {
-      return;
+      return undefined;
     }
     const scope = captureRequestScope();
     if (!scope) {
-      return;
+      return undefined;
     }
     if (category) {
       const remembered = await rememberCustomGroup(category, scope);
@@ -1239,7 +1239,7 @@ export function createSessionsPage(
             });
             break;
           case "move-to-group":
-            assignCategory(row.key, action.category);
+            void assignCategory(row.key, action.category);
             break;
           case "new-group":
             void actions.requestNewCategory(row.key);

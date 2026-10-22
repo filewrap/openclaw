@@ -7,6 +7,7 @@ import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { showInputDialog } from "../../components/input-dialog.ts";
 import * as sessionMenuWork from "../../components/session-menu-work.ts";
+import * as uiErrors from "../../lib/format-error.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import {
   createTestSessionCapability,
@@ -188,7 +189,8 @@ describe("sessions page lifecycle", () => {
         sessionId: "assignment-session",
         label: "Assignment fixture",
       });
-      const failure = "Assignment unavailable. Try again.";
+      const failure = new Error("Assignment unavailable. Try again.");
+      const formatError = vi.spyOn(uiErrors, "formatUiError");
       const assignment = createDeferred<unknown>();
       const { request, connection, sessions, context } = liveSessions(
         {
@@ -222,13 +224,15 @@ describe("sessions page lifecycle", () => {
       if (retired) {
         connection.emit({ phase: "reconnecting", client: null });
       }
-      assignment.reject(new Error(failure));
-      await assignOwner.mock.results[0]!.value;
+      assignment.reject(failure);
       if (retired) {
+        await assignOwner.mock.results[0]!.value;
         await page.updateComplete;
-        expect(page.textContent).not.toContain(failure);
+        expect(page.textContent).not.toContain(failure.message);
       } else {
-        await waitForFast(() => expect(page.textContent).toContain(failure));
+        await expect(assignOwner.mock.results[0]!.value).rejects.toBe(failure);
+        await waitForFast(() => expect(page.textContent).toContain(failure.message));
+        expect(formatError.mock.calls.at(-1)?.[0]).toBe(failure);
         expect(page.textContent).toContain("Assignment fixture");
       }
     },
@@ -309,6 +313,39 @@ describe("sessions page lifecycle", () => {
     expect(page.error).toBe("Connect to the Gateway to change sessions.");
   });
 
+  it.each([false, true])(
+    "returns the original patch failure only in its captured scope (retired: %s)",
+    async (retired) => {
+      const pending = createDeferred<Awaited<ReturnType<SessionCapability["patch"]>>>();
+      const failure = new Error("Patch unavailable. Try again.");
+      const formatError = vi.spyOn(uiErrors, "formatUiError");
+      const { page, sessions, connection } = await mountMutation({
+        patch: vi.fn(() => pending.promise),
+      });
+      const completion = page.patchSession("agent:main:main", { label: "renamed" });
+      expect(sessions.patch).toHaveBeenCalledOnce();
+      if (retired) {
+        connection.emit({ phase: "reconnecting", client: null });
+      }
+      pending.reject(failure);
+      const outcome = await completion;
+      if (retired) {
+        expect(outcome).toBe("stale");
+        await page.updateComplete;
+        expect(page.error).toBeNull();
+        expect(document.body.textContent).not.toContain(failure.message);
+      } else {
+        expect(typeof outcome === "object" ? outcome.error : undefined).toBe(failure);
+        await waitForFast(() => {
+          const alerts = page.querySelectorAll('[role="alert"]');
+          expect(alerts).toHaveLength(1);
+          expect(alerts[0]?.textContent).toContain(failure.message);
+        });
+        expect(formatError.mock.calls.at(-1)?.[0]).toBe(failure);
+      }
+    },
+  );
+
   it("uses personal visibility RPC from the management menu", async () => {
     const request = vi.fn(async () => ({ ok: true }));
     const connection = createGateway({ request } as unknown as GatewayBrowserClient);
@@ -343,6 +380,52 @@ describe("sessions page lifecycle", () => {
       ),
     );
     await waitForFast(() => expect(managed.refreshList).toHaveBeenCalled());
+    expect(managed.sessions.patch).not.toHaveBeenCalled();
+  });
+
+  it("presents involvement failure once and clears it on explicit refresh", async () => {
+    const pending = createDeferred<{ ok: boolean }>();
+    const failure = new Error("Personal visibility unavailable. Try again.");
+    const formatError = vi.spyOn(uiErrors, "formatUiError");
+    const request = vi.fn((method: string) =>
+      method === "sessions.setInvolvement" ? pending.promise : Promise.resolve({ profiles: [] }),
+    );
+    const connection = createGateway({ request } as unknown as GatewayBrowserClient);
+    connection.emit({
+      hello: {
+        ...gatewayHelloForMethods(
+          [...SESSION_MUTATION_TEST_METHODS, "sessions.setInvolvement"],
+          ["operator.read"],
+        ),
+        policy: { hasMultipleSessionSharingIdentities: true },
+      },
+    });
+    const managed = createManagedSessions();
+    const target = sessionRow("personal-retry", { hiddenFromInvolvingMe: true });
+    const context = createContext(connection.gateway, managed.sessions);
+    const page = await createRenderedPage(context, sessionsResult([target], 1));
+    const menu = await openRowMenu(page, target);
+    await openSubmenu(menu, "Advanced");
+    await selectMenuValue(menu, "toggle-involving-me");
+    await waitForFast(() => expect(page.textContent).toContain("Working…"));
+    pending.reject(failure);
+    await waitForFast(() => {
+      const alerts = page.querySelectorAll('[role="alert"]');
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.textContent).toContain(failure.message);
+      expect(page.textContent).not.toContain("Working…");
+    });
+    expect(formatError.mock.calls.at(-1)?.[0]).toBe(failure);
+
+    const refreshCalls = managed.refreshList.mock.calls.length;
+    page.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!.click();
+    await waitForFast(() => {
+      expect(managed.refreshList).toHaveBeenCalledTimes(refreshCalls + 1);
+      expect(page.querySelector('[role="alert"]')).toBeNull();
+    });
+    page.onSortChange("key");
+    await page.updateComplete;
+    expect(page.querySelector('[role="alert"]')).toBeNull();
     expect(managed.sessions.patch).not.toHaveBeenCalled();
   });
 
@@ -464,6 +547,40 @@ describe("sessions page lifecycle", () => {
     expect(sessions.deleteMany).not.toHaveBeenCalled();
   });
 
+  it("keeps a failed roster refresh visible after a successful deletion", async () => {
+    const target = sessionRow("delete-refresh");
+    const failure = new Error("Roster refresh unavailable. Try again.");
+    let deleted = false;
+    let refreshFails = false;
+    const { context } = liveSessions({
+      "sessions.list": () => {
+        if (refreshFails) {
+          throw failure;
+        }
+        return sessionsResult(deleted ? [] : [target], 1);
+      },
+      "sessions.delete": () => {
+        deleted = true;
+        refreshFails = true;
+        return { deleted: true };
+      },
+    });
+    const subscribe = vi.spyOn(context.sessions, "subscribeList");
+    const page = await createRenderedPage(context, sessionsResult([target], 1), "all");
+    await waitForFast(() => expect(page.loading).toBe(false));
+    selectRows(page, target);
+    vi.mocked(showConfirmDialog).mockResolvedValue(true);
+    expect(await page.deleteSelected()).toBe("completed");
+    expect(context.sessions.listSnapshot(subscribe.mock.calls[0]![0]).error).toBe(failure.message);
+    await waitForFast(() =>
+      expect(page.querySelector('[role="alert"]')?.textContent ?? "").toContain(failure.message),
+    );
+
+    refreshFails = false;
+    page.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!.click();
+    await waitForFast(() => expect(page.querySelector('[role="alert"]')).toBeNull());
+  });
+
   it("derives per-row archive gates and retains failed selections", async () => {
     const active = sessionRow("active", { archived: false });
     const archived = sessionRow("archived", { archived: true });
@@ -571,7 +688,7 @@ describe("sessions page lifecycle", () => {
     patched.resolve({ ok: true, key: "main", path: "", entry: { sessionId: target.sessionId! } });
     forked.resolve({ key: "forked", sessionId: "forked-id" });
     groups.reject(new Error("stale group error"));
-    await Promise.all(requests);
+    expect(await Promise.all(requests)).toEqual(["stale", "stale", "stale", "stale"]);
     expect(page.result?.sessions.map(({ key }) => key)).toEqual(["main"]);
     expect([...page.selectedSessions.keys()]).toEqual(["main"]);
     expect([page.error, page.sessionMenu]).toEqual([null, null]);

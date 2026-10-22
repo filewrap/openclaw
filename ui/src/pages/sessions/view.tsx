@@ -3,7 +3,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
-import { createMemo, Errored, For, Loading, Repeat, Show } from "solid-js";
+import { createMemo, Errored, For, Repeat, Show } from "solid-js";
 import { Icon } from "../../components/solid/icon.tsx";
 import { ContextNewSessionAction } from "../../components/solid/new-session-link.tsx";
 import { SettingsPage, SettingsSection } from "../../components/solid/settings-ui.tsx";
@@ -116,18 +116,12 @@ export function SessionsView(props: SessionsProps) {
   const rows = createMemo(() => props.result?.sessions ?? []);
   const archivedCount = createMemo(() => rows().filter((row) => row.archived === true).length);
   const transcriptSearch = createMemo(() => props.transcriptSearch);
-  const commandStatus = createMemo(() => {
+  const commandError = createMemo(() => {
     if (props.error) {
-      throw new Error(props.error);
+      // oxlint-disable-next-line typescript/only-throw-error -- Relay the owner's original error; the boundary formats it for display.
+      throw props.error;
     }
-    return (
-      props.commandCompletion?.then((result) => {
-        if (typeof result === "object") {
-          throw result.error;
-        }
-        return null;
-      }) ?? null
-    );
+    return null;
   });
   return (
     <SettingsPage wide>
@@ -139,7 +133,7 @@ export function SessionsView(props: SessionsProps) {
             </div>
           )}
         >
-          <Loading fallback={null}>{commandStatus()}</Loading>
+          {commandError()}
         </Errored>
       </Show>
       <SettingsSection

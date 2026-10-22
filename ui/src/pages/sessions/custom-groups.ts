@@ -1,5 +1,4 @@
 import type { SessionsListResult } from "../../api/types.ts";
-import { formatUiError } from "../../lib/format-error.ts";
 import { collectKnownSessionGroups } from "../../lib/sessions/grouping.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts";
@@ -18,7 +17,7 @@ export async function rememberSessionCustomGroup(options: {
   knownCategories: readonly string[];
   sessions: GroupMutationSessions;
   isCurrent: () => boolean;
-  onError: (message: string) => void;
+  onError: (error: unknown) => void;
 }): Promise<SessionsPageMutationResult> {
   if (options.knownCategories.includes(options.name)) {
     return "completed";
@@ -37,7 +36,7 @@ export async function rememberSessionCustomGroup(options: {
     if (!options.isCurrent()) {
       return "stale";
     }
-    options.onError(formatUiError(error));
+    options.onError(error);
     return { status: "failed", error };
   }
 }
