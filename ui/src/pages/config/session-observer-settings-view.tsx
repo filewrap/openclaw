@@ -126,7 +126,7 @@ export function SessionObserverSettings(props: { config: ConfigProps }) {
       return;
     }
     // Admission publishes owner facts before the optimistic transition joins this tick.
-    setCompletion(Promise.resolve().then(() => present(view, pending, retired, edit)));
+    void setCompletion(Promise.resolve().then(() => present(view, pending, retired, edit)));
   }
   const disabled = () => presentation().saving() || props.config.sessionObserverDisabled === true;
   return (

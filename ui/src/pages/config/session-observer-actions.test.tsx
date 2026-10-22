@@ -1,6 +1,7 @@
 import { createRouter } from "@openclaw/uirouter";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.ts";
+import type { SolidRouteProps } from "../../app-route-types.tsx";
 import type { ApplicationContext } from "../../app/context.ts";
 import { mountRouterOutlet } from "../../app/router-outlet.test-support.tsx";
 import { createGatewayHarness } from "../../lib/config/config-test-harness.ts";
@@ -14,6 +15,7 @@ import { createSolidApplicationContextProvider } from "../../test-helpers/solid-
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import { completeConfigContext } from "./config-page.test-support.ts";
+import type { ConfigPageId, ConfigPageRouteData } from "./config-page.tsx";
 import { pages } from "./route.ts";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -47,24 +49,27 @@ async function setup() {
     runtimeConfig,
   } as unknown as ApplicationContext);
   const Provider = createSolidApplicationContextProvider(context).wrapper;
-  const appearance = pages.find((page) => page.id === "appearance")!;
-  const advanced = pages.find((page) => page.id === "advanced")!;
+  type SettingsRoute = Extract<(typeof pages)[number], { id: ConfigPageId }>;
+  const appearance = pages.find((page): page is SettingsRoute => page.id === "appearance")!;
+  const advanced = pages.find((page): page is SettingsRoute => page.id === "advanced")!;
   const productionModule = await appearance.component();
   const Render = productionModule.renderSolid;
   const module = {
     ...productionModule,
-    renderSolid: (props: Parameters<typeof Render>[0]) => (
+    renderSolid: (props: SolidRouteProps<ConfigPageRouteData>) => (
       <Provider>
         <Render {...props} />
       </Provider>
     ),
   };
-  const router = createRouter({
-    routes: [appearance, advanced].map((route) =>
-      Object.assign({}, route, { component: () => module }),
-    ),
-  });
-  context.router = router;
+  const router = createRouter<ConfigPageId, ApplicationContext, typeof module, ConfigPageRouteData>(
+    {
+      routes: [appearance, advanced].map((route) =>
+        Object.assign({}, route, { component: () => module }),
+      ),
+    },
+  );
+  Object.assign(context, { router });
   const outlet = mountRouterOutlet({ router, retryContext: context });
   await router.navigate("appearance", context);
   const toggle = () =>
