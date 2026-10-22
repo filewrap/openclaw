@@ -1,4 +1,3 @@
-import { once } from "node:events";
 import fs from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
@@ -24,13 +23,21 @@ import { runQaGatewayFixture } from "./qa-gateway-cleanup.js";
 
 const occupied = { code: "EADDRINUSE" };
 
-async function listen(server: net.Server, port: number) {
-  await once(server.listen(port, "127.0.0.1"), "listening");
+function listen(server: net.Server, port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
 }
 
 async function close(server: net.Server): Promise<void> {
   if (server.listening) {
-    await server[Symbol.asyncDispose]();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
   }
 }
 
@@ -230,6 +237,31 @@ it.each(["child-process", "in-process"])(
   },
 );
 
+it.skipIf(process.platform !== "linux")(
+  "keeps Gateway and deferred sandbox listeners outside the kernel client-port range",
+  async () => {
+    const [low, high] = (await fs.readFile("/proc/sys/net/ipv4/ip_local_port_range", "utf8"))
+      .trim()
+      .split(/\s+/u)
+      .map(Number);
+    const instance = await createOpenClawTestInstance({ name: "sandbox-port-allocation" });
+    const sandbox = net.createServer();
+    await runQaGatewayFixture(
+      async () => {
+        for (const port of [instance.port, instance.port + 1]) {
+          expect(port < low! || port > high!, `listener ${port} overlaps ${low}–${high}`).toBe(
+            true,
+          );
+        }
+        await listen(sandbox, instance.port + 1);
+        expect(sandbox.listening).toBe(true);
+      },
+      () => close(sandbox),
+      () => instance.cleanup(),
+    );
+  },
+);
+
 it.each([
   ["state", true],
   ["config", true],
@@ -301,11 +333,11 @@ it.each([
     if (failsCleanup) {
       expect(result).toBeInstanceOf(AggregateError);
       expect(result).toHaveProperty("errors", [failure, cleanupFailure]);
+    } else if (stage === "write") {
+      expect(state.writeFailure).toMatchObject({ code: "EISDIR" });
+      expect(result).toBe(state.writeFailure);
     } else {
-      if (stage === "write") {
-        expect(state.writeFailure).toMatchObject({ code: "EISDIR" });
-      }
-      expect(result).toBe(stage === "write" ? state.writeFailure : failure);
+      expect(result).toBe(failure);
     }
     if (lifetime && lifetimeOwner) {
       const drained = await outcomeOf(lifetime.cleanup());
@@ -333,18 +365,23 @@ it.each([
     await acquired?.cleanup();
     await lifetime?.cleanup().catch(() => undefined);
     snapshot.restore();
-    for (const root of [state.root, lifetimeRoot]) {
-      if (root) {
-        await fs.rm(root, { recursive: true, force: true });
-      }
+    if (state.root) {
+      await fs.rm(state.root, { recursive: true, force: true });
+    }
+    if (lifetimeRoot) {
+      await fs.rm(lifetimeRoot, { recursive: true, force: true });
     }
   }
 });
 
+type EndpointEnv = {
+  OPENCLAW_GATEWAY_PORT?: string;
+  OPENCLAW_GATEWAY_URL?: string;
+};
 const port = 19701;
 const inheritedUrl = "wss://inherited.fixture.invalid";
 const explicitUrl = "wss://explicit.fixture.invalid";
-const endpoints = (value?: string, url?: string) => ({
+const endpoints = (value?: string, url?: string): EndpointEnv => ({
   OPENCLAW_GATEWAY_PORT: value,
   OPENCLAW_GATEWAY_URL: url,
 });
@@ -379,6 +416,11 @@ it.each([
           }
         }
         expect(readParentEndpoints()).toEqual(inherited);
+        expect(resolveGatewayUrlOverride({ env, gatewayUrl: explicitUrl })).toEqual({
+          url: explicitUrl,
+          source: "cli",
+        });
+        expect(resolveGatewayUrlOverride({ env, localPortOverride: 19705 })).toEqual({});
         expect(resolveGatewayPort(config, env)).toBe(expectedPort);
         expect(resolveGatewayUrlOverride({ env })).toEqual(override);
       },

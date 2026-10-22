@@ -19,18 +19,37 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
   }),
 );
 
+function makeParent(leaf: string, directory: string, detached = false, status = 0) {
+  const script = join(directory, "parent.mjs");
+  writeFileSync(
+    script,
+    `import { spawn } from "node:child_process";
+const child = spawn(process.execPath, ["-e", ${JSON.stringify(leaf)}], { detached: ${detached}, stdio: ["ignore", "inherit", "inherit", "ipc"] });
+child.once("message", () => process.exit(${status}));
+`,
+  );
+  return script;
+}
+
 function expectOutput(result: unknown, stdout: string, stderr: string, status = 0) {
   expect(result).toEqual({ error: undefined, status, stdout, stderr });
 }
 
-it("captures output and nonzero script status", async () => {
-  const script = join(tempDirs.make("openclaw-node-script-output-"), "output.mjs");
-  writeFileSync(
-    script,
-    'process.stdout.write("stdout\\n"); process.stderr.write("stderr\\n"); process.exitCode = 17;',
+it("captures inherited output written after the script exits", async () => {
+  const script = makeParent(
+    `
+process.on("disconnect", () => {
+  process.stdout.write("drained stdout\\n");
+  process.stderr.write("drained stderr\\n");
+});
+process.send("ready");
+`,
+    tempDirs.make("openclaw-node-script-output-"),
+    false,
+    17,
   );
   const result = await runNodeScript(script, process.env, 5_000);
-  expectOutput(result, "stdout\n", "stderr\n", 17);
+  expectOutput(result, "drained stdout\n", "drained stderr\n", 17);
 });
 
 it.for(["node", "current"] as const)(
@@ -119,14 +138,7 @@ const poll=setInterval(()=>{
 fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));
 process.send('ready');process.disconnect();
 `;
-    const script = join(directory, "parent.mjs");
-    writeFileSync(
-      script,
-      `import { spawn } from "node:child_process";
-const child = spawn(process.execPath, ["-e", ${JSON.stringify(leaf)}], { detached: true, stdio: ["ignore", "inherit", "inherit", "ipc"] });
-child.once("message", () => process.exit(0));
-`,
-    );
+    const script = makeParent(leaf, directory, true);
     const command = fixture.track(
       runNodeScript(script, env, undefined, { signal, requireProcessTreeExit: true }),
     );

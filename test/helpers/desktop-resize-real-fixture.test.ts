@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { createServer as createHttpServer } from "node:http";
 import net, { type Socket } from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -54,7 +55,7 @@ function fixture(carrier: DesktopResizeFixture["carrier"] = "ssh"): DesktopResiz
   };
 }
 
-it("keeps the Gateway off another fixture's claimed port", async () => {
+it("keeps the Gateway listener available when free-port probes reuse an address", async () => {
   const reserved = await reserveTestPortListener({
     offsets: [0],
     createListener: () => net.createServer(),
@@ -66,18 +67,25 @@ it("keeps the Gateway off another fixture's claimed port", async () => {
     await reserved.claim.release();
   });
   const proxy = await createDesktopResizeProxy();
-  const gateway = net.createServer();
+  const gateway = createHttpServer((_request, response) => response.end("ready"));
   onTestFinished(async () => {
     try {
-      await gateway[Symbol.asyncDispose]();
+      if (gateway.listening) {
+        await new Promise<void>((resolve, reject) => {
+          gateway.close((error) => (error ? reject(error) : resolve()));
+        });
+      }
     } finally {
       await proxy.close();
     }
   });
-  expect([proxy.gatewayPort, proxy.gatewayPort + 1, proxy.gatewayPort + 2]).not.toContain(
-    reserved.claim.port,
-  );
-  await once(gateway.listen(proxy.gatewayPort, "127.0.0.1"), "listening");
+  const gatewayPort = proxy.gatewayPort;
+  await new Promise<void>((resolve, reject) => {
+    gateway.once("error", reject);
+    gateway.listen(gatewayPort, "127.0.0.1", resolve);
+  });
+  const response = await fetch(new URL("/readyz", proxy.baseUrl));
+  expect(await response.text()).toBe("ready");
 });
 
 describe("desktop resize fixture provenance and carrier", () => {

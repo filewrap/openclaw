@@ -252,6 +252,14 @@ describe("browser storage route boundaries", () => {
     expect(routeState.storageClearViaPlaywright).not.toHaveBeenCalled();
   });
 
+  it("keeps cookie reads behind the current-tab URL guard", async () => {
+    const response = await get("/cookies");
+    expect(routeState.withPlaywrightRouteContext).toHaveBeenCalledWith(
+      expect.objectContaining({ feature: "cookies", enforceCurrentUrlAllowed: true }),
+    );
+    expect(response.body).toEqual({ ok: true, targetId: "tab-1", cookies: [] });
+  });
+
   it("applies HTTP credentials without ever returning the password", async () => {
     const credentials = { username: "browser-user", password: "sensitive-browser-password" };
     const response = await post("/set/credentials", credentials);

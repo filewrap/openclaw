@@ -37,22 +37,20 @@ async function createBrokerFixture(pairingCurrent?: () => boolean | Promise<bool
     // HTTP close excludes upgraded sockets; their late diagnostics belong to this test.
     await Promise.all(upgradedSocketsClosed);
   });
-  const baseUrl = `ws://127.0.0.1:${port}`;
-  const mint = (portal = false) => {
-    const minted = (portal ? broker.mintPortal : broker.mint)({ nodeId: "node-1", ...session });
-    const url = `${baseUrl}${minted.attachPath}`;
-    const open = async (metadata?: object) => {
-      const ws = new WebSocket(url);
-      cleanups.push(async () => ws.terminate());
-      await once(ws, "open");
-      if (metadata) {
-        ws.send(Buffer.from(JSON.stringify(metadata)), { binary: true });
-      }
-      return ws;
-    };
-    return { minted, url, open };
-  };
-  return { broker, session, baseUrl, mint };
+  return { broker, session, baseUrl: `ws://127.0.0.1:${port}` };
+}
+
+async function openSocket(url: string): Promise<WebSocket> {
+  const ws = new WebSocket(url);
+  cleanups.push(async () => ws.terminate());
+  await once(ws, "open");
+  return ws;
+}
+
+async function connectAndSend(url: string, metadata: object): Promise<WebSocket> {
+  const ws = await openSocket(url);
+  ws.send(Buffer.from(JSON.stringify(metadata)), { binary: true });
+  return ws;
 }
 
 const expectUnauthorized = (url: string) => expectUnauthorizedUpgrade(url, cleanups);
@@ -60,14 +58,14 @@ const expectUnauthorized = (url: string) => expectUnauthorizedUpgrade(url, clean
 async function pendingPairingHandoff() {
   let pairingChecks = 0;
   const { promise: recheck, resolve: releaseRecheck } = createDeferred();
-  const fixture = await createBrokerFixture(async () => {
+  const { broker, session, baseUrl } = await createBrokerFixture(async () => {
     if (++pairingChecks > 1) {
       await recheck;
     }
     return true;
   });
-  const { minted, open } = fixture.mint();
-  const ws = await open({ auth: "vnc-password" });
+  const minted = broker.mint({ nodeId: "node-1", ...session });
+  const ws = await connectAndSend(`${baseUrl}${minted.attachPath}`, { auth: "vnc-password" });
   return { minted, ws, releaseRecheck, checks: () => pairingChecks };
 }
 
@@ -80,10 +78,14 @@ describe("node desktop stream tickets", () => {
     async ({ kind, closeMode }) => {
       const logCapture = captureLogs();
       vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-      const fixture = await createBrokerFixture();
+      const { broker, session, baseUrl } = await createBrokerFixture();
       const serverTimers = vi.getTimerCount();
-      const { minted, open } = fixture.mint(kind === "portal");
-      const ws = await open(kind === "desktop" ? { auth: "vnc-password" } : { ok: true });
+      const binding = { nodeId: "node-1", ...session };
+      const minted = kind === "desktop" ? broker.mint(binding) : broker.mintPortal(binding);
+      const ws = await connectAndSend(
+        `${baseUrl}${minted.attachPath}`,
+        kind === "desktop" ? { auth: "vnc-password" } : { ok: true },
+      );
       const { stream } = await minted.attached;
       expect(vi.getTimerCount()).toBe(serverTimers + 1);
       const pings: Buffer[] = [];
@@ -142,16 +144,17 @@ describe("node desktop stream tickets", () => {
   ] as const)(
     "is single-use and resolves one ticket-bound $auth stream with password $vncPassword",
     async ({ auth, vncPassword }) => {
-      const { minted, url, open } = (await createBrokerFixture()).mint();
+      const { broker, session, baseUrl } = await createBrokerFixture();
+      const minted = broker.mint({ nodeId: "node-1", ...session });
 
       const metadata = { auth, ...(vncPassword ? { vncPassword } : {}) };
-      await open(metadata);
+      await connectAndSend(`${baseUrl}${minted.attachPath}`, metadata);
       const attached = await minted.attached;
       expect(attached).toMatchObject(metadata);
       expect(attached.vncPassword).toBe(vncPassword);
       attached.stream.destroy();
 
-      await expectUnauthorized(url);
+      await expectUnauthorized(`${baseUrl}${minted.attachPath}`);
     },
   );
 
@@ -186,8 +189,9 @@ describe("node desktop stream tickets", () => {
     { auth: "ard-account", vncPassword: "secret", username: "worker" },
     { auth: "ard-account", vncPassword: "x".repeat(64) },
   ])("rejects invalid metadata %j without exposing later WebSocket errors", async (metadata) => {
-    const { minted, open } = (await createBrokerFixture()).mint();
-    const ws = await open(metadata);
+    const { broker, session, baseUrl } = await createBrokerFixture();
+    const minted = broker.mint({ nodeId: "node-1", ...session });
+    const ws = await connectAndSend(`${baseUrl}${minted.attachPath}`, metadata);
     ws.send(Buffer.alloc(65 * 1024), { binary: true });
 
     await expect(minted.attached).rejects.toThrow();
@@ -195,10 +199,11 @@ describe("node desktop stream tickets", () => {
 
   it("rejects an expired ticket before upgrading", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
-    const { minted, url } = (await createBrokerFixture()).mint();
+    const { broker, session, baseUrl } = await createBrokerFixture();
+    const minted = broker.mint({ nodeId: "node-1", ...session });
     now.mockReturnValue(minted.expiresAtMs);
 
-    await expectUnauthorized(url);
+    await expectUnauthorized(`${baseUrl}${minted.attachPath}`);
     await expect(minted.attached).rejects.toThrow("expired");
   });
 
@@ -216,10 +221,10 @@ describe("node desktop stream tickets", () => {
   });
 
   it("rechecks the pairing generation after a delayed metadata frame", async () => {
-    const fixture = await createBrokerFixture();
-    const { minted, open } = fixture.mint();
-    const ws = await open();
-    fixture.session.pairingGeneration = "generation-2";
+    const { broker, session, baseUrl } = await createBrokerFixture();
+    const minted = broker.mint({ nodeId: "node-1", ...session });
+    const ws = await openSocket(`${baseUrl}${minted.attachPath}`);
+    session.pairingGeneration = "generation-2";
     ws.send(Buffer.from(JSON.stringify({ auth: "vnc-password" })), { binary: true });
 
     await expect(minted.attached).rejects.toThrow("stale");
@@ -230,10 +235,10 @@ describe("node desktop stream tickets", () => {
     async (outcome) => {
       const logCapture = captureLogs();
       const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
-      const fixture = await createBrokerFixture();
+      const { broker, session, baseUrl } = await createBrokerFixture();
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      const { minted, open } = fixture.mint();
-      const ws = await open();
+      const minted = broker.mint({ nodeId: "node-1", ...session });
+      const ws = await openSocket(`${baseUrl}${minted.attachPath}`);
       const closed = new Promise<{ code: number; reason: string }>((resolve) => {
         ws.once("close", (code, reason) => resolve({ code, reason: reason.toString() }));
       });
@@ -264,13 +269,13 @@ describe("node desktop stream tickets", () => {
   it("rejects when the raw upgrade socket closes during pairing authorization", async () => {
     let pairingChecks = 0;
     const { promise: check, resolve: releaseCheck } = createDeferred();
-    const fixture = await createBrokerFixture(async () => {
+    const { broker, session, baseUrl } = await createBrokerFixture(async () => {
       pairingChecks += 1;
       await check;
       return true;
     });
-    const { minted } = fixture.mint();
-    const url = new URL(fixture.baseUrl);
+    const minted = broker.mint({ nodeId: "node-1", ...session });
+    const url = new URL(baseUrl);
     const socket = net.createConnection(Number(url.port), url.hostname);
     cleanups.push(async () => {
       socket.destroy();
@@ -299,26 +304,37 @@ describe("node desktop stream tickets", () => {
 
 describe("node portal stream tickets", () => {
   it("pairs a ready portal stream and keeps desktop and portal tickets isolated", async () => {
-    const { minted, url, open } = (await createBrokerFixture()).mint(true);
+    const { broker, session, baseUrl } = await createBrokerFixture();
+    const minted = broker.mintPortal({ nodeId: "node-1", ...session });
 
-    await expectUnauthorized(url.replace("/node-portal/", "/node-desktop/"));
-    await open({ ok: true });
+    await expectUnauthorized(
+      `${baseUrl}${minted.attachPath.replace("/node-portal/", "/node-desktop/")}`,
+    );
+    const ws = await connectAndSend(`${baseUrl}${minted.attachPath}`, { ok: true });
     const attached = await minted.attached;
+    const response = new Promise<Buffer>((resolve) => {
+      attached.stream.once("data", resolve);
+    });
+    ws.send(Buffer.from("HTTP/1.1 200 OK\r\n\r\n"), { binary: true });
+
+    await expect(response).resolves.toEqual(Buffer.from("HTTP/1.1 200 OK\r\n\r\n"));
     attached.stream.destroy();
-    await expectUnauthorized(url);
+    await expectUnauthorized(`${baseUrl}${minted.attachPath}`);
   });
 
   it("rejects unexpected portal readiness metadata", async () => {
-    const { minted, open } = (await createBrokerFixture()).mint(true);
+    const { broker, session, baseUrl } = await createBrokerFixture();
+    const minted = broker.mintPortal({ nodeId: "node-1", ...session });
 
-    await open({ ok: true, auth: "vnc-password" });
+    await connectAndSend(`${baseUrl}${minted.attachPath}`, { ok: true, auth: "vnc-password" });
 
     await expect(minted.attached).rejects.toThrow("invalid node portal attach metadata");
   });
 
   it("rejects immediately when the node closes before the target is ready", async () => {
-    const { minted, open } = (await createBrokerFixture()).mint(true);
-    const ws = await open();
+    const { broker, session, baseUrl } = await createBrokerFixture();
+    const minted = broker.mintPortal({ nodeId: "node-1", ...session });
+    const ws = await openSocket(`${baseUrl}${minted.attachPath}`);
 
     ws.close();
 
