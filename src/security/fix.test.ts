@@ -59,7 +59,9 @@ describe("security fix", () => {
     await fs.chmod(filePath, 0o644);
   };
 
-  const createWhatsAppConfigFixTestPlugin = (storeAllowFrom: string[]): ChannelPlugin => ({
+  const createWhatsAppConfigFixTestPlugin = (
+    applyConfigFixes: NonNullable<NonNullable<ChannelPlugin["security"]>["applyConfigFixes"]>,
+  ): ChannelPlugin => ({
     ...createChannelTestPluginBase({
       id: "whatsapp",
       label: "WhatsApp",
@@ -77,43 +79,7 @@ describe("security fix", () => {
         isConfigured: () => true,
       },
     }),
-    security: {
-      applyConfigFixes: async ({ cfg }) => {
-        if (storeAllowFrom.length === 0) {
-          return { config: cfg, changes: [] };
-        }
-        const next = structuredClone(cfg ?? {});
-        const whatsapp = next.channels?.whatsapp as Record<string, unknown> | undefined;
-        if (!whatsapp || typeof whatsapp !== "object") {
-          return { config: cfg, changes: [] };
-        }
-        const changes: string[] = [];
-        const holders: Array<[string, Record<string, unknown>]> = [
-          ["channels.whatsapp.", whatsapp],
-        ];
-        const accounts = whatsapp.accounts;
-        if (accounts && typeof accounts === "object") {
-          for (const [id, account] of Object.entries(accounts)) {
-            if (account && typeof account === "object") {
-              holders.push([
-                `channels.whatsapp.accounts.${id}.`,
-                account as Record<string, unknown>,
-              ]);
-            }
-          }
-        }
-        for (const [prefix, holder] of holders) {
-          const allowFrom = Array.isArray(holder.allowFrom) ? holder.allowFrom : [];
-          const groupAllowFrom = Array.isArray(holder.groupAllowFrom) ? holder.groupAllowFrom : [];
-          if (holder.groupPolicy === "open" && !allowFrom.length && !groupAllowFrom.length) {
-            holder.groupAllowFrom = [...storeAllowFrom];
-            changes.push(`${prefix}groupAllowFrom=pairing-store`);
-          }
-        }
-
-        return { config: changes.length ? next : cfg, changes };
-      },
-    },
+    security: { applyConfigFixes },
   });
 
   beforeAll(async () => {
@@ -129,6 +95,20 @@ describe("security fix", () => {
   const channelIds = ["telegram", "whatsapp", "discord", "signal", "imessage"] as const;
   const groupPolicies = (groupPolicy: "open" | "allowlist") =>
     Object.fromEntries(channelIds.map((id) => [id, { groupPolicy }]));
+  const rootChannels = (groupPolicy: "open" | "allowlist", seeded = false) => ({
+    ...groupPolicies(groupPolicy),
+    whatsapp: { groupPolicy, ...(seeded ? { groupAllowFrom: ["+15551234567"] } : {}) },
+  });
+  const accountChannels = (groupPolicy: "open" | "allowlist", seeded = false) => ({
+    whatsapp: {
+      accounts: {
+        a1: {
+          groupPolicy,
+          ...(seeded ? { groupAllowFrom: ["+15550001111"] } : {}),
+        },
+      },
+    },
+  });
   const allowlisted = {
     groupPolicy: "allowlist",
     accounts: { default: { groupPolicy: "allowlist" }, work: { groupPolicy: "allowlist" } },
@@ -136,53 +116,51 @@ describe("security fix", () => {
   it.each([
     {
       name: "tightens group policies after plugin fixes",
-      cfg: { channels: groupPolicies("open") },
-      store: ["+15551234567"],
+      channels: rootChannels,
+      pluginChanges: ["channels.whatsapp.groupAllowFrom=pairing-store"],
       result: {
         changes: [
           ...channelIds.map((id) => `channels.${id}.groupPolicy=open -> allowlist`),
           "channels.whatsapp.groupAllowFrom=pairing-store",
         ],
       },
-      channels: {
-        ...groupPolicies("allowlist"),
-        whatsapp: { groupPolicy: "allowlist", groupAllowFrom: ["+15551234567"] },
-      },
     },
     {
       name: "converts and seeds per-account policies",
-      cfg: { channels: { whatsapp: { accounts: { a1: { groupPolicy: "open" } } } } },
-      store: ["+15550001111"],
+      channels: accountChannels,
+      pluginChanges: ["channels.whatsapp.accounts.a1.groupAllowFrom=pairing-store"],
       result: { ok: true },
-      channels: {
-        whatsapp: {
-          accounts: { a1: { groupPolicy: "allowlist", groupAllowFrom: ["+15550001111"] } },
-        },
-      },
     },
     {
       name: "leaves already allowlisted accounts unseeded",
-      cfg: { channels: { whatsapp: allowlisted } },
-      store: ["+15550001111"],
+      channels: () => ({ whatsapp: allowlisted }),
+      pluginChanges: [],
       result: { configWritten: false, changes: [] },
-      channels: { whatsapp: allowlisted },
       unseeded: true,
     },
   ] satisfies Array<{
     name: string;
-    cfg: OpenClawConfig;
-    store: string[];
+    pluginChanges: string[];
     result: Partial<Awaited<ReturnType<typeof fixSecurityFootguns>>>;
-    channels: OpenClawConfig["channels"];
+    channels: (policy: "open" | "allowlist", seeded?: boolean) => OpenClawConfig["channels"];
     unseeded?: boolean;
   }>)("$name", async (scenario) => {
-    const { stateDir, configPath } = await createConfig("group-policy", scenario.cfg);
+    const originalChannels = scenario.channels("open");
+    const { stateDir, configPath } = await createConfig("group-policy", {
+      channels: originalChannels,
+    });
     const res = await runFix(stateDir, configPath, [
-      createWhatsAppConfigFixTestPlugin(scenario.store),
+      createWhatsAppConfigFixTestPlugin(async ({ cfg: input }) => {
+        expect(input.channels).toEqual(originalChannels);
+        return {
+          config: { ...input, channels: scenario.channels("open", true) },
+          changes: scenario.pluginChanges,
+        };
+      }),
     ]);
     const cfg = JSON.parse(await fs.readFile(configPath, "utf-8")) as OpenClawConfig;
     expect(res).toMatchObject(scenario.result);
-    expect(cfg.channels).toMatchObject(scenario.channels);
+    expect(cfg.channels).toMatchObject(scenario.channels("allowlist", true));
     if ("unseeded" in scenario) {
       const whatsapp = expectDefined(cfg.channels?.whatsapp, "whatsapp");
       expect(whatsapp.groupAllowFrom).toBeUndefined();

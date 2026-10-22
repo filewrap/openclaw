@@ -3508,7 +3508,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "src/security/audit-filesystem-windows.test.ts",
   "src/security/audit-plugins-trust.test.ts",
   "src/security/audit-rosterless.test.ts",
-  "src/security/audit-trust-model.test.ts",
   "src/security/fix.test.ts",
   "src/security/install-policy.test.ts",
   "src/sessions/auth-profile-preservation.test.ts",

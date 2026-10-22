@@ -34,6 +34,9 @@ const expectFailed = (result: Awaited<ReturnType<typeof runInstallPolicy>>, reas
   expect(result?.blocked?.code).toBe("security_scan_failed");
   expect(result?.blocked?.reason).toContain(reason);
 };
+const blocked = (reason: string) => ({
+  blocked: { code: "security_scan_blocked", reason: `blocked by install policy: ${reason}` },
+});
 
 async function writePolicyScript(
   dir: string,
@@ -273,27 +276,36 @@ describe("runInstallPolicy", () => {
     await expect(runPolicy(config)).resolves.toBeUndefined();
   });
 
-  it("keeps truncated operator block reasons UTF-16 safe", async () => {
-    const reasonPrefix = "r".repeat(999);
-    const result = await runDecision("block", {
-      reason: `${reasonPrefix}🎉tail`,
-    });
-    expect(result?.blocked).toEqual({
-      code: "security_scan_blocked",
-      reason: `blocked by install policy: ${reasonPrefix.slice(0, 997)}...`,
-    });
+  const reasonPrefix = "r".repeat(999);
+  const criticalFinding = makeFinding("review", "Registry is not approved.", {
+    severity: "critical",
   });
-
-  it("keeps valid findings while dropping malformed fields through schema parsing", async () => {
-    const result = await runDecision("allow", {
-      findings: [
-        makeFinding("  review  ", "  Review.  ", { file: 42, line: "7", evidence: false }),
-        { ruleId: 42, severity: "warn", message: "invalid required field" },
-      ],
-    });
-    expect(result).toStrictEqual({
-      findings: [{ ruleId: "review", severity: "warn", message: "Review." }],
-    });
+  it.each([
+    [
+      "UTF-16 block truncation",
+      "block",
+      { reason: `${reasonPrefix}🎉tail` },
+      blocked(`${reasonPrefix.slice(0, 997)}...`),
+    ],
+    [
+      "malformed fields and findings",
+      "allow",
+      {
+        findings: [
+          makeFinding("  review  ", "  Review.  ", { file: 42, line: "7", evidence: false }),
+          { ruleId: 42, severity: "warn", message: "invalid required field" },
+        ],
+      },
+      { findings: [makeFinding("review", "Review.")] },
+    ],
+    [
+      "block findings without file or line",
+      "block",
+      { reason: "unapproved registry", findings: [criticalFinding] },
+      { ...blocked("unapproved registry"), findings: [criticalFinding] },
+    ],
+  ] as const)("%s", async (_name, decision, fields, expected) => {
+    expect(await runDecision(decision, fields)).toStrictEqual(expected);
   });
 
   it("returns warnings with their reason and findings", async () => {
@@ -369,41 +381,25 @@ describe("runInstallPolicy", () => {
     expect(result?.findings).toBeUndefined();
   });
 
-  it("fails closed when a warning has a missing reason", async () => {
-    const result = await runDecision("warn", { reason: undefined });
-    expectFailed(result, 'decision "warn" requires a non-empty reason');
-  });
-
-  it("preserves block findings without file or line", async () => {
-    const findings = [makeFinding("review", "Registry is not approved.", { severity: "critical" })];
-    const result = await runDecision("block", {
-      reason: "unapproved registry",
-      findings,
-    });
-    expect(result).toEqual({
-      blocked: {
-        code: "security_scan_blocked",
-        reason: "blocked by install policy: unapproved registry",
-      },
-      findings,
-    });
-  });
-
   it.each([
-    { label: "non-object", response: [], expected: "must be a JSON object" },
-    {
-      label: "unsupported protocol version",
-      response: { protocolVersion: 2, decision: "allow" },
-      expected: "protocolVersion must be 1",
-    },
-    {
-      label: "unknown decision",
-      response: { protocolVersion: 1, decision: "review" },
-      expected: 'decision must be "allow", "warn", or "block"',
-    },
-  ])("fails closed for a $label response", async ({ response, expected }) => {
-    const result = await runResponse(response);
-    expectFailed(result, expected);
+    [
+      "missing warning reason",
+      { protocolVersion: 1, decision: "warn" },
+      'decision "warn" requires a non-empty reason',
+    ],
+    ["non-object", [], "must be a JSON object"],
+    [
+      "unsupported protocol version",
+      { protocolVersion: 2, decision: "allow" },
+      "protocolVersion must be 1",
+    ],
+    [
+      "unknown decision",
+      { protocolVersion: 1, decision: "review" },
+      'decision must be "allow", "warn", or "block"',
+    ],
+  ])("fails closed for a %s response", async (_label, response, expected) => {
+    expectFailed(await runResponse(response), String(expected));
   });
 
   async function runLoggedPolicy(env: Record<string, string>) {
