@@ -976,7 +976,7 @@ it("preserves later inputs from an older archive without admitting new caches", 
   const { service } = await archiveFixture();
   const projection = await prepare();
   const originalAdmission = (await readProjection())!.source_paths_json;
-  const input = ".artifacts/build-cache-inputs/late-original.json";
+  const input = ".artifacts/build-cache-inputs/node_modules/late-original.json";
   expect(JSON.parse(originalAdmission)).not.toContain(input);
   await writeText(canonical, ".gitignore", ".env.local\n.artifacts/\n");
   await fs.mkdir(path.dirname(path.join(canonical, input)), { recursive: true });

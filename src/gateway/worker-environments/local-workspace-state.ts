@@ -170,22 +170,17 @@ export function projectionOperations(
       preparedInputPaths = paths;
       const retained = buildCacheInputPaths(paths);
       if (owner.worktree.snapshotRef && selected.baseline_ref) {
-        const document = await baselineDocument();
-        const baseline = parseWorkerWorkspaceManifest(document.rawManifest, document.manifestRef);
-        const prior = buildCacheInputPaths(baseline.entries.map((entry) => entry.path));
-        if ([...prior].some((entryPath) => !retained.has(entryPath))) {
-          const archived = await requireGitBuffer(
-            owner.worktree.repoRoot,
-            ["ls-tree", "-r", "-z", "--name-only", owner.worktree.snapshotRef],
-            { signal, beforeRun: assertCurrent },
-          );
-          current();
-          // Older archives lost later index membership. Preserve exact archived inputs,
-          // including ambiguous old caches, without admitting future directory contents.
-          for (const entryPath of buildCacheInputPaths(decodeLocalWorkspaceGitPaths(archived))) {
-            retained.add(entryPath);
-            paths.add(entryPath);
-          }
+        const archived = await requireGitBuffer(
+          owner.worktree.repoRoot,
+          ["ls-tree", "-r", "-z", "--name-only", owner.worktree.snapshotRef],
+          { signal, beforeRun: assertCurrent },
+        );
+        current();
+        // Older archives lost later index membership. The snapshot owns these exact
+        // inputs, including derived-looking names, but not future directory contents.
+        for (const entryPath of buildCacheInputPaths(decodeLocalWorkspaceGitPaths(archived))) {
+          retained.add(entryPath);
+          paths.add(entryPath);
         }
       }
       const known = new Set(admitted);
