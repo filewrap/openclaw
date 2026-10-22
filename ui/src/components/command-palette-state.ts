@@ -126,7 +126,7 @@ export class CommandPaletteState {
   private activeId: string | null = null;
   private sessionItems: readonly CommandPaletteItem[] = [];
   private catalogItems: readonly CommandPaletteItem[] = [];
-  private sessionSearchPending = false;
+  private sessionSearchRead: { promise: Promise<void> } | undefined;
   private sessionSearchFailed = false;
   private sessionSearchPartial = false;
   private archivedTranscriptsExcluded = 0;
@@ -193,7 +193,7 @@ export class CommandPaletteState {
       getGateway: () => this.context?.gateway,
       invalidateRequests: (change) => {
         this.invalidateSessionSearch();
-        this.sessionSearchPending = false;
+        this.sessionSearchRead = undefined;
         this.catalogLoad = undefined;
         this.modelReader.clear();
         this.modelSearchRead = undefined;
@@ -404,7 +404,7 @@ export class CommandPaletteState {
   private clearSessionSearch() {
     this.invalidateSessionSearch();
     this.sessionItems = [];
-    this.sessionSearchPending = false;
+    this.sessionSearchRead = undefined;
     this.sessionSearchFailed = false;
     this.sessionSearchPartial = false;
     this.archivedTranscriptsExcluded = 0;
@@ -518,12 +518,10 @@ export class CommandPaletteState {
       if (search.length < SESSION_SEARCH_MIN_CHARS) {
         return;
       }
-      this.sessionSearchPending = Boolean(
-        this.props.onSelectSession && this.context?.sessions && this.gateway.connected,
-      );
       void this.ensureCatalogItems();
       if (this.props.onSelectSession) {
-        void this.searchSessions(search);
+        this.sessionSearchRead = { promise: this.searchSessions(search) };
+        this.changed();
       }
     };
     if (immediate) {
@@ -537,7 +535,6 @@ export class CommandPaletteState {
     const { sessions, gateway } = this.context;
     const client = gateway.snapshot.client;
     if (!sessions || gateway?.snapshot.phase !== "connected" || !client) {
-      this.sessionSearchPending = false;
       return;
     }
     const requestId = ++this.sessionSearchId;
@@ -593,7 +590,6 @@ export class CommandPaletteState {
       }
     } finally {
       if (isCurrent()) {
-        this.sessionSearchPending = false;
         this.changed();
       }
     }
@@ -710,7 +706,7 @@ export class CommandPaletteState {
         ...this.catalogItems,
         ...this.modelItems,
       ],
-      sessionSearchPending: this.sessionSearchPending,
+      sessionSearchRead: this.sessionSearchRead,
       catalogSearchRead: this.catalogLoad,
       modelSearchRead: this.modelSearchRead,
       sessionSearchFailed: this.sessionSearchFailed,

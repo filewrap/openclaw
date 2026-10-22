@@ -1,6 +1,5 @@
 import type { JSX as SolidJSX } from "@solidjs/web";
 import {
-  type Accessor,
   createMemo,
   Errored,
   For,
@@ -10,6 +9,7 @@ import {
   onCleanup,
   Show,
   untrack,
+  type Accessor,
 } from "solid-js";
 import {
   pathForAgentPanel,
@@ -230,11 +230,17 @@ function PaletteHint(props: { shortcut: SolidJSX.Element; label: string }) {
 
 function PaletteSearch(props: {
   readProps: () => CommandPaletteProps;
+  sessionRead: Accessor<void | undefined>;
   catalogRead: Accessor<void | undefined>;
   modelRead: Accessor<unknown>;
   optionElements: Map<string, HTMLDivElement>;
 }) {
   const current = () => props.readProps();
+  const sessionSearchPending = () => isPending(props.sessionRead);
+  const readSessionSearch = () => {
+    latest(props.sessionRead);
+    return null;
+  };
   const catalogSearchPending = () =>
     Boolean(current().searchQuery.trim()) &&
     !current().promptMode &&
@@ -263,7 +269,7 @@ function PaletteSearch(props: {
     ].filter((notice): notice is string => Boolean(notice));
   const searchSettled = () =>
     Boolean(current().searchQuery.trim()) &&
-    !current().sessionSearchPending &&
+    !sessionSearchPending() &&
     !catalogSearchPending() &&
     !current().remoteSearchOffline &&
     !current().modelSearchError &&
@@ -273,6 +279,7 @@ function PaletteSearch(props: {
     current().archivedTranscriptsExcluded === 0;
   return (
     <>
+      {readSessionSearch()}
       {/* A cold catalog read must not hide already available commands. */}
       <Loading>{readCatalog()}</Loading>
       <Show when={current().searchQuery.trim() && current().onSelectSession}>
@@ -294,13 +301,9 @@ function PaletteSearch(props: {
           </For>
         </div>
       </Show>
-      <Show when={current().sessionSearchPending || catalogSearchPending()}>
+      <Show when={sessionSearchPending() || catalogSearchPending()}>
         <div class="cmd-palette__empty" role="status">
-          {t(
-            current().sessionSearchPending
-              ? "palette.searchingSessions"
-              : "palette.searchingCommands",
-          )}
+          {t(sessionSearchPending() ? "palette.searchingSessions" : "palette.searchingCommands")}
         </div>
       </Show>
       <div
@@ -310,7 +313,7 @@ function PaletteSearch(props: {
         role="listbox"
         aria-label={t("palette.placeholder")}
         aria-busy={
-          current().searchDebouncing || current().sessionSearchPending || catalogSearchPending()
+          current().searchDebouncing || sessionSearchPending() || catalogSearchPending()
             ? "true"
             : "false"
         }
@@ -429,6 +432,8 @@ export function CommandPaletteView(props: { readProps: () => CommandPaletteProps
   const hideSearch = () => results().hideSearch;
   // The collapsing search remains mounted with its last presented projection.
   const search = createParkedProjection(current, () => !hideSearch());
+  const sessionRequest = createMemo(() => search().sessionSearchRead);
+  const sessionRead = createMemo(() => sessionRequest()?.promise);
   const catalogRequest = createMemo(() => search().catalogSearchRead);
   const catalogRead = createMemo(() => catalogRequest()?.promise);
   const modelRequest = createMemo(() => search().modelSearchRead);
@@ -571,19 +576,20 @@ export function CommandPaletteView(props: { readProps: () => CommandPaletteProps
               <Errored
                 fallback={() => (
                   <div class="cmd-palette__source-error" role="status">
-                    {t("palette.modelSearchFailed")}
+                    {t("palette.searchFailed")}
                   </div>
                 )}
               >
                 <Loading
                   fallback={
                     <div class="cmd-palette__empty" role="status">
-                      {t("palette.searchingCommands")}
+                      {t("palette.searchingSessions")}
                     </div>
                   }
                 >
                   <PaletteSearch
                     readProps={search}
+                    sessionRead={sessionRead}
                     catalogRead={catalogRead}
                     modelRead={modelRead}
                     optionElements={optionElements}
