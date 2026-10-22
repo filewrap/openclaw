@@ -43,7 +43,9 @@ export function createSubagentsPresentation(source: () => SubagentsPanelData) {
       }
       yield Promise.race([admitted, retirement]);
       // The owner admits list refresh after acknowledgement; earlier pending would hold navigation.
-      if (isCurrent(view)) void refresh(read);
+      if (isCurrent(view)) {
+        void refresh(read);
+      }
     });
     // Mobile captures this before opening confirmation, preserving its target/run.
     const capture = () => {
@@ -51,14 +53,18 @@ export function createSubagentsPresentation(source: () => SubagentsPanelData) {
       const target = row();
       const retirement = view.retired;
       return async () => {
-        if (!target || !isCurrent(view)) return;
+        if (!target || !isCurrent(view)) {
+          return;
+        }
         const admitted = view.owner.stop(target);
         // Owner admission publishes synchronously before the action joins this tick.
         await Promise.resolve();
         try {
           await present(view, admitted, retirement);
         } catch (error) {
-          if (isCurrent(view) && !view.owner.readError) view.owner.reportStopError(error);
+          if (isCurrent(view) && !view.owner.readError) {
+            view.owner.reportStopError(error);
+          }
         }
       };
     };

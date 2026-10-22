@@ -288,7 +288,7 @@ export class SubagentsPanelData {
     const incomplete =
       (pagination?.hasMore ?? result?.hasMore) ||
       (pagination?.totalCount !== undefined && pagination.count < pagination.totalCount);
-    this.loading = !snapshot.error && Boolean(snapshot.loading || incomplete);
+    this.loading = !snapshot.error && (snapshot.loading || incomplete);
     this.failure = snapshot.error ? { kind: "read", message: snapshot.error } : null;
     this.syncReadCompletion();
     if (snapshot.error) {

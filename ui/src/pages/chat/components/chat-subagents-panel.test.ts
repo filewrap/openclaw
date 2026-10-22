@@ -168,12 +168,20 @@ it.each([undefined, false, true])(
     const f = mountPanel((method, params) => {
       const values = asOptionalRecord(params);
       if (method === "sessions.list") {
-        if (!values?.spawnedBy) return page([]);
-        if (phase === "refresh") return revalidation.promise;
-        if (phase === "ready") return page([first, last]);
+        if (!values?.spawnedBy) {
+          return page([]);
+        }
+        if (phase === "refresh") {
+          return revalidation.promise;
+        }
+        if (phase === "ready") {
+          return page([first, last]);
+        }
         return values.offset ? continuation.promise : initial.promise;
       }
-      if (method === "chat.history") return metrics.promise;
+      if (method === "chat.history") {
+        return metrics.promise;
+      }
       return {};
     }, mobile);
     onTestFinished(() => {
@@ -223,16 +231,20 @@ it("keeps desktop row Stop feedback independent, preserves navigation, and relea
   let holdRefresh = false;
   const f = mountPanel((method, params) => {
     const values = asOptionalRecord(params);
-    if (method === "sessions.list")
+    if (method === "sessions.list") {
       return values?.spawnedBy ? (holdRefresh ? revalidation.promise : page(rows)) : page([]);
-    if (method === "sessions.abort") return aborted.promise;
-    if (method === "chat.history")
+    }
+    if (method === "sessions.abort") {
+      return aborted.promise;
+    }
+    if (method === "chat.history") {
       return {
         sessionId: values?.sessionKey === rows[0]!.key ? rows[0]!.sessionId : rows[1]!.sessionId,
         messages: [],
         hasMore: false,
         totalMessages: 0,
       };
+    }
     return {};
   }, false);
   onTestFinished(() => {
@@ -246,7 +258,9 @@ it("keeps desktop row Stop feedback independent, preserves navigation, and relea
   retainedStop.click();
   await waitForSolid(() => expect(retainedStop.disabled).toBe(true));
   expect(stops()[1]!.disabled).toBe(false);
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
   retainedOpen.click();
   await waitForSolid(() =>
     expect(
@@ -273,10 +287,15 @@ it("does not redirect a mobile confirmation to a replacement run", async () => {
   let row = child("confirm");
   const f = mountPanel((method, params) => {
     const values = asOptionalRecord(params);
-    if (method === "sessions.list") return page(values?.spawnedBy ? [row] : []);
-    if (method === "chat.history")
+    if (method === "sessions.list") {
+      return page(values?.spawnedBy ? [row] : []);
+    }
+    if (method === "chat.history") {
       return { sessionId: row.sessionId, messages: [], hasMore: false, totalMessages: 0 };
-    if (method === "sessions.abort") return { aborted: true };
+    }
+    if (method === "sessions.abort") {
+      return { aborted: true };
+    }
     return {};
   }, true);
   await waitForSolid(() =>
@@ -301,20 +320,21 @@ it.each(["parent", "hidden", "connection"] as const)(
     const aborted = createDeferred<{ aborted: boolean }>();
     const f = mountPanel((method, params) => {
       const values = asOptionalRecord(params);
-      if (method === "sessions.list")
-        return page(
-          values?.spawnedBy
-            ? [{ ...child(String(values.spawnedBy)), spawnedBy: String(values.spawnedBy) }]
-            : [],
-        );
-      if (method === "sessions.abort") return aborted.promise;
-      if (method === "chat.history")
+      if (method === "sessions.list") {
+        const spawnedBy = typeof values?.spawnedBy === "string" ? values.spawnedBy : undefined;
+        return page(spawnedBy ? [{ ...child(spawnedBy), spawnedBy }] : []);
+      }
+      if (method === "sessions.abort") {
+        return aborted.promise;
+      }
+      if (method === "chat.history") {
         return {
           sessionId: `session-${parentKey}`,
           messages: [],
           hasMore: false,
           totalMessages: 0,
         };
+      }
       return {};
     }, false);
     onTestFinished(() => aborted.resolve({ aborted: true }));
