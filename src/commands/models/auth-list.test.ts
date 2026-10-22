@@ -41,7 +41,9 @@ vi.mock("../../agents/auth-profiles.js", () => ({
   resolveAuthStatePathForDisplay: mocks.resolveAuthStatePathForDisplay,
 }));
 
+// mock-isolation: Use fixture config without reading host config or resolving its secrets.
 vi.mock("./load-config.js", () => ({ loadModelsConfig: mocks.loadModelsConfig }));
+// mock-isolation: Resolve only the synthetic agent directories owned by this suite.
 vi.mock("./shared.js", () => ({ resolveModelsTargetAgent: mocks.resolveModelsTargetAgent }));
 vi.mock("./auth-refresh.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./auth-refresh.js")>()),
