@@ -356,7 +356,7 @@ export function projectionOperations(
       current();
     }
     const checkpoint = current().checkpoint_json
-      ? (JSON.parse(current().checkpoint_json!) as LocalWorkspaceManifestCheckpoint)
+      ? (JSON.parse(current().checkpoint_json!) as LocalWorkspaceManifestCheckpoint) // SAFETY: Owner-written checkpoint.
       : undefined;
     if (checkpoint && checkpoint.previousRoot !== selected.baseline_ref) {
       throw new Error("Local workspace checkpoint no longer matches its baseline");
