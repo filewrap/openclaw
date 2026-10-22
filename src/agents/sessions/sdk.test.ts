@@ -3,49 +3,47 @@ import { queryObjects } from "node:v8";
 import { cleanupSessionResources } from "@openclaw/ai/internal/runtime";
 import { createAssistantMessageEventStream, type AssistantMessage } from "openclaw/plugin-sdk/llm";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, assert, describe, expect, it, vi } from "vitest";
+import { makeUserMessage } from "../../../test/helpers/user-message.js";
 import type { ImageContent, Model, SimpleStreamOptions } from "../../llm/types.js";
+import { registerSecretValueForRedaction } from "../../logging/secret-redaction-registry.js";
+import { resetSecretRedactionRegistryForTest } from "../../logging/secret-redaction-registry.test-support.js";
 import { readRuntimePromptMediaFacts } from "../../media/media-facts.js";
 import { finalizeRuntimePromptImages } from "../../media/runtime-prompt-image-provenance.js";
+import { takeRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
 import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
+import { toToolDefinitions } from "../agent-tool-definition-adapter.js";
 import { runEmbeddedSessionFork } from "../embedded-agent-runner/session-fork.js";
 import { resolveEmbeddedAgentStream } from "../embedded-agent-runner/stream-resolution.js";
+import type { AgentTool, AgentMessage } from "../runtime/index.js";
+import { attachInternalToolExecutionPreparer } from "../runtime/internal-hooks.js";
 import { createZeroUsageFixture } from "../test-helpers/usage-fixtures.js";
-
-const streamMocks = vi.hoisted(() => ({
-  streamSimple: vi.fn(),
-}));
-vi.mock("../../llm/stream.js", () => ({
-  streamSimple: streamMocks.streamSimple,
-}));
-import { makeUserMessage } from "../../../test/helpers/user-message.js";
-import { takeRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
-import { createAssistantResultStream } from "./agent-session-loop-correctness.test-support.js";
+import {
+  createAssistant,
+  createAssistantResultStream,
+  testModel as loopTestModel,
+} from "./agent-session-loop-correctness.test-support.js";
 import {
   createCompactionExtension,
   createResourceLoader,
 } from "./agent-session-loop-resource-loader.test-support.js";
 import { AuthStorage } from "./auth-storage.js";
-import type { ExtensionFactory, ToolDefinition } from "./extensions/types.js";
+import type {
+  ExtensionFactory,
+  MessageEndEvent,
+  ToolDefinition,
+  ToolResultEvent,
+} from "./extensions/types.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { createAgentSession } from "./sdk.js";
+import { withSessionState } from "./session-manager-fixtures.test-support.js";
 import { CURRENT_SESSION_VERSION, SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 
-const testModel: Model = {
-  id: "test-model",
-  name: "Test Model",
-  api: "openai-responses",
-  provider: "test-provider",
-  baseUrl: "https://example.test",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 1000,
-  maxTokens: 1000,
-};
+const streamMocks = { streamSimple: vi.fn() };
+const testModel: Model = { ...loopTestModel, contextWindow: 1000, maxTokens: 1000 };
 
 function createModelWithoutBaseUrl(overrides: Partial<Model>): Model {
   const { baseUrl: _baseUrl, ...model } = { ...testModel, ...overrides };
@@ -86,29 +84,17 @@ function createTestModelRegistry(authStorage = AuthStorage.inMemory()): ModelReg
   return modelRegistry;
 }
 
-async function createSdkSession({
-  systemPrompt = "Test session prompt",
-  customTools,
-  tools = customTools?.map((tool) => tool.name) ?? [],
-  model = testModel,
-  thinkingLevel = "medium",
-  resourceLoader,
-  sessionManager = SessionManager.inMemory(),
-  settingsManager = SettingsManager.inMemory(),
-  modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory()),
-  ...options
-}: Partial<Parameters<typeof createAgentSession>[0]> = {}) {
+async function createSdkSession(options: Partial<Parameters<typeof createAgentSession>[0]> = {}) {
   return await createAgentSession({
     ...options,
-    systemPrompt,
-    tools,
-    customTools,
-    model,
-    thinkingLevel,
-    resourceLoader: resourceLoader ?? (await createResourceLoader()),
-    sessionManager,
-    settingsManager,
-    modelRegistry,
+    systemPrompt: options.systemPrompt ?? "Test session prompt",
+    thinkingLevel: options.thinkingLevel ?? "medium",
+    model: options.model ?? testModel,
+    tools: options.tools ?? options.customTools?.map((tool) => tool.name) ?? [],
+    resourceLoader: options.resourceLoader ?? (await createResourceLoader()),
+    sessionManager: options.sessionManager ?? SessionManager.inMemory(),
+    settingsManager: options.settingsManager ?? SettingsManager.inMemory(),
+    modelRegistry: options.modelRegistry ?? ModelRegistry.inMemory(AuthStorage.inMemory()),
   });
 }
 
@@ -350,9 +336,7 @@ describe("AgentSession queued user turns", () => {
       role: "user",
       content: [{ type: "text", text: "runtime group prompt" }],
     });
-    if (!runtimeMessage) {
-      throw new Error("expected queued runtime message");
-    }
+    assert(runtimeMessage, "expected queued runtime message");
     expect(takeRuntimeUserTurnTranscriptContext(runtimeMessage)).toMatchObject({
       message: {
         role: "user",
@@ -379,19 +363,15 @@ describe("AgentSession queued user turns", () => {
     ]);
 
     const runtimeMessage = steer.mock.calls[0]?.[0];
-    expect(runtimeMessage).toBeDefined();
     const mediaSymbol = Object.getOwnPropertySymbols(runtimeMessage ?? {}).find(
       (symbol) => Symbol.keyFor(symbol) === "openclaw.runtimePromptMediaFacts",
     );
-    expect(mediaSymbol).toBeDefined();
-    if (!runtimeMessage || !mediaSymbol) {
-      throw new Error("expected runtime prompt media message and symbol");
-    }
-    expect((runtimeMessage as unknown as Record<PropertyKey, unknown>)[mediaSymbol]).toEqual([
+    assert(runtimeMessage && mediaSymbol, "expected runtime prompt media message and symbol");
+    expect(Reflect.get(runtimeMessage, mediaSymbol)).toEqual([
       expect.objectContaining({ path: "/tmp/a.png", contentType: "image/png", kind: "image" }),
     ]);
     expect(readRuntimePromptMediaFacts(runtimeMessage)).toHaveProperty("imageOrder", imageOrder);
-    expect((runtimeMessage as unknown as Record<string, unknown>)["__openclaw"]).toEqual({
+    expect(Reflect.get(runtimeMessage, "__openclaw")).toEqual({
       mediaImageBlockFactIndexes: [0],
     });
     expect(JSON.stringify(runtimeMessage)).not.toContain("runtimePromptMediaFacts");
@@ -403,59 +383,52 @@ describe("AgentSession queued user turns", () => {
 });
 
 describe("createAgentSession attribution headers", () => {
-  it("tolerates Bedrock models that do not expose baseUrl", async () => {
-    const options = await createSessionAndStreamModel(
-      createModelWithoutBaseUrl({
-        id: "global.anthropic.claude-sonnet-4-6",
-        provider: "amazon-bedrock",
-        api: "bedrock-converse-stream",
-      }),
-    );
-
-    expect(streamMocks.streamSimple).toHaveBeenCalledOnce();
-    expect(options.headers).toBeUndefined();
-  });
-
-  it("forwards OpenRouter attribution for openrouter.ai endpoints with telemetry off, but not proxies", async () => {
-    vi.stubEnv("OPENCLAW_TELEMETRY", "0");
-    try {
-      const proxyOptions = await createSessionAndStreamModel({
-        ...testModel,
-        provider: "openrouter",
-        baseUrl: "https://example.test",
-      });
-      const endpointOptions = await createSessionAndStreamModel({
-        ...testModel,
-        provider: "custom-openai",
-        baseUrl: "https://openrouter.ai/api/v1",
-      });
-
-      expect(proxyOptions.headers).toBeUndefined();
-      expect(endpointOptions.headers).toMatchObject({
-        "HTTP-Referer": "https://openclaw.ai",
-        "X-OpenRouter-Title": "OpenClaw",
-        "X-OpenRouter-Categories": "personal-agent,cli-agent",
-      });
-    } finally {
-      vi.unstubAllEnvs();
-    }
-  });
-
-  it("keeps Cloudflare attribution headers for provider and endpoint matches", async () => {
-    const providerOptions = await createSessionAndStreamModel({
-      ...testModel,
-      provider: "cloudflare-workers-ai",
-      baseUrl: "https://example.test",
-    });
-    const endpointOptions = await createSessionAndStreamModel({
-      ...testModel,
-      provider: "custom-openai",
-      baseUrl: "https://gateway.ai.cloudflare.com/v1/account/gateway/openai",
-    });
-
-    expect(providerOptions.headers).toMatchObject({ "User-Agent": "openclaw" });
-    expect(endpointOptions.headers).toMatchObject({ "User-Agent": "openclaw" });
-  });
+  const cloudflare = { "User-Agent": "openclaw" };
+  const openrouter = {
+    "HTTP-Referer": "https://openclaw.ai",
+    "X-OpenRouter-Title": "OpenClaw",
+    "X-OpenRouter-Categories": "personal-agent,cli-agent",
+  };
+  it.each([
+    ["amazon-bedrock", undefined, false, undefined],
+    ["openrouter", "https://example.test", true, undefined],
+    ["custom-openai", "https://openrouter.ai/api/v1", true, openrouter],
+    ["cloudflare-workers-ai", "https://example.test", false, cloudflare],
+    [
+      "custom-openai",
+      "https://gateway.ai.cloudflare.com/v1/account/gateway/openai",
+      false,
+      cloudflare,
+    ],
+  ] as const)(
+    "selects %s attribution for endpoint %s (telemetry off=%s)",
+    async (provider, baseUrl, telemetryOff, headers) => {
+      if (telemetryOff) {
+        vi.stubEnv("OPENCLAW_TELEMETRY", "0");
+      }
+      try {
+        const model =
+          baseUrl === undefined
+            ? createModelWithoutBaseUrl({
+                id: "global.anthropic.claude-sonnet-4-6",
+                provider,
+                api: "bedrock-converse-stream",
+              })
+            : { ...testModel, provider, baseUrl };
+        const options = await createSessionAndStreamModel(model);
+        expect(streamMocks.streamSimple).toHaveBeenCalledOnce();
+        if (headers === undefined) {
+          expect(options.headers).toBeUndefined();
+        } else {
+          expect(options.headers).toMatchObject(headers);
+        }
+      } finally {
+        if (telemetryOff) {
+          vi.unstubAllEnvs();
+        }
+      }
+    },
+  );
 });
 
 describe("createAgentSession tool defaults", () => {
@@ -711,4 +684,158 @@ describe("AgentSession retry behavior", () => {
       vi.useRealTimers();
     }
   });
+});
+
+describe("SDK tool outcomes", () => {
+  afterEach(resetSecretRedactionRegistryForTest);
+
+  it.each([false, true])(
+    "preserves tool outcomes through events, replay, and storage (recovery=%s)",
+    async (withRecovery) => {
+      await withSessionState("tool-outcomes", async ({ state, scope: target }) => {
+        const secret = "fixture-final-tool-outcome-credential";
+        const image = {
+          type: "image" as const,
+          mimeType: "image/png",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jV1sAAAAASUVORK5CYII=",
+        };
+        registerSecretValueForRedaction(secret);
+        // Binary blocks must remain byte-exact even when their bytes match registered text.
+        registerSecretValueForRedaction(image.data);
+        const outcomes = [
+          {
+            name: "returned_error",
+            details: { status: "error", error: "capture failed" },
+            isError: true,
+          },
+          { name: "adapted_error", details: {}, throws: true, isError: true },
+          { name: "preflight_error", details: {}, preflight: true, isError: true },
+          { name: "recovered_tool", details: {}, throws: true, isError: !withRecovery },
+          { name: "middleware_error", details: {}, isError: withRecovery },
+          {
+            name: "completed_command",
+            details: { status: "completed", exitCode: 1 },
+            isError: false,
+          },
+          { name: "successful_tool", details: { status: "ok" }, isError: false },
+        ];
+        const allOutcomes = [...outcomes, { name: "missing_tool", isError: true }];
+        const calls = allOutcomes.map((outcome) => ({
+          type: "toolCall" as const,
+          id: `call_${outcome.name}`,
+          name: outcome.name,
+          arguments: {},
+        }));
+        const expected = allOutcomes.map(({ name, isError }) => ({ toolName: name, isError }));
+        const handlers: ExtensionFactory = (api) => {
+          if (withRecovery) {
+            api.on("tool_result", async (event) => {
+              const { toolName } = event as ToolResultEvent;
+              if (toolName === "recovered_tool") {
+                return { isError: false };
+              }
+              if (toolName === "middleware_error") {
+                return {
+                  content: [{ type: "text", text: `middleware failed ${secret}` }],
+                  details: { status: "error", error: "middleware failed" },
+                };
+              }
+              return undefined;
+            });
+            api.on("message_end", async (event) => {
+              const { message } = event as MessageEndEvent;
+              if (message.role !== "toolResult" || message.toolName !== "successful_tool") {
+                return undefined;
+              }
+              const content = message.content.map((block) =>
+                block.type === "text"
+                  ? Object.assign({}, block, { text: `message-end rewrite ${secret}` })
+                  : block,
+              );
+              return { message: { ...message, content } };
+            });
+          }
+        };
+        const { session } = await createSdkSession({
+          sessionManager: await SessionManager.openAsync(target, state.agentDir("main")),
+          model: loopTestModel,
+          tools: outcomes.map((tool) => tool.name),
+          customTools: toToolDefinitions(
+            outcomes.map((outcome) => {
+              const tool: AgentTool = {
+                name: outcome.name,
+                label: outcome.name,
+                description: "Returns a synthetic tool outcome.",
+                parameters: Type.Object({}),
+                execute: async () => {
+                  if (outcome.throws) {
+                    throw new Error(`capture failed: ${secret}`);
+                  }
+                  return {
+                    content: [
+                      { type: "text", text: `synthetic result ${secret}` },
+                      ...(outcome.name === "successful_tool" ? [image] : []),
+                    ],
+                    details: outcome.details,
+                  };
+                },
+              };
+              return outcome.preflight
+                ? attachInternalToolExecutionPreparer(tool, async () => {
+                    throw new Error(`preflight failed: ${secret}`);
+                  })
+                : tool;
+            }),
+          ),
+          resourceLoader: await createResourceLoader(handlers),
+          settingsManager: SettingsManager.inMemory({ retry: { enabled: false } }),
+        });
+        const completed: Array<{ toolName: string; isError: boolean }> = [];
+        session.subscribe((event) => {
+          if (event.type === "tool_execution_end") {
+            completed.push({ toolName: event.toolName, isError: event.isError });
+          }
+        });
+        let replay: Extract<AgentMessage, { role: "toolResult" }>[] = [];
+        let firstTurn = true;
+        session.agent.streamFn = (_model, context) => {
+          if (!firstTurn) {
+            replay = context.messages.filter((message) => message.role === "toolResult");
+            return createAssistantResultStream(createAssistant(loopTestModel, "done"));
+          }
+          firstTurn = false;
+          return createAssistantResultStream(createAssistant(loopTestModel, calls, "toolUse"));
+        };
+        try {
+          await session.agent.prompt(makeUserMessage("Run the synthetic tools.", 1));
+          expect(completed).toHaveLength(expected.length);
+          expect(completed).toEqual(expect.arrayContaining(expected));
+          expect(replay).toMatchObject(expected);
+          const text = replay
+            .flatMap((message) =>
+              message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
+            )
+            .join("\n");
+          expect(text.includes("synthetic result")).toBe(true);
+          expect(text.includes("message-end rewrite")).toBe(withRecovery);
+          expect(text).toContain(secret);
+          expect(replay.flatMap((message) => message.content)).toContainEqual(
+            expect.objectContaining({ type: "image", data: image.data }),
+          );
+          const persistedTarget = session.sessionManager.getSessionTarget();
+          assert(persistedTarget, "Expected a saved transcript target");
+          const events = SessionManager.open(persistedTarget).getEntries();
+          expect(
+            events.flatMap((event) =>
+              event.type === "message" && event.message.role === "toolResult"
+                ? [event.message]
+                : [],
+            ),
+          ).toMatchObject(expected);
+        } finally {
+          session.dispose();
+        }
+      });
+    },
+  );
 });
