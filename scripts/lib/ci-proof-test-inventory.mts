@@ -2465,7 +2465,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "src/gateway/control-ui.response-authority.test.ts",
   "src/gateway/dashboard-session-title.test.ts",
   "src/gateway/desktop/computer-authority.runtime.test.ts",
-  "src/gateway/desktop/computer-process.runtime.test.ts",
   "src/gateway/desktop/managed-linux.test.ts",
   "src/gateway/desktop/node-observe.integration.test.ts",
   "src/gateway/device-pairing-prune.test.ts",

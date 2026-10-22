@@ -1,6 +1,5 @@
-import { on, once } from "node:events";
+import { once } from "node:events";
 import fs from "node:fs/promises";
-import http from "node:http";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
@@ -24,31 +23,22 @@ import { createWorkerNodeDesktopCarrier } from "../worker-environments/node-desk
 import * as workerSupport from "../worker-environments/service.test-support.js";
 import {
   handlePeerTeardownError,
-  closeServer,
   createSocketServer,
   listenLoopback,
 } from "./desktop.test-support.js";
 import { createNodeDesktopService } from "./node-source.js";
 import { createNodeDesktopStreamBroker } from "./node-stream-broker.js";
-import { handleDesktopObserveUpgrade } from "./observe-bridge.js";
+import {
+  connectRfbObserver,
+  RFB_VERSION as VERSION,
+  startObserveGateway,
+} from "./observe.test-support.js";
 import { createDesktopSessionRegistry } from "./session-registry.js";
 import { SocketReader } from "./socket-reader.test-support.js";
 
-const VERSION = Buffer.from("RFB 003.008\n", "ascii");
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(() => Promise.all(cleanups.splice(0).map((cleanup) => cleanup())));
-
-function readFrames(ws: WebSocket) {
-  const messages = on(ws, "message", { close: ["close"] });
-  return async () => {
-    const frame: unknown = (await messages.next()).value?.[0];
-    if (!Buffer.isBuffer(frame)) {
-      throw new Error("expected a binary RFB frame");
-    }
-    return frame;
-  };
-}
 
 async function startRfbHarness(expectedStreams: number, endAfterRequest?: Promise<void>) {
   let connectionCount = 0;
@@ -90,31 +80,8 @@ async function startRfbHarness(expectedStreams: number, endAfterRequest?: Promis
   return { completion: done.promise, connectionCount: () => connectionCount, peers, port };
 }
 
-async function startDesktopGateway(
-  params: Omit<Parameters<typeof createNodeDesktopService>[0], "getConfig">,
-): Promise<string> {
-  const server = http.createServer();
-  server.on("upgrade", (req, socket, head) => {
-    void (async () => {
-      if (await params.streamBroker.handleUpgrade(req, socket, head, params.nodeRegistry)) {
-        return;
-      }
-      handleDesktopObserveUpgrade(req, socket, head, { registry: params.desktopRegistry });
-    })();
-  });
-  const port = await listenLoopback(server);
-  cleanups.push(async () => closeServer(server));
-  return `ws://127.0.0.1:${port}`;
-}
-
 async function openViewOnlyObserver(gatewayUrl: string, wsPath: string): Promise<WebSocket> {
-  const ws = new WebSocket(`${gatewayUrl}${wsPath}`);
-  const nextFrame = readFrames(ws);
-  cleanups.push(async () => ws.terminate());
-  await once(ws, "open");
-  expect(await nextFrame()).toEqual(VERSION);
-  ws.send(Buffer.concat([VERSION, Buffer.from([1, 0])]));
-  expect(await nextFrame()).toEqual(Buffer.from([1, 1]));
+  const { ws, nextFrame } = await connectRfbObserver(cleanups, `${gatewayUrl}${wsPath}`);
   expect(await nextFrame()).toEqual(Buffer.alloc(4));
   expect(await nextFrame()).toEqual(Buffer.from("pixel-update", "ascii"));
 
@@ -292,7 +259,9 @@ describe.each(["node", "worker"] as const)("%s desktop observe integration", (ki
           expect(invoke.mock.calls[0]?.[0].signal?.aborted).toBe(true);
         };
       }
-      gatewayUrl = await startDesktopGateway({ desktopRegistry, nodeRegistry, streamBroker });
+      gatewayUrl = await startObserveGateway(cleanups, desktopRegistry, (req, socket, head) =>
+        streamBroker.handleUpgrade(req, socket, head, nodeRegistry),
+      );
       const observers = await Promise.all(
         Array.from({ length: 3 }, async () => {
           const observed = await observe();

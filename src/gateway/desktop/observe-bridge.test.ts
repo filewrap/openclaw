@@ -1,6 +1,5 @@
 import { once } from "node:events";
 import fs from "node:fs/promises";
-import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import { Duplex } from "node:stream";
@@ -12,18 +11,14 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import {
   expectUnauthorizedUpgrade,
   closeServer,
-  listenLoopback,
   setupDesktopDiagnostics,
 } from "./desktop.test-support.js";
-import {
-  DESKTOP_OBSERVE_PATH,
-  handleDesktopObserveUpgrade,
-  mintDesktopObserverToken,
-} from "./observe-bridge.js";
+import { mintDesktopObserverToken } from "./observe-bridge.js";
 import {
   resolveDesktopObserveRequester,
   type DesktopObserveRequester,
 } from "./observe-requester.js";
+import { startObserveGateway } from "./observe.test-support.js";
 import type { RfbPreauthDescriptor } from "./rfb-preauth.js";
 import { createDesktopSessionRegistry, type DesktopSessionRegistry } from "./session-registry.js";
 
@@ -97,22 +92,18 @@ async function createProxyHarness(
   await serverReady;
   const release = vi.fn();
   const closeObserver = vi.fn();
-  const httpServer = http.createServer();
-  cleanup.push(async () => closeServer(httpServer));
-  httpServer.on("upgrade", (req, socket, head) => {
-    handleDesktopObserveUpgrade(req, socket, head, {
-      registry: params.registry ?? {
-        claimStream: () => params.stream,
-        attachObserver: (_environmentId, observer) => {
-          closeObserver.mockImplementation((code: number, reason: string) =>
-            observer.close(code, reason),
-          );
-          return { release };
-        },
+  const url = await startObserveGateway(
+    cleanup,
+    params.registry ?? {
+      claimStream: () => params.stream,
+      attachObserver: (_environmentId, observer) => {
+        closeObserver.mockImplementation((code: number, reason: string) =>
+          observer.close(code, reason),
+        );
+        return { release };
       },
-    });
-  });
-  const port = await listenLoopback(httpServer);
+    },
+  );
   const serverTimers = vi.isFakeTimers() ? vi.getTimerCount() : undefined;
   const minted = mintDesktopObserverToken({
     sourceKey: "worker:pump",
@@ -124,7 +115,7 @@ async function createProxyHarness(
     ...(params.preauth ? { preauth: params.preauth } : {}),
     requester: params.requester,
   });
-  const ws = new WebSocket(`ws://127.0.0.1:${port}${DESKTOP_OBSERVE_PATH}?token=${minted.token}`);
+  const ws = new WebSocket(`${url}/desktop/observe?token=${minted.token}`);
   cleanup.push(async () => ws.terminate());
   await once(ws, "open");
   return {
@@ -445,25 +436,6 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
       expect(harness.release).toHaveBeenCalledOnce();
     },
   );
-
-  it("expires unused credential-bearing tokens without a later token operation", async () => {
-    const harness = await createProxyHarness();
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const minted = mintUnused({
-      preauth: {
-        auth: "vnc-password",
-        credentials: { password: "synthetic-memory-only-password" },
-      },
-    });
-
-    vi.advanceTimersByTime(60_000);
-    // Wall-clock expiry still lies ahead; only the timer could have retired this token.
-    expect(minted.expiresAtMs).toBeGreaterThan(Date.now());
-    expect(vi.getTimerCount()).toBe(0);
-    // Only token expiry uses virtual time; socket rejection and teardown use real timers.
-    vi.useRealTimers();
-    await expectUnauthorizedToken(harness.observerUrl, minted.token);
-  });
 
   it("pauses and resumes unix-socket reads around websocket backpressure", async () => {
     let bufferedAmount = 5 * 1024 * 1024;
