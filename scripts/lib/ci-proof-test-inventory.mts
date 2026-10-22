@@ -748,7 +748,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "extensions/reef/src/replay-state.test.ts",
   "extensions/reef/src/state.test.ts",
   "extensions/reef/src/trust-store.test.ts",
-  "extensions/signal/src/client-container.real-server.test.ts",
   "extensions/signal/src/daemon.test.ts",
   "extensions/signal/src/monitor/event-handler.inbound-context.test.ts",
   "extensions/signal/src/monitor/event-handler.partial-delivery.test.ts",

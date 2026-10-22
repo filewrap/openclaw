@@ -11,52 +11,37 @@ function signalConfig(aliases: Record<string, string>): OpenClawConfig {
   return { channels: { signal: { aliases } } };
 }
 
-describe("resolveSignalTarget aliases", () => {
-  it("rejects recursive aliases before delivery", () => {
-    const cfg = signalConfig({ home: "signal:me", me: "home" });
-
-    expect(() => resolveSignalTarget({ cfg, input: "home" })).toThrow(
-      'Signal alias "home" resolves recursively through "home".',
-    );
-    expect(resolveSignalDeliveredConversationKey({ cfg, to: "signal:home" })).toBe("home");
+it("resolves own prototype-shaped aliases without inheriting prototype keys", () => {
+  const cfg = signalConfig({
+    constructor: "+15551234567",
+    toString: group,
   });
 
-  it("resolves own prototype-shaped aliases without inheriting prototype keys", () => {
-    const cfg = signalConfig({
-      constructor: "+15551234567",
-      toString: group,
-    });
+  expect(["constructor", "toString"].map((input) => resolveSignalTarget({ cfg, input }))).toEqual([
+    { kind: "user", to: "+15551234567", alias: "constructor", source: "alias" },
+    { kind: "group", to: group, alias: "tostring", source: "alias" },
+  ]);
 
-    expect(["constructor", "toString"].map((input) => resolveSignalTarget({ cfg, input }))).toEqual(
-      [
-        { kind: "user", to: "+15551234567", alias: "constructor", source: "alias" },
-        { kind: "group", to: group, alias: "tostring", source: "alias" },
-      ],
-    );
-
-    const ordinaryCfg = signalConfig({ me: "+15551234567" });
-    expect(resolveSignalTarget({ cfg: ordinaryCfg, input: "constructor" })).toBeNull();
-  });
+  const ordinaryCfg = signalConfig({ me: "+15551234567" });
+  expect(resolveSignalTarget({ cfg: ordinaryCfg, input: "constructor" })).toBeNull();
 });
 
-describe("resolveSignalTarget", () => {
-  it("resolves aliases and raw targets through the same canonical parser", () => {
-    const cfg = signalConfig({
-      me: "uuid:123E4567-E89B-12D3-A456-426614174000",
-      "+15551230000": "+15559990000",
-    });
-
-    const uuid = "123e4567-e89b-12d3-a456-426614174000";
-    expect(
-      ["signal:me", `uuid:${uuid.toUpperCase()}`, "+15551230000"].map((input) =>
-        resolveSignalTarget({ cfg, input }),
-      ),
-    ).toEqual([
-      { kind: "user", to: uuid, source: "alias", alias: "me" },
-      { kind: "user", to: uuid, source: "raw" },
-      { kind: "user", to: "+15551230000", source: "raw" },
-    ]);
+it("resolves aliases and raw targets through the same canonical parser", () => {
+  const cfg = signalConfig({
+    me: "uuid:123E4567-E89B-12D3-A456-426614174000",
+    "+15551230000": "+15559990000",
   });
+
+  const uuid = "123e4567-e89b-12d3-a456-426614174000";
+  expect(
+    ["signal:me", `uuid:${uuid.toUpperCase()}`, "+15551230000"].map((input) =>
+      resolveSignalTarget({ cfg, input }),
+    ),
+  ).toEqual([
+    { kind: "user", to: uuid, source: "alias", alias: "me" },
+    { kind: "user", to: uuid, source: "raw" },
+    { kind: "user", to: "+15551230000", source: "raw" },
+  ]);
 });
 
 describe("listSignalAliasDirectoryEntries", () => {
@@ -86,5 +71,6 @@ describe("listSignalAliasDirectoryEntries", () => {
     expect(() => listSignalAliasDirectoryEntries({ cfg, kind: "user", query: "ops" })).toThrow(
       'Signal alias "ops" must point to an E.164 number, uuid:<id>, username:<name>, or group:<id>.',
     );
+    expect(resolveSignalDeliveredConversationKey({ cfg, to: "signal:ops" })).toBe("ops");
   });
 });

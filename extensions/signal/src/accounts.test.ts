@@ -11,7 +11,7 @@ type Signal = NonNullable<NonNullable<OpenClawConfig["channels"]>["signal"]>;
 type Transport = NonNullable<Signal["transport"]>;
 type Native = Omit<Extract<Transport, { kind: "managed-native" }>, "kind">;
 type Check = [expected: Partial<ResolvedSignalTransport>, accountId?: string, exact?: boolean];
-type Case = [name: string, signal: Signal, ...checks: Check[]];
+type Case = [signal: Signal, ...checks: Check[]];
 const phone = "+15555550123";
 const socketPath = "/tmp/signal private/a#b.sock";
 const socketUrl = "unix:///tmp/signal%20private/a%23b.sock";
@@ -41,34 +41,19 @@ const explicit = account({ httpPort: 8181 });
 
 it.each<Case>([
   [
-    "socket encoding leaves HTTP port free",
     { ...socket, accounts: { http: { transport: native() } } },
     [{ socketPath, baseUrl: socketUrl }],
     [{ baseUrl }, "http"],
   ],
+  [{ ...socket, accounts: { work: { ...dormant, ...socket } } }, [{ baseUrl: socketUrl }]],
+  [{}, [defaults, undefined, true]],
   [
-    "disabled socket sibling",
-    { ...socket, accounts: { work: { ...dormant, ...socket } } },
-    [{ baseUrl: socketUrl }],
-  ],
-  ["omitted transport defaults", {}, [defaults, undefined, true]],
-  [
-    "independent connection URL",
     root({ url: "http://127.0.0.1:8181", httpHost: "0.0.0.0", httpPort: 8181 }),
     http("http://127.0.0.1:8181", "0.0.0.0", 8181),
   ],
+  [root({ httpHost: "[::1]", httpPort: 8181 }), http("http://[::1]:8181", "::1", 8181)],
+  [root({ url: baseUrl, httpHost: "127.0.0.2" }), http(baseUrl, "127.0.0.2", 8081)],
   [
-    "bracketed IPv6 bind",
-    root({ httpHost: "[::1]", httpPort: 8181 }),
-    http("http://[::1]:8181", "::1", 8181),
-  ],
-  [
-    "independent bind address",
-    root({ url: baseUrl, httpHost: "127.0.0.2" }),
-    http(baseUrl, "127.0.0.2", 8081),
-  ],
-  [
-    "root transport is not inherited",
     {
       transport: endpoint("container", "http://default-container:8080"),
       accounts: { work: { account: phone } },
@@ -77,7 +62,6 @@ it.each<Case>([
     [{ kind: "managed-native", baseUrl }, "work"],
   ],
   [
-    "root transport overrides accounts.default",
     {
       transport: endpoint("external-native", "http://canonical-native:8181"),
       accounts: {
@@ -89,25 +73,11 @@ it.each<Case>([
     },
     [{ kind: "external-native", baseUrl: "http://canonical-native:8181" }, "default", true],
   ],
+  [accounts({ personal: account(), work: account() }), port(8080, "personal"), port(8081)],
+  [accounts({ alpha: account({ httpPort: 8080 }), Ops: account() }), port(8081, "Ops")],
+  [accounts({ dormant: { ...explicit, ...dormant }, work: explicit }), port(8181)],
+  [accounts({ placeholder: dormant, work: account() }), port(8080)],
   [
-    "distinct implicit ports",
-    accounts({ personal: account(), work: account() }),
-    port(8080, "personal"),
-    port(8081),
-  ],
-  [
-    "case-preserving key",
-    accounts({ alpha: account({ httpPort: 8080 }), Ops: account() }),
-    port(8081, "Ops"),
-  ],
-  [
-    "disabled explicit reservation",
-    accounts({ dormant: { ...explicit, ...dormant }, work: explicit }),
-    port(8181),
-  ],
-  ["unconfigured placeholder", accounts({ placeholder: dormant, work: account() }), port(8080)],
-  [
-    "bind and connection reservations",
     accounts({
       proxy: account({ url: "http://localhost:8080", httpPort: 8181 }),
       work: account(),
@@ -115,14 +85,13 @@ it.each<Case>([
     port(8081),
   ],
   [
-    "connection URL follows allocated bind",
     {
       transport: native({ httpPort: 8080 }),
       accounts: { work: account({ url: baseUrl, httpHost: "0.0.0.0" }) },
     },
     http("http://127.0.0.1:8081", "0.0.0.0", 8081, "work"),
   ],
-])("resolves %s", (_name, signal, ...checks) => {
+])("resolves transport %j", (signal, ...checks) => {
   for (const [expected, accountId, exact] of checks) {
     const resolved = resolveSignalAccount({ cfg: config(signal), accountId });
     if (exact) {
