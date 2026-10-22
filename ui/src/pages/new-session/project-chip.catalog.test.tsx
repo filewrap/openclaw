@@ -46,6 +46,7 @@ it("keeps project search live through catalog reads and retires invalidated rows
     onFocusComposer: vi.fn(),
     onChange: changed,
   };
+  let nativeTerminal = false;
   const mountPicker = () =>
     mountSolid(() => {
       const [revision, setRevision] = createSignal(0);
@@ -63,7 +64,7 @@ it("keeps project search live through catalog reads and retires invalidated rows
             recents: [],
             projectQuery: browser.projectQuery,
           }),
-          nativeTerminal: false,
+          nativeTerminal,
         };
       });
       return <ProjectChip {...props()} />;
@@ -103,6 +104,14 @@ it("keeps project search live through catalog reads and retires invalidated rows
   type("ALPHA");
   expect(rows()).toEqual([alphaRow]);
   const refresh = browser.refreshProjects();
+  nativeTerminal = true;
+  changed();
+  await waitForSolid(() => expect(rows()).toHaveLength(0));
+  nativeTerminal = false;
+  changed();
+  await waitForSolid(() => expect(rows()[0]?.textContent).toContain("Alpha project"));
+  expect(view.container.querySelector('input[type="search"]')).toBe(input);
+  expect(document.activeElement).toBe(input);
   type("beta");
   expect(rows()[0]?.textContent).toContain("Beta project");
   type("alpha");

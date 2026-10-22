@@ -108,9 +108,6 @@ export function ProjectChip(props: {
   );
   const projectsReady = createMemo(() => props.params.place.browser.projectsReady);
   const projects = createDeferred<readonly ProjectRecord[]>((previous) => {
-    if (props.nativeTerminal) {
-      return [];
-    }
     const source = projectSource();
     // A picker mounted during a shared refresh starts with the accepted rows.
     if (previous === undefined && projectsReady()) {
@@ -120,7 +117,7 @@ export function ProjectChip(props: {
   });
   const localProjects = createMemo(() => {
     // Retired catalogs clear immediately; a live refresh keeps local filtering responsive.
-    const accepted = projectsReady() ? projects() : [];
+    const accepted = !props.nativeTerminal && projectsReady() ? projects() : [];
     const query = view().query.toLowerCase();
     return query
       ? accepted.filter((project) =>
