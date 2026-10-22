@@ -11,6 +11,7 @@ import {
   acquireSimpleCompletionModelWithSelection,
   completeWithPreparedSimpleCompletionModel,
 } from "../agents/simple-completion-runtime.js";
+import { completionChunk, completionModel } from "../agents/simple-completion.test-support.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { summarizeText } from "../plugin-sdk/speech-core.js";
 import { resetPluginLoaderTestStateForTest } from "../plugins/loader.test-fixtures.js";
@@ -58,16 +59,7 @@ async function withSummaryFixture(
         const { model } = JSON.parse(body) as { model: string };
         requests.push(model);
         response.writeHead(200, { "content-type": "text/event-stream" });
-        response.end(
-          `data: ${JSON.stringify({
-            id: "tts-selection-response",
-            object: "chat.completion.chunk",
-            model,
-            choices: [
-              { index: 0, delta: { content: `materialized:${model}` }, finish_reason: "stop" },
-            ],
-          })}\n\ndata: [DONE]\n\n`,
-        );
+        response.end(completionChunk(`materialized:${model}`, model));
       });
     });
     const baseUrl = `${await listenLoopback(server)}/v1`;
@@ -86,18 +78,16 @@ async function withSummaryFixture(
         "agent-model",
         "runtime-drift",
         `${modelProvider}/entry`,
-      ].map((id) => ({
-        id,
-        name: id,
-        provider: modelProvider,
-        api: "openai-completions" as const,
-        baseUrl,
-        reasoning: false,
-        input: ["text" as const],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 16_000,
-        maxTokens: 4_096,
-      }));
+      ].map((id) =>
+        completionModel({
+          id,
+          provider: modelProvider,
+          api: "openai-completions",
+          baseUrl,
+          contextWindow: 16_000,
+          maxTokens: 4_096,
+        }),
+      );
       await state.writeJson("provider/openclaw.plugin.json", {
         id: pluginId,
         providers: [modelProvider],

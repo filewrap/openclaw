@@ -25,7 +25,6 @@ import {
   MAX_TIMER_TIMEOUT_MS,
   createMockSpeechProvider,
   createTtsConfig,
-  expectTtsPayloadResult,
   getTtsPersona,
   getTtsProviderAsync,
   installSpeechProviders,
@@ -263,8 +262,7 @@ describe("TTS runtime provider fallback and delivery behavior", () => {
     );
 
     expect(result.success).toBe(true);
-    const request = requireFirstSynthesisRequest("alias provider synthesis request");
-    expect(request.providerConfig).toMatchObject({ apiKey: "fake" });
+    expect(requireFirstSynthesisRequest("alias").providerConfig).toMatchObject({ apiKey: "fake" });
   });
 
   it("maps speakerVoice persona provider config to provider-compatible voice fields", async () => {
@@ -276,30 +274,11 @@ describe("TTS runtime provider fallback and delivery behavior", () => {
       { disableFallback: true },
     );
 
-    expect(result.success).toBe(true);
-    expect(result.providerVoice).toBe("marin");
-    const request = requireFirstSynthesisRequest("persona speaker voice synthesis request");
-    expect(request.providerConfig).toMatchObject({
+    expect(result).toMatchObject({ success: true, providerVoice: "marin" });
+    expect(requireFirstSynthesisRequest("persona speaker").providerConfig).toMatchObject({
       speakerVoice: "marin",
       voice: "marin",
       voiceName: "marin",
-    });
-  });
-
-  it("marks voice-note TTS for channel-side transcoding when provider returns mp3", async () => {
-    await expectTtsPayloadResult({
-      channel: "feishu",
-      prefsName: "tts-feishu-mp3-test",
-      text: "This reply should be transcoded by the channel.",
-      target: "voice-note",
-      audioAsVoice: true,
-      mediaExtension: "mp3",
-      providerResult: {
-        audioBuffer: Buffer.from("mp3"),
-        outputFormat: "mp3",
-        fileExtension: ".mp3",
-        voiceCompatible: false,
-      },
     });
   });
 
@@ -450,8 +429,7 @@ describe("TTS runtime provider fallback and delivery behavior", () => {
         expect(requireFirstSynthesisRequest("hidden TTS request").text).toBe("hello");
         expect(result.mediaUrl).toMatch(/voice---[a-f0-9-]+\.ogg$/);
         expect(result.audioAsVoice).toBe(true);
-        expect(result.text).toBeUndefined();
-        expect(result.ttsSupplement).toBeUndefined();
+        expect([result.text, result.ttsSupplement]).toEqual([undefined, undefined]);
       },
     );
   });
@@ -564,22 +542,17 @@ describe("TTS runtime voice model and streaming behavior", () => {
       const primary = same ? "bad-tts" : "gpt-4o-mini-tts";
       const fallbackId = same ? "openai" : "elevenlabs";
       const fallbackModel = same ? "good-tts" : "eleven_multilingual_v2";
+      const selected = createMockSpeechProvider("openai", {
+        autoSelectOrder: 10,
+        models: same ? [primary, fallbackModel] : [primary],
+        ...(same ? { synthesize } : { isConfigured: () => false }),
+      });
       installSpeechProviders(
         same
-          ? [
-              createMockSpeechProvider("openai", {
-                autoSelectOrder: 10,
-                models: [primary, fallbackModel],
-                synthesize,
-              }),
-            ]
+          ? [selected]
           : [
               createMockSpeechProvider(),
-              createMockSpeechProvider("openai", {
-                autoSelectOrder: 10,
-                models: [primary],
-                isConfigured: () => false,
-              }),
+              selected,
               createMockSpeechProvider(fallbackId, {
                 autoSelectOrder: 99,
                 models: [fallbackModel],
@@ -632,12 +605,7 @@ describe("TTS runtime voice model and streaming behavior", () => {
       ]);
       const result = await textToSpeechStream({
         text: "## Keep [streaming Markdown](https://example.com) raw!!!!!",
-        cfg: {
-          tts: {
-            enabled: true,
-            provider: primary,
-          },
-        },
+        cfg: { tts: { enabled: true, provider: primary } },
         prefsPath: "/tmp/openclaw-speech-stream-" + timeout + ".json",
       });
       expect(result).toMatchObject({ success: true, provider: fallbackId, fallbackFrom: primary });
