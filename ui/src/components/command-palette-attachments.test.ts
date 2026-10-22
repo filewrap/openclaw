@@ -159,6 +159,7 @@ describe("command palette paste-only images", () => {
     expect(paste(input, [image()]).defaultPrevented).toBe(true);
     await palette.updateComplete;
     expect(start().disabled).toBe(true);
+    await vi.dynamicImportSettled();
     await waitForSolid(() =>
       expect(query('.chat-attachment-thumb[aria-busy="true"]')).not.toBeNull(),
     );
@@ -229,7 +230,7 @@ describe("command palette paste-only images", () => {
     paste(input, [image("retry.png")]);
     finishRead(1);
     await vi.waitFor(() => expect(start().disabled).toBe(false));
-    expect(queryAll(".chat-attachment-thumb")).toHaveLength(1);
+    await waitForSolid(() => expect(queryAll(".chat-attachment-thumb")).toHaveLength(1));
     expect(query(".chat-attachment-thumb--error")).toBeNull();
     start().click();
     await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
@@ -254,7 +255,7 @@ describe("command palette paste-only images", () => {
       expect(query('[role="alert"]')?.textContent).toContain("Image turn rejected"),
     );
     expect(start().disabled).toBe(true);
-    expect(query(".chat-attachment-thumb img")).not.toBeNull();
+    await waitForSolid(() => expect(query(".chat-attachment-thumb img")).not.toBeNull());
     key(input, { key: "Enter", metaKey: true });
     expect(create).toHaveBeenCalledOnce();
     key(input, { key: "Escape" });
@@ -350,7 +351,9 @@ describe("command palette paste-only images", () => {
       // A valid text/remaining-image prompt could be sent explicitly, but the
       // cold submit must not silently drop a rejected clipboard image.
       await vi.waitFor(() => expect(start().disabled).toBe(false));
-      expect(queryAll(".chat-attachment-thumb")).toHaveLength(outcome === "partial" ? 1 : 0);
+      await waitForSolid(() =>
+        expect(queryAll(".chat-attachment-thumb")).toHaveLength(outcome === "partial" ? 1 : 0),
+      );
       expect(query(".chat-attachment-failures")).toBeNull();
       expect(replacement.value).toBe("Keep every image");
       expect(toast.showToast).toHaveBeenCalledExactlyOnceWith({
