@@ -3,8 +3,11 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import * as exec from "../process/exec.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
-import { withEnvAsync } from "../test-utils/env.js";
+import { createPathResolutionEnv, withEnvAsync } from "../test-utils/env.js";
+import { withMockedPlatform } from "../test-utils/vitest-spies.js";
+import { decodeLaunchAgentPlistFixture } from "./launchd-plist.test-support.js";
 import { resolveNodeService } from "./node-service.js";
 import { withDaemonRuntimePinMigration } from "./runtime-pin-state.js";
 
@@ -29,31 +32,43 @@ afterEach(() => {
 });
 
 it("stages and reads separate node definitions for two profiles beside the default", async () => {
+  // Keep real plist/env-file reads; Linux hosts do not provide native plutil.
+  vi.spyOn(exec, "runExec").mockImplementation(async (file, args, options) => {
+    if (file !== "/usr/bin/plutil" || typeof options !== "object" || !options.input) {
+      throw new Error(`Unexpected native command: ${file}`);
+    }
+    return decodeLaunchAgentPlistFixture(options.input, args[1]);
+  });
   const home = dirs.make("openclaw-node-profiles-");
-  await withEnvAsync({ HOME: home, OPENCLAW_STATE_DIR: path.join(home, "state") }, async () => {
+  const isolatedEnv = createPathResolutionEnv(home, {
+    OPENCLAW_STATE_DIR: path.join(home, "state"),
+    OPENCLAW_PROFILE: undefined,
+  });
+  await withEnvAsync(isolatedEnv, async () => {
     // Create private stores on the real host before selecting the launchd adapter.
     await withDaemonRuntimePinMigration(process.env, () => undefined);
-    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
-    const service = resolveNodeService();
-    for (const profile of [undefined, "work", "other"]) {
-      const env = { ...process.env, OPENCLAW_PROFILE: profile };
-      await service.stage({
-        env,
-        environment: { HOME: home },
-        stdout: new PassThrough(),
-        programArguments: ["/usr/bin/node", "/opt/openclaw/openclaw.mjs", "node", "run"],
-      });
-    }
-    for (const profile of [undefined, "work", "other"]) {
-      const label = profile ? `ai.openclaw.node.${profile}` : "ai.openclaw.node";
-      const file = path.join(home, "Library", "LaunchAgents", `${label}.plist`);
-      await expect(fs.readFile(file, "utf8")).resolves.toContain(`<string>${label}</string>`);
-      const command = await service.readCommand({ ...process.env, OPENCLAW_PROFILE: profile });
-      expect(command).toMatchObject({
-        sourcePath: file,
-        environment: { OPENCLAW_LAUNCHD_LABEL: label },
-      });
-      expect(command?.environment?.OPENCLAW_PROFILE).toBe(profile);
-    }
+    await withMockedPlatform("darwin", async () => {
+      const service = resolveNodeService();
+      for (const profile of [undefined, "work", "other"]) {
+        const env = { ...process.env, OPENCLAW_PROFILE: profile };
+        await service.stage({
+          env,
+          environment: { HOME: home },
+          stdout: new PassThrough(),
+          programArguments: ["/usr/bin/node", "/opt/openclaw/openclaw.mjs", "node", "run"],
+        });
+      }
+      for (const profile of [undefined, "work", "other"]) {
+        const label = profile ? `ai.openclaw.node.${profile}` : "ai.openclaw.node";
+        const file = path.join(home, "Library", "LaunchAgents", `${label}.plist`);
+        await expect(fs.readFile(file, "utf8")).resolves.toContain(`<string>${label}</string>`);
+        const command = await service.readCommand({ ...process.env, OPENCLAW_PROFILE: profile });
+        expect(command).toMatchObject({
+          sourcePath: file,
+          environment: { OPENCLAW_LAUNCHD_LABEL: label },
+        });
+        expect(command?.environment?.OPENCLAW_PROFILE).toBe(profile);
+      }
+    });
   });
 });
