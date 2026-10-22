@@ -32,14 +32,18 @@ describe("sticker-cache", () => {
 
   it("settles only after the backing write commits", async () => {
     const backingStore = fixture.store;
-    await stickerCache.cacheSticker(
-      sticker("original-file", {
-        fileUniqueId: "delayed-unique",
-        description: "Original sticker",
-        setName: "OriginalSet",
-        cachedAt: "2026-01-26T11:00:00.000Z",
-      }),
-    );
+    const original = sticker("original-file", {
+      fileUniqueId: "delayed-unique",
+      description: "Original sticker",
+      setName: "OriginalSet",
+      cachedAt: "2026-01-26T11:00:00.000Z",
+    });
+    const expected = sticker("delayed-file", {
+      fileUniqueId: "delayed-unique",
+      description: "A delayed sticker",
+      cachedAt: "2026-01-26T12:00:00.000Z",
+    });
+    await stickerCache.cacheSticker(original);
     const entered = createDeferred<void>();
     const release = createDeferred<void>();
     fixture.install({
@@ -50,39 +54,24 @@ describe("sticker-cache", () => {
         await backingStore.register(key, value, options);
       },
     });
-    const replacement = sticker("delayed-file", {
-      fileUniqueId: "delayed-unique",
-      emoji: undefined,
-      setName: undefined,
-      receivedFrom: undefined,
-      description: "A delayed sticker",
-      cachedAt: "2026-01-26T12:00:00.000Z",
-    });
     let settled = false;
-    const pending = stickerCache.cacheSticker(replacement).then(() => {
-      settled = true;
-    });
+    const pending = stickerCache
+      .cacheSticker({ ...expected, emoji: undefined, setName: undefined, receivedFrom: undefined })
+      .then(() => {
+        settled = true;
+      });
     try {
       await entered.promise;
       await setImmediate();
       expect(settled).toBe(false);
-      expect(await stickerCache.getCachedSticker("delayed-unique")).toMatchObject({
-        fileId: "original-file",
-        description: "Original sticker",
-        setName: "OriginalSet",
-      });
+      expect(await stickerCache.getCachedSticker("delayed-unique")).toMatchObject(original);
     } finally {
       release.resolve();
       await pending;
     }
     resetPluginStateStoreForTests();
     fixture.install(fixture.open());
-    expect(await stickerCache.getCachedSticker("delayed-unique")).toStrictEqual({
-      fileId: "delayed-file",
-      fileUniqueId: "delayed-unique",
-      description: "A delayed sticker",
-      cachedAt: "2026-01-26T12:00:00.000Z",
-    });
+    expect(await stickerCache.getCachedSticker("delayed-unique")).toStrictEqual(expected);
   });
 
   describe("searchStickers", () => {

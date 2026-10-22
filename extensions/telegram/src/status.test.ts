@@ -136,34 +136,29 @@ describe("resolveTelegramAllowedReactions", () => {
     resolveTelegramAllowedReactions({ chat, chatId: 1, getChat });
   const emoji = (value: "👍" | "🔥" | "❤") => ({ type: "emoji" as const, emoji: value });
   const custom = (value: string) => ({ type: "custom_emoji" as const, custom_emoji_id: value });
+  const reactions = (available_reactions: TelegramChatDetails["available_reactions"]) => ({
+    available_reactions,
+  });
   it.each([
     ["missing metadata", { id: 1 }, null],
     [
       "standard/custom but not paid",
-      { available_reactions: [emoji("👍"), custom("abc"), emoji("🔥"), { type: "paid" }] },
+      reactions([emoji("👍"), custom("abc"), emoji("🔥"), { type: "paid" }]),
       [emoji("👍"), custom("abc"), emoji("🔥")],
     ],
-  ] satisfies Array<[string, TelegramChatDetails, unknown]>)(
+    [
+      "presentation selectors",
+      reactions([{ type: "emoji", emoji: "❤️" } as never, custom("❤️")]),
+      [emoji("❤"), custom("❤️")],
+    ],
+    ["malformed payload", { available_reactions: emoji("👍") } as never, []],
+    ["getChat fallback", { id: 1 }, [emoji("👍")], async () => reactions([emoji("👍")])],
+  ] satisfies Array<[string, TelegramChatDetails, unknown, TelegramGetChat?]>)(
     "resolves allowed reactions from %s",
-    async (_name, chat, expected) => {
-      await expect(allowed(chat)).resolves.toEqual(expected);
+    async (_name, chat, expected, getChat) => {
+      await expect(allowed(chat, getChat)).resolves.toEqual(expected);
     },
   );
-  it("normalizes emoji presentation selectors while retaining custom reactions", async () => {
-    expect(
-      await allowed({
-        available_reactions: [{ type: "emoji", emoji: "❤️" }, custom("❤️")],
-      } as never),
-    ).toEqual([emoji("❤"), custom("❤️")]);
-  });
-  it("treats malformed available_reactions payloads as an empty allowlist instead of throwing", async () => {
-    await expect(allowed({ available_reactions: emoji("👍") } as never)).resolves.toEqual([]);
-  });
-  it("uses getChat lookup when message chat does not include available_reactions", async () => {
-    const reaction = { type: "emoji" as const, emoji: "👍" as const };
-    const getChat: TelegramGetChat = async () => ({ available_reactions: [reaction] });
-    expect(await allowed({ id: 1 }, getChat)).toEqual([reaction]);
-  });
 });
 
 describe("resolveTelegramReactionVariant", () => {

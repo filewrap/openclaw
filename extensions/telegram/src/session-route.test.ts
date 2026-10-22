@@ -1,10 +1,5 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import {
-  registerSessionBindingAdapter,
-  type SessionBindingAdapter,
-  testing,
-  unregisterSessionBindingAdapter,
-} from "openclaw/plugin-sdk/conversation-runtime";
+import { registerSessionBindingAdapter, testing } from "openclaw/plugin-sdk/conversation-runtime";
 import {
   createTestRegistry,
   resetPluginRuntimeStateForTest,
@@ -41,6 +36,11 @@ type RouteParams = Parameters<NonNullable<typeof messaging.resolveOutboundSessio
 function resolveRoute(target: string, params: Partial<Omit<RouteParams, "target">> = {}) {
   return messaging.resolveOutboundSessionRoute!({ cfg: {}, agentId: "main", target, ...params });
 }
+const session = (sessionKey: string, extra: Record<string, unknown> = {}) => ({
+  sessionKey,
+  baseSessionKey: sessionKey,
+  ...extra,
+});
 
 describe("telegram session route", () => {
   it("aligns isolated direct topic sessions with inbound reply routing", async () => {
@@ -49,13 +49,13 @@ describe("telegram session route", () => {
       agentId: "finance",
       accountId: "finance",
     });
-
-    expect(route).toMatchObject({
-      sessionKey: "agent:finance:telegram:finance:direct:104506878:thread:104506878:174872",
-      baseSessionKey: "agent:finance:telegram:finance:direct:104506878",
-      threadId: 174872,
-      from: "telegram:104506878:topic:174872",
-    });
+    expect(route).toMatchObject(
+      session("agent:finance:telegram:finance:direct:104506878", {
+        sessionKey: "agent:finance:telegram:finance:direct:104506878:thread:104506878:174872",
+        threadId: 174872,
+        from: "telegram:104506878:topic:174872",
+      }),
+    );
   });
 
   it.each(["12345", "@alice"])("recovers isolated direct topic routes for %s", async (target) => {
@@ -65,12 +65,9 @@ describe("telegram session route", () => {
       cfg: { session: { dmScope: "per-channel-peer" } },
       currentSessionKey: sessionKey,
     });
-    expect(route).toMatchObject({
-      sessionKey,
-      baseSessionKey,
-      threadId: 99,
-      from: `telegram:${target}:topic:99`,
-    });
+    expect(route).toMatchObject(
+      session(baseSessionKey, { sessionKey, threadId: 99, from: `telegram:${target}:topic:99` }),
+    );
   });
 
   it('does not recover currentSessionKey threads for shared dmScope "main" DMs', async () => {
@@ -78,11 +75,7 @@ describe("telegram session route", () => {
       currentSessionKey: "agent:main:main:thread:12345:99",
     });
 
-    expect(route).toMatchObject({
-      sessionKey: "agent:main:main",
-      baseSessionKey: "agent:main:main",
-      recipientSessionExact: true,
-    });
+    expect(route).toMatchObject(session("agent:main:main", { recipientSessionExact: true }));
     expect(route?.threadId).toBeUndefined();
   });
 
@@ -94,11 +87,7 @@ describe("telegram session route", () => {
       cfg: config({ defaultAccount, accounts: { work: {}, personal: {} } }),
       accountId: "work",
     });
-    expect(route).toMatchObject({
-      sessionKey: expected,
-      baseSessionKey: expected,
-      recipientSessionExact: true,
-    });
+    expect(route).toMatchObject(session(expected, { recipientSessionExact: true }));
   });
 
   const bindings = [
@@ -234,8 +223,6 @@ const configured = (overrides: TelegramConfig = {}) =>
   config({ accounts: defaultAccounts, ...overrides });
 
 describe("inspectTelegramConversationRouteOwner", () => {
-  let adapter: SessionBindingAdapter;
-
   beforeEach(() => {
     vi.stubEnv("TELEGRAM_BOT_TOKEN", undefined);
     resetPluginRuntimeStateForTest();
@@ -256,11 +243,6 @@ describe("inspectTelegramConversationRouteOwner", () => {
       ]),
     );
     testing.resetSessionBindingAdaptersForTests();
-    adapter = {
-      ...adapterBase,
-      resolveByConversation: () => null,
-    };
-    registerSessionBindingAdapter(adapter);
   });
 
   afterEach(() => {
@@ -362,7 +344,6 @@ describe("inspectTelegramConversationRouteOwner", () => {
     "resolves %s without a runtime adapter",
     async (_name, cfg, expected, accountId = "default", topic = true) => {
       vi.stubEnv("OPENCLAW_TEST_MISSING_TELEGRAM_TOKEN", undefined);
-      unregisterSessionBindingAdapter({ channel: "telegram", accountId: "default", adapter });
       expect(
         await inspectTelegramConversationRouteOwner({
           cfg,

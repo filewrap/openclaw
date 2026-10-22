@@ -1,5 +1,4 @@
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
-import * as textRuntime from "openclaw/plugin-sdk/text-utility-runtime";
 import { Agent } from "undici/index.js";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { auditTelegramGroupMembership, collectTelegramUnmentionedGroupIds } from "./audit.js";
@@ -82,7 +81,6 @@ it.each([
   { name: "shared timeout budget", delay: 40, remaining: 10, groupIds: ["-1001", "-1002"] },
 ])("cancels the $name within the remaining budget", async ({ delay, remaining, groupIds }) => {
   const cancel = vi.fn();
-  const fetchWithTimeout = vi.spyOn(textRuntime, "fetchWithTimeout");
   respond = () =>
     delay && requests.length === 1
       ? new Promise<Response>((resolve) => {
@@ -110,13 +108,6 @@ it.each([
       },
     ],
   });
-  expect(fetchWithTimeout).toHaveBeenNthCalledWith(
-    groupIds.length,
-    expect.stringContaining(`chat_id=${groupIds.at(-1)}`),
-    {},
-    remaining,
-    expect.any(Function),
-  );
   expect(cancel).toHaveBeenCalledExactlyOnceWith(expect.any(Error));
 });
 

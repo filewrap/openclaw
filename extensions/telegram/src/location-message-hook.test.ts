@@ -36,13 +36,6 @@ function emitLocation(
   });
 }
 
-function expectReceived(event: Record<string, unknown>, context = expect.any(Object)) {
-  expect(hookRunner.runMessageReceived).toHaveBeenCalledWith(
-    expect.objectContaining(event),
-    context,
-  );
-}
-
 describe("Telegram location message hooks", () => {
   beforeEach(() => {
     hookRunner.hasHooks.mockClear();
@@ -57,50 +50,20 @@ describe("Telegram location message hooks", () => {
     expect(hookRunner.runMessageReceived).not.toHaveBeenCalled();
   });
 
-  it("emits edited live locations through the global message-received contract", () => {
-    emitLocation({
-      location: {
-        latitude: 43.8376,
-        longitude: 18.4534,
-        horizontal_accuracy: 12,
-        live_period: 900,
-      },
-    });
-
-    expect(hookRunner.hasHooks).toHaveBeenCalledWith("message_received", expect.any(Object));
-    expectReceived(
+  it.each([
+    [
+      "edited_message",
+      9002,
       {
-        messageId: "456",
-        senderId: "789",
-        timestamp: 1_786_094_520_000,
-        location: expect.objectContaining({
+        location: {
           latitude: 43.8376,
           longitude: 18.4534,
-          accuracy: 12,
-          source: "live",
-          isLive: true,
-          livePeriodSeconds: 900,
-        }),
-        providerUpdate: {
-          id: "9002",
-          kind: "edited_message",
-          messageId: "456",
-          messageTimestamp: 1_786_094_460_000,
-          editedTimestamp: 1_786_094_520_000,
+          horizontal_accuracy: 12,
+          live_period: 900,
         },
       },
-      expect.objectContaining({
-        channelId: "telegram",
-        accountId: "main",
-        conversationId: "telegram:1234",
-        messageId: "456",
-        senderId: "789",
-      }),
-    );
-    expect(hookRunner.runInboundClaim).not.toHaveBeenCalled();
-  });
-
-  it.each([
+      true,
+    ],
     ["edited_message", 9003, { location: { latitude: 43.8376, longitude: 18.4534 } }, false],
     [
       "edited_channel_post",
@@ -112,13 +75,37 @@ describe("Telegram location message hooks", () => {
       true,
     ],
   ] satisfies ["edited_message" | "edited_channel_post", number, Partial<Message>, boolean][])(
-    "emits %s updates including terminal live-location edits",
+    "emits %s location update %i without dispatching inbound claims",
     (kind, id, fields, isLive) => {
-      emitLocation({ edit_date: 1_786_094_580, ...fields }, id, kind);
-      expectReceived({
-        location: expect.objectContaining({ isLive }),
-        providerUpdate: expect.objectContaining({ id: String(id), kind }),
-      });
+      emitLocation(fields, id, kind);
+      expect(hookRunner.hasHooks).toHaveBeenCalledWith("message_received", expect.any(Object));
+      expect(hookRunner.runMessageReceived).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messageId: "456",
+          senderId: "789",
+          timestamp: 1_786_094_520_000,
+          location: expect.objectContaining({
+            latitude: 43.8376,
+            longitude: 18.4534,
+            isLive,
+            ...(id === 9002 ? { accuracy: 12, source: "live", livePeriodSeconds: 900 } : {}),
+          }),
+          providerUpdate: {
+            id: String(id),
+            kind,
+            messageId: "456",
+            messageTimestamp: 1_786_094_460_000,
+            editedTimestamp: 1_786_094_520_000,
+          },
+        }),
+        expect.objectContaining({
+          channelId: "telegram",
+          accountId: "main",
+          ...(id === 9002 ? { conversationId: "telegram:1234" } : {}),
+          messageId: "456",
+          senderId: "789",
+        }),
+      );
       expect(hookRunner.runInboundClaim).not.toHaveBeenCalled();
     },
   );

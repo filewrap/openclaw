@@ -1,7 +1,6 @@
 import path from "node:path";
 import type {
   OpenClawConfig,
-  TelegramAccountConfig,
   TelegramExecApprovalConfig,
 } from "openclaw/plugin-sdk/config-contracts";
 import {
@@ -50,25 +49,18 @@ async function storeDelivery(storePath: string, accountId: string, updatedAt: nu
   });
 }
 
-function buildMultiAccountTelegramConfig(params: {
-  sessionStorePath?: string;
-  opsOverrides?: Partial<TelegramAccountConfig>;
-}): OpenClawConfig {
-  const account = (botToken: string, overrides: Partial<TelegramAccountConfig> = {}) => ({
-    botToken,
-    ...overrides,
-    execApprovals: { enabled: true, approvers: ["123"] },
-  });
+function buildMultiAccountTelegramConfig(store?: string, enabled = true): OpenClawConfig {
+  const execApprovals = { enabled: true, approvers: ["123"] };
   return {
     channels: {
       telegram: {
         accounts: {
-          default: account("tok-default"),
-          ops: account("tok-ops", params.opsOverrides),
+          default: { botToken: "tok-default", execApprovals },
+          ops: { botToken: "tok-ops", execApprovals, enabled },
         },
       },
     },
-    ...(params.sessionStorePath ? { session: { store: params.sessionStorePath } } : {}),
+    ...(store ? { session: { store } } : {}),
   };
 }
 
@@ -138,7 +130,7 @@ describe("telegram exec approvals", () => {
   it("routes non-telegram turn sources using the current stored telegram account", async () => {
     const storePath = path.join(sessionDirs.make(), "sessions.json");
     await storeDelivery(storePath, "ops", 1);
-    const cfg = buildMultiAccountTelegramConfig({ sessionStorePath: storePath });
+    const cfg = buildMultiAccountTelegramConfig(storePath);
     const request = makeChannelApprovalRequest("req-2", "slack", "agent:ops:telegram:direct:123");
     expect(await eligibleAccounts(cfg, request)).toEqual([false, true]);
 
@@ -147,7 +139,7 @@ describe("telegram exec approvals", () => {
   });
 
   it("ignores disabled telegram accounts when checking unbound account eligibility", async () => {
-    const cfg = buildMultiAccountTelegramConfig({ opsOverrides: { enabled: false } });
+    const cfg = buildMultiAccountTelegramConfig(undefined, false);
     expect(await eligibleAccounts(cfg, makeChannelApprovalRequest("req-6"))).toEqual([true, false]);
   });
 

@@ -31,13 +31,12 @@ describe("resolveTelegramBotUserIdFromToken", () => {
 });
 
 describe("resolveTelegramToken", () => {
-  const tempWorkspaces: TempWorkspaceSync[] = [];
+  let workspace: TempWorkspaceSync | undefined;
   function createTokenFile(fileName: string, contents = "file-token\n"): string {
-    const workspace = tempWorkspaceSync({
+    workspace ??= tempWorkspaceSync({
       rootDir: resolvePreferredOpenClawTmpDir(),
       prefix: "openclaw-telegram-token-",
     });
-    tempWorkspaces.push(workspace);
     const tokenFile = path.join(workspace.dir, fileName);
     fs.writeFileSync(tokenFile, contents, "utf-8");
     return tokenFile;
@@ -45,9 +44,8 @@ describe("resolveTelegramToken", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
-    for (const workspace of tempWorkspaces.splice(0)) {
-      workspace.cleanup();
-    }
+    workspace?.cleanup();
+    workspace = undefined;
   });
 
   it.runIf(process.platform !== "win32")(
@@ -58,8 +56,9 @@ describe("resolveTelegramToken", () => {
       const tokenLink = path.join(path.dirname(tokenFile), "token-link.txt");
       fs.symlinkSync(tokenFile, tokenLink);
 
-      const cfg = config({ tokenFile: tokenLink, botToken: "fallback-token" });
-      const result = resolveTelegramToken(cfg);
+      const result = resolveTelegramToken(
+        config({ tokenFile: tokenLink, botToken: "fallback-token" }),
+      );
       expect(result).toEqual({
         token: "",
         source: "tokenFile",
@@ -95,31 +94,24 @@ describe("resolveTelegramToken", () => {
     }
   });
 
-  it("does not use env token for non-default accounts", () => {
-    vi.stubEnv("TELEGRAM_BOT_TOKEN", "env-token");
-    const cfg = config({ accounts: { work: {} } });
-    const res = resolveTelegramToken(cfg, { accountId: "work" });
-    expect(res).toEqual({ token: "", source: "none" });
-  });
-
-  it("does not fall through to channel-level token when non-default accountId is not in config", () => {
-    vi.stubEnv("TELEGRAM_BOT_TOKEN", "");
-    const cfg = config({
-      botToken: "wrong-bot-token",
-      accounts: { knownBot: { botToken: "known-bot-token" } },
-    });
-    expect(resolveTelegramToken(cfg, { accountId: "unknownBot" })).toEqual({
-      token: "",
-      source: "none",
-    });
-  });
-
-  it("does not fall back to TELEGRAM_BOT_TOKEN when a selected ref is unavailable", () => {
-    vi.stubEnv("TELEGRAM_BOT_TOKEN", "fallback-env-token");
+  it.each([
+    ["non-default env", { accounts: { work: {} } }, "work", "env-token"],
+    [
+      "unknown account",
+      { botToken: "wrong-bot-token", accounts: { knownBot: { botToken: "known-bot-token" } } },
+      "unknownBot",
+      "",
+    ],
+    [
+      "unavailable ref",
+      { botToken: envRef("default", "TELEGRAM_REF_TOKEN") },
+      undefined,
+      "fallback-env-token",
+    ],
+  ] as const)("does not fall back for %s", (_name, telegram, accountId, envToken) => {
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", envToken);
     vi.stubEnv("TELEGRAM_REF_TOKEN", "");
-    const cfg = config({ botToken: envRef("default", "TELEGRAM_REF_TOKEN") });
-
-    expect(resolveTelegramToken(cfg)).toEqual({
+    expect(resolveTelegramToken(config(telegram), { accountId })).toEqual({
       token: "",
       source: "none",
     });
@@ -172,9 +164,10 @@ describe("resolveTelegramToken", () => {
 
   // Regression: https://github.com/openclaw/openclaw/issues/53876
   it("falls through to channel-level token for binding-created accountId without accounts section", () => {
-    const cfg = config({ botToken: "channel-level-token", enabled: true });
-
-    const res = resolveTelegramToken(cfg, { accountId: "bot-main" });
-    expect(res).toEqual({ token: "channel-level-token", source: "config" });
+    expect(
+      resolveTelegramToken(config({ botToken: "channel-level-token", enabled: true }), {
+        accountId: "bot-main",
+      }),
+    ).toEqual({ token: "channel-level-token", source: "config" });
   });
 });

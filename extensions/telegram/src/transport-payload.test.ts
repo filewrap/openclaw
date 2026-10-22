@@ -70,16 +70,15 @@ describe("Telegram topic transport payloads", () => {
   beforeEach(() => {
     fixture.responseFor = (method, fields) =>
       method.startsWith("send")
-        ? {
+        ? directMessagesMessage({
             message_id: requests.length + 100,
-            date: 1_700_000_000,
             chat: { ...CHAT, is_direct_messages: fields.direct_messages_topic_id !== undefined },
             direct_messages_topic:
               fields.direct_messages_topic_id !== undefined
                 ? topic(Number(fields.direct_messages_topic_id))
                 : undefined,
             text: "accepted",
-          }
+          })
         : true;
     resetPluginStateStoreForTests();
     resetTelegramMessageCacheForTest();
