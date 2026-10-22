@@ -37,52 +37,61 @@ function QuestionCardContents(props: { panel: QuestionPanelProps; host: HTMLElem
     <Loading on={attempt()} fallback={<LoadingState />}>
       <Errored
         fallback={(error, reset) => {
-          const failure = error();
-          const stale = isStaleChunkImportError(failure);
-          const [recovery, setRecovery] = createSignal<Promise<boolean>>();
-          const recovered = createMemo(() => recovery());
-          let active = true;
-          onSettled(() => () => {
-            active = false;
-            if (stale) {
-              cancelStaleChunkRecovery();
-            }
+          const failedRequest = createMemo(() => [error(), props.panel.model.requestKey] as const, {
+            equals: (before, after) => before[0] === after[0] && before[1] === after[1],
           });
-          const retry = () => {
-            if (!active || !props.host.isConnected) {
-              return;
-            }
-            if (!stale) {
-              setAttempt((value) => value + 1);
-              reset();
-              return;
-            }
-            const requestKey = props.panel.model.requestKey;
-            const isCurrent = () =>
-              active &&
-              props.host.isConnected &&
-              error() === failure &&
-              props.panel.model.requestKey === requestKey;
-            void setRecovery(
-              retryStaleChunkReloadWhenReachable({ canReload: isCurrent }).then((reloading) => {
-                if (!reloading && isCurrent()) {
-                  setAttempt((value) => value + 1);
-                  reset();
-                }
-                return reloading;
-              }),
-            );
-          };
           return (
-            <Loading on={recovery()} fallback={<LoadingState />}>
-              {recovered()}
-              <LazyViewError
-                error={error()}
-                stale={stale}
-                subtitle={t("chat.questions.eyebrow")}
-                onRetry={retry}
-              />
-            </Loading>
+            <Show when={failedRequest()} keyed>
+              {([failure, requestKey]) => {
+                const stale = isStaleChunkImportError(failure);
+                const [recovery, setRecovery] = createSignal<Promise<boolean>>();
+                const recovered = createMemo(() => recovery());
+                let active = true;
+                onSettled(() => () => {
+                  active = false;
+                  if (stale) {
+                    cancelStaleChunkRecovery();
+                  }
+                });
+                const retry = () => {
+                  if (!active || !props.host.isConnected) {
+                    return;
+                  }
+                  if (!stale) {
+                    setAttempt((value) => value + 1);
+                    reset();
+                    return;
+                  }
+                  const isCurrent = () =>
+                    active &&
+                    props.host.isConnected &&
+                    error() === failure &&
+                    props.panel.model.requestKey === requestKey;
+                  void setRecovery(
+                    retryStaleChunkReloadWhenReachable({ canReload: isCurrent }).then(
+                      (reloading) => {
+                        if (!reloading && isCurrent()) {
+                          setAttempt((value) => value + 1);
+                          reset();
+                        }
+                        return reloading;
+                      },
+                    ),
+                  );
+                };
+                return (
+                  <Loading on={recovery()} fallback={<LoadingState />}>
+                    {recovered()}
+                    <LazyViewError
+                      error={failure}
+                      stale={stale}
+                      subtitle={t("chat.questions.eyebrow")}
+                      onRetry={retry}
+                    />
+                  </Loading>
+                );
+              }}
+            </Show>
           );
         }}
       >

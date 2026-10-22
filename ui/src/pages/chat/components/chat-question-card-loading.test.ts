@@ -3,6 +3,11 @@
 import { createComponent, createSignal } from "solid-js";
 import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../../test/helpers/promise.js";
+import {
+  cancelStaleChunkRecovery,
+  installStaleChunkReloadListener,
+} from "../../../app/stale-chunk-reload.ts";
+import * as localStorage from "../../../local-storage.ts";
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
 import { flush, waitForSolid } from "../../../test-helpers/solid-settle.ts";
 import { ComposerQuestionDock } from "./chat-composer-question.tsx";
@@ -23,9 +28,14 @@ vi.mock("../../../app/stale-chunk-reload.ts", async (importOriginal) => {
   };
 });
 
+let stopPreloadListener: (() => void) | undefined;
 afterEach(() => {
+  stopPreloadListener?.();
+  stopPreloadListener = undefined;
+  cancelStaleChunkRecovery();
   vi.doUnmock("./chat-question-panel.tsx");
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function model(key: string, text: string, defaults?: string[]): QuestionPanelProps["model"] {
@@ -55,6 +65,14 @@ function mountDock(initial: QuestionPanelProps | null = null) {
 }
 
 it("defers controls, retries loading, and mounts only the current connected request", async () => {
+  const probe = createDeferred<Response>();
+  const fetchMock = vi.fn<typeof fetch>().mockReturnValue(probe.promise);
+  vi.stubGlobal("fetch", fetchMock);
+  const guardKey = "openclaw.controlUi.staleChunkReloadBuildId";
+  window.sessionStorage.removeItem(guardKey);
+  vi.spyOn(localStorage, "getSafeSessionStorage").mockReturnValue(window.sessionStorage);
+  const persist = vi.spyOn(Storage.prototype, "setItem");
+  stopPreloadListener = installStaleChunkReloadListener();
   const initialLoad = createDeferred();
   const staleLoad = createDeferred();
   const retryLoad = createDeferred();
@@ -94,15 +112,24 @@ it("defers controls, retries loading, and mounts only the current connected requ
 
   card.querySelector<HTMLButtonElement>(".lazy-view-error__action")!.click();
   await waitForSolid(() => expect(card.querySelector('[role="status"]')).not.toBeNull());
-  staleLoad.reject(new Error("Failed to fetch dynamically imported module"));
+  const staleError = new Error("Failed to fetch dynamically imported module");
+  staleLoad.reject(staleError);
+  const preloadError = new Event("vite:preloadError", { cancelable: true });
+  Object.defineProperty(preloadError, "payload", { value: staleError });
+  window.dispatchEvent(preloadError);
   await waitForSolid(() =>
     expect(card.querySelector('[role="alert"]')?.textContent).toContain(
       "Failed to fetch dynamically imported module",
     ),
   );
+  await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
   card.querySelector<HTMLButtonElement>(".lazy-view-error__action")!.click();
   await waitForSolid(() => expect(card.querySelector('[role="status"]')).not.toBeNull());
   const canReload = retryStale.mock.calls[0]![0].canReload;
+  expect(canReload()).toBe(true);
+  updatePanel({ ...props, model: { ...props.model } });
+  flush();
+  await card.updateComplete;
   expect(canReload()).toBe(true);
   updatePanel({
     model: model("current-request", "Current question", ["  current value  "]),
@@ -111,6 +138,11 @@ it("defers controls, retries loading, and mounts only the current connected requ
   flush();
   await card.updateComplete;
   expect(canReload()).toBe(false);
+  probe.resolve(new Response("", { status: 200 }));
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+  expect(persist).not.toHaveBeenCalledWith(guardKey, expect.any(String));
   recovery.resolve(false);
   await waitForSolid(() => expect(card.querySelector('[role="alert"]')).not.toBeNull());
   expect(load).toHaveBeenCalledTimes(2);
