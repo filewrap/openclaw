@@ -92,11 +92,13 @@ describe("restart recovery terminal delivery receipt", () => {
       } else {
         await expect(cancel(scope())).resolves.toBe("cleared");
       }
-      expect(read()).toMatchObject({
-        restartRecoveryDeliveryReceiptState:
-          outcome === "success" ? "delivered-terminal" : undefined,
-        restartRecoveryDeliveryToolCallId: outcome === "success" ? "message-call-1" : undefined,
-      });
+      const receipt = read();
+      expect(receipt?.restartRecoveryDeliveryReceiptState).toBe(
+        outcome === "success" ? "delivered-terminal" : undefined,
+      );
+      expect(receipt?.restartRecoveryDeliveryToolCallId).toBe(
+        outcome === "success" ? "message-call-1" : undefined,
+      );
     },
   );
 

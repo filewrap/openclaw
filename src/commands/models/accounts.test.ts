@@ -451,7 +451,12 @@ describe("personal model account CLI over an identified Gateway connection", () 
         ]);
         expect(connections).toHaveLength(1);
         expect(
-          mocks.autocomplete.mock.calls.map(([prompt]) => prompt.options.map(({ value }) => value)),
+          mocks.autocomplete.mock.calls.map(([prompt]) => {
+            if (!Array.isArray(prompt.options)) {
+              throw new Error("Expected static login choices");
+            }
+            return prompt.options.map(({ value }) => value);
+          }),
         ).toEqual([
           ["openai", "xai"],
           ["api-key", "device-code"],
@@ -693,6 +698,7 @@ describe("personal model account CLI over an identified Gateway connection", () 
             return pendingInput;
           }
           socket.close(1001, "gone");
+          return undefined;
         },
       },
       async ({ port, requests, connections }) => {

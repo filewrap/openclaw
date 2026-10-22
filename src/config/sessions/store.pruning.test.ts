@@ -29,7 +29,7 @@ const disabledBudget = { maxDiskBytes: null, highWaterBytes: null };
 
 function makeEntry(
   updatedAt: number,
-  sessionId = crypto.randomUUID(),
+  sessionId: string = crypto.randomUUID(),
   extra: Partial<SessionEntry> = {},
 ): SessionEntry {
   return { sessionId, updatedAt, ...extra };
@@ -98,7 +98,9 @@ it.each([
 });
 
 describe("applyFileBackedSessionStoreMaintenance", () => {
-  const baseMaintenance = {
+  const baseMaintenance: Parameters<
+    typeof applyFileBackedSessionStoreMaintenance
+  >[0]["maintenanceConfig"] = {
     mode: "enforce" as const,
     pruneAfterMs: 30 * DAY_MS,
     maxEntries: 500,

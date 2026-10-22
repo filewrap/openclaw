@@ -219,7 +219,8 @@ describe("maybeRunCliInContainer", () => {
     ],
     ["selects Docker after Podman", { USER: "somalley" }, { runtime: "docker" }],
     ["allocates interactive tty", {}, { argv: ["setup"], tty: true }],
-  ])("%s", (_name, env, { argv = ["status"], tty = false, runtime = "podman", proxyUrl } = {}) => {
+  ])("%s", (_name, env, options) => {
+    const { argv = ["status"], tty = false, runtime = "podman", proxyUrl } = options ?? {};
     const probes =
       runtime === "docker"
         ? [missingContainer, runningContainer]

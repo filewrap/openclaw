@@ -277,7 +277,7 @@ let runtime: RuntimeEnv;
 let restoreStdin: (() => void) | null = null;
 let currentConfig: OpenClawConfig;
 let lastUpdatedConfig: OpenClawConfig | null;
-let runProviderAuth: ReturnType<typeof vi.fn>;
+let runProviderAuth: Mock<ProviderPlugin["auth"][number]["run"]>;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -342,7 +342,7 @@ beforeEach(() => {
     },
   );
   usePrompter(vi.fn().mockResolvedValue("keep"));
-  runProviderAuth = vi.fn().mockResolvedValue({
+  runProviderAuth = vi.fn<ProviderPlugin["auth"][number]["run"]>().mockResolvedValue({
     profiles: [oauthProfile()],
     defaultModel: "openai/gpt-5.5",
   });
@@ -697,7 +697,7 @@ it("refreshes saved credentials before presenting provider notes", async () => {
 it("does not persist credentials returned after app-owned cancellation", async () => {
   const abortController = new AbortController();
   const cancellation = new Error("Login was replaced");
-  runProviderAuth.mockImplementationOnce((params: AuthRunCall) => {
+  runProviderAuth.mockImplementationOnce(async (params: AuthRunCall) => {
     expect(params.signal).toBe(abortController.signal);
     abortController.abort(cancellation);
     return {
@@ -784,6 +784,34 @@ it("runs the requested anthropic cli auth method with the full login context", a
     "Provider notes",
   );
   expect(runtime.log).toHaveBeenCalledWith("Default model set to claude-cli/claude-sonnet-4-6");
+});
+
+it("preserves model selection and other providers' allowlist entries on OAuth login", async () => {
+  const existingModels = {
+    "anthropic/claude-sonnet-4-6": { alias: "sonnet" },
+    "anthropic/claude-opus-4-6": { alias: "opus" },
+    "moonshot/kimi-k2.5": { alias: "kimi" },
+    "openai/gpt-5.5": { alias: "gpt55" },
+  };
+  const model = {
+    primary: "anthropic/claude-sonnet-4-6",
+    fallbacks: ["moonshot/kimi-k2.5"],
+  };
+  currentConfig = structuredClone({ agents: { defaults: { model, models: existingModels } } });
+  runProviderAuth.mockResolvedValue({
+    profiles: [oauthProfile(undefined, { access: "a", refresh: "r" })],
+    configPatch: {
+      agents: {
+        defaults: { model: { primary: "openai/gpt-5.5" }, models: { "openai/gpt-5.5": {} } },
+      },
+    },
+    defaultModel: "openai/gpt-5.5",
+  });
+
+  await loginCommand();
+
+  expect(currentConfig.agents?.defaults?.models).toEqual(existingModels);
+  expect(currentConfig.agents?.defaults?.model).toEqual(model);
 });
 
 it("--force refreshes after the purge when replacement login fails", async () => {
@@ -1013,4 +1041,3 @@ it("keeps the requested agent store when interactive auth add falls back to past
     agentDir: "/tmp/openclaw/agents/coder",
   });
 });
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

@@ -530,33 +530,35 @@ describe("anthropic provider replay hooks", () => {
     ], // pragma: allowlist secret
     [{ tokenExpiresIn: "nope" }, "Invalid --token-expires-in"],
     [{ token: "" }, "Anthropic setup-token auth requires --token with a valid setup-token."],
-  ] satisfies Array<[Record<string, string>, string | undefined]>)(
-    "preflights setup-token options %j",
-    async (opts, error) => {
-      const setupTokenAuth = provider.auth.find((entry) => entry.id === "setup-token");
-      if (!setupTokenAuth?.validateNonInteractive) {
-        throw new Error("expected setup-token reset preflight");
-      }
-      const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
+  ] satisfies Array<
+    [
+      Parameters<NonNullable<(typeof provider.auth)[number]["validateNonInteractive"]>>[0]["opts"],
+      string | undefined,
+    ]
+  >)("preflights setup-token options %j", async (opts, error) => {
+    const setupTokenAuth = provider.auth.find((entry) => entry.id === "setup-token");
+    if (!setupTokenAuth?.validateNonInteractive) {
+      throw new Error("expected setup-token reset preflight");
+    }
+    const runtime = { log: vi.fn(), error: vi.fn(), exit: vi.fn() };
 
-      const validation = setupTokenAuth.validateNonInteractive({
-        authChoice: "setup-token",
-        config: {},
-        baseConfig: {},
-        opts: { token: ANTHROPIC_SETUP_TOKEN, ...opts },
-        runtime,
-        resolveApiKey: vi.fn(async () => null),
-      });
+    const validation = setupTokenAuth.validateNonInteractive({
+      authChoice: "setup-token",
+      config: {},
+      baseConfig: {},
+      opts: { token: ANTHROPIC_SETUP_TOKEN, ...opts },
+      runtime,
+      resolveApiKey: vi.fn(async () => null),
+    });
 
-      if (error) {
-        await expect(validation).rejects.toThrow(error);
-      } else {
-        await expect(validation).resolves.toBe(true);
-      }
-      expect(runtime.error).not.toHaveBeenCalled();
-      expect(runtime.exit).not.toHaveBeenCalled();
-    },
-  );
+    if (error) {
+      await expect(validation).rejects.toThrow(error);
+    } else {
+      await expect(validation).resolves.toBe(true);
+    }
+    expect(runtime.error).not.toHaveBeenCalled();
+    expect(runtime.exit).not.toHaveBeenCalled();
+  });
 
   it("omits setup-token expiry when duration overflows the Date range", async () => {
     expect(await setupCredential(8_640_000_000_000_000)).toEqual({

@@ -31,18 +31,24 @@ import { useSessionStoreTempDirs } from "../../test-utils/session-state-cleanup.
 import { createRuntimeAgent } from "./runtime-agent.js";
 import type { PluginRuntime } from "./types.js";
 
-const cliSessionBinding = { sessionId: "claude-source", forceReuse: true, forkNextResume: true };
+const cliSessionBinding = {
+  sessionId: "claude-source",
+  forceReuse: true,
+  forkNextResume: true,
+} satisfies NonNullable<SessionEntry["cliSessionBindings"]>[string];
 const cliInitial = {
   cliBackendId: "claude-cli",
   model: "claude-opus-4-8",
   modelSelectionLocked: true,
   pluginOwnerId: "anthropic",
   cliSessionBinding,
-};
+} satisfies Create["initialEntry"];
 const supervision = (fields: Record<string, string | boolean>) => ({
   codex: { supervision: fields },
 });
-const harnessInitial = (pluginExtensions?: SessionEntry["pluginExtensions"]) => ({
+const harnessInitial = (
+  pluginExtensions?: SessionEntry["pluginExtensions"],
+): Extract<NonNullable<Create["initialEntry"]>, { agentHarnessId: string }> => ({
   agentHarnessId: "codex",
   modelSelectionLocked: true,
   ...(pluginExtensions ? { pluginExtensions } : {}),

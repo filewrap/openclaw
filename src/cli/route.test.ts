@@ -98,6 +98,16 @@ describe("tryRouteCli", () => {
     originalEnv.restore();
   });
 
+  it("falls back before bootstrap when the route cannot parse the argv", async () => {
+    await expect(
+      tryRouteCli(["node", "openclaw", "sessions", "--json", "--unknown"]),
+    ).resolves.toBe(false);
+
+    expect(ensureConfigReadyMock).not.toHaveBeenCalled();
+    expect(ensurePluginRegistryLoadedMock).not.toHaveBeenCalled();
+    expect(runRouteMock).not.toHaveBeenCalled();
+  });
+
   it.each<[string, object, boolean?]>([
     ["health --json --timeout 5000", { json: true, verbose: false, timeoutMs: 5000 }],
     [

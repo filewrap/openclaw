@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import type { IncomingMessage } from "node:http";
 import net from "node:net";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
@@ -726,6 +727,60 @@ function echoMark(ws: WebSocket, streamSid: string, name: string) {
 }
 
 describe("MediaStreamHandler TTS queue", () => {
+  it("completes queued playback only after Twilio echoes its mark", async () => {
+    const onConnect = vi.fn();
+    const handler = createHandler({ shouldAcceptStream: () => true, onConnect });
+    await withConnection(handler, async (ws) => {
+      sendStart(ws, "MZ-mark", "CA-mark");
+      await vi.waitFor(() => expect(onConnect).toHaveBeenCalledOnce());
+      const outboundMark = nextWsMessage(ws);
+      let completed = false;
+      const playback = handler
+        .queueTts("MZ-mark", async (signal) => {
+          await handler.sendMarkAndWait("MZ-mark", "tts-complete", 100, signal);
+        })
+        .then(() => {
+          completed = true;
+        });
+      expect(await withTimeout(outboundMark)).toMatchObject({
+        event: "mark",
+        mark: { name: "tts-complete" },
+      });
+      await Promise.resolve();
+      expect(completed).toBe(false);
+
+      echoMark(ws, "MZ-mark", "different-mark");
+      const pong = once(ws, "pong");
+      ws.ping();
+      await withTimeout(pong);
+      expect(completed).toBe(false);
+
+      echoMark(ws, "MZ-mark", "tts-complete");
+      await withTimeout(playback);
+      expect(completed).toBe(true);
+      await closeWs(ws);
+    });
+  });
+
+  it("cancels active playback and clears queued items", async () => {
+    const handler = createHandler();
+    let queuedRan = false;
+    const started: string[] = [];
+    const active = handler.queueTts("stream-1", async (signal) => {
+      started.push("active");
+      await waitForAbort(signal);
+    });
+    const queued = handler.queueTts("stream-1", async () => {
+      queuedRan = true;
+    });
+
+    expect(started).toEqual(["active"]);
+    handler.clearTtsQueue("stream-1");
+    await active;
+    await withTimeout(queued);
+    expect(queuedRan).toBe(false);
+  });
+
   it("bounds pending playback per stream and recovers after draining", async () => {
     const handler = createHandler();
     const activeGate = createDeferred<void>();

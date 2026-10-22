@@ -996,8 +996,8 @@ describe("Claude session catalog", () => {
       ),
     );
     const provider = captureCatalogProvider({
-      config: { current: () => ({}) },
       ...nodeRuntime(nodes, invoke),
+      config: { current: () => ({}) },
       agent: {
         session: {
           listSessionEntries: () => [],

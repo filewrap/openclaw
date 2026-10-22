@@ -193,8 +193,8 @@ it("shares lazy CLI discovery across native execution and both OAuth wrappers", 
   const simple = capture(fixture.provider, "wrapSimpleCompletionStreamFn");
   const prepared = vi.fn();
   const executions = [
-    normal.run(),
-    simple.run(),
+    Promise.resolve(normal.run()),
+    Promise.resolve(simple.run()),
     ...[fixture.prepare(), fixture.prepare()].map((result) =>
       Promise.resolve(result).then(prepared),
     ),
