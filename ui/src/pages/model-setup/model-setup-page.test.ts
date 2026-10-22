@@ -168,24 +168,23 @@ describe("ModelSetupPage catalog icons", () => {
     const order: string[] = [];
     let config: Record<string, unknown> = { pending: false };
     let hash = "hash-1";
-    request.mockImplementation(async (method: string, params?: unknown) => {
-      if (method === "config.get") {
-        order.push(method);
+    mockRequests(request, {
+      "config.get": () => {
+        order.push("config.get");
         return configSnapshot(config, hash);
-      }
-      if (method === "config.set") {
-        order.push(method);
+      },
+      "config.set": (params) => {
+        order.push("config.set");
         config = JSON.parse((params as { raw: string }).raw) as Record<string, unknown>;
         hash = "hash-2";
         return { config, hash };
-      }
-      if (method === "openclaw.setup.activate.start") {
-        order.push(method);
+      },
+      "openclaw.setup.activate.start": () => {
+        order.push("openclaw.setup.activate.start");
         config = { ...config, configuredModel: "openai/gpt-5" };
         hash = "hash-3";
         return activated("openai/gpt-5");
-      }
-      throw new Error(`Unexpected method ${method}`);
+      },
     });
     await runtimeConfig.ensureLoaded();
     order.length = 0;
@@ -334,14 +333,13 @@ describe("ModelSetupPage catalog icons", () => {
       modelRef: "provider/verified",
       gatewayRestartRequired: true,
     };
-    request.mockImplementation(async (method) => {
-      if (method === "openclaw.setup.auth.start") {
-        return { sessionId: "warning-auth", done: false, status: "running" };
-      }
-      if (method === "wizard.next") {
-        return { done: true, status: "done", modelActivation };
-      }
-      throw new Error(`Unexpected method ${method}`);
+    mockRequests(request, {
+      "openclaw.setup.auth.start": () => ({
+        sessionId: "warning-auth",
+        done: false,
+        status: "running",
+      }),
+      "wizard.next": () => activated(modelActivation.modelRef, modelActivation),
     });
     const { page } = await mountSettings(context, client, {
       authOptions: [authOption("provider-auth")],

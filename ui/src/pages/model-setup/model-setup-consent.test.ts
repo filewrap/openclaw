@@ -2,6 +2,8 @@
 import { expect, it } from "vitest";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
+  waitForText,
+  waitForOnboarding,
   activated,
   callsFor,
   candidate,
@@ -67,17 +69,15 @@ it.each(["accept", "decline", "cancel"] as const)(
     });
     expect(request).not.toHaveBeenCalled();
     await clickCandidate(page, "openai-api-key");
-    await waitForFast(() => expect(page.textContent).toContain("Review model setup"));
+    await waitForText(page, "Review model setup");
     expect(context.navigate).not.toHaveBeenCalled();
     modalButton(page, "Continue")!.click();
-    await waitForFast(() => expect(page.textContent).toContain("Apply the reviewed changes?"));
+    await waitForText(page, "Apply the reviewed changes?");
     expect(answers).toEqual([{ stepId: "review", value: undefined }]);
     expect(context.navigate).not.toHaveBeenCalled();
     modalButton(page, { accept: "Yes", decline: "No", cancel: "Cancel" }[decision])!.click();
     if (decision === "accept") {
-      await waitForFast(() =>
-        expect(context.navigate).toHaveBeenCalledWith("custodian", { search: "?onboarding=1" }),
-      );
+      await waitForOnboarding(context);
       expect(answers.at(-1)).toEqual({ stepId: "consent", value: true });
     } else {
       await waitForFast(() => expect(pendingReceipt()).toBeNull());

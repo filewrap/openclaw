@@ -6,6 +6,7 @@ import { waitForFast } from "../../test-helpers/wait-for.ts";
 import { persistFirstRunActivationReceipt } from "./first-run-activation-receipt.ts";
 import { FirstRunSetup } from "./first-run-setup.ts";
 import {
+  waitForOnboarding,
   waitForText,
   runningStep,
   authButton,
@@ -74,9 +75,7 @@ describe("ModelSetupPage first-run activation ownership", () => {
       expect(request).toHaveBeenCalledOnce();
       expect(pendingReceipt()).toBe(receipt);
       response.resolve(success);
-      await waitForFast(() =>
-        expect(context.navigate).toHaveBeenCalledWith("custodian", { search: "?onboarding=1" }),
-      );
+      await waitForOnboarding(context);
       expect(request).toHaveBeenCalledOnce();
     } finally {
       response.resolve(success);
@@ -147,9 +146,7 @@ describe("ModelSetupPage first-run activation ownership", () => {
       expect(callsFor(request, "openclaw.setup.verify")).toHaveLength(0);
       expect(context.navigate).not.toHaveBeenCalled();
       pageButton(page, ".model-setup__recovery .btn.primary")!.click();
-      await waitForFast(() =>
-        expect(context.navigate).toHaveBeenCalledWith("custodian", { search: "?onboarding=1" }),
-      );
+      await waitForOnboarding(context);
       releaseActivation?.(activated("provider/late-other"));
       await page.updateComplete;
       expect(callsFor(request, activatedMethod)).toHaveLength(entry === "provider sign-in" ? 2 : 1);

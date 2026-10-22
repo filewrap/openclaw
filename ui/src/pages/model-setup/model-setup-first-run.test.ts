@@ -6,6 +6,7 @@ import { createAgentCapability } from "../../lib/agents/index.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import { clearFirstRunActivationReceipt } from "./first-run-activation-receipt.ts";
 import {
+  waitForOnboarding,
   waitForElement,
   waitForText,
   pageButton,
@@ -389,8 +390,6 @@ describe("ModelSetupPage first-run inference", () => {
         ],
       ]);
     });
-    await waitForFast(() =>
-      expect(context.navigate).toHaveBeenCalledWith("custodian", { search: "?onboarding=1" }),
-    );
+    await waitForOnboarding(context);
   });
 });
