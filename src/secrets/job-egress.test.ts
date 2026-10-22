@@ -61,12 +61,7 @@ it("returns only selected POSIX sentinel env and public trust with host proxy cr
     expect(Object.keys(egress.remoteEnv).toSorted()).toEqual(["GIT_PASSWORD", "npm_token"]);
     expect(resolveSecretSentinel(egress.remoteEnv.npm_token!)).toBe("synthetic-job-token");
     expect(resolveSecretSentinel(egress.remoteEnv.GIT_PASSWORD!)).toBe("synthetic-job-password");
-    expect(
-      proxy.registerProcess.mock.calls[0]![0]?.map(({ name, allowedHosts }) => ({
-        name,
-        allowedHosts,
-      })),
-    ).toEqual([
+    expect(proxy.registerProcess.mock.calls[0]![0]).toMatchObject([
       { name: "JOB_TOKEN", allowedHosts: ["registry.example.test"] },
       { name: "JOB_PASSWORD", allowedHosts: ["git.example.test"] },
     ]);

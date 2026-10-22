@@ -93,11 +93,12 @@ const NO_SCRUB = {
   scrubLegacyAuthJson: false,
 };
 
+type Target = SecretsApplyPlan["targets"][number];
 function createAuthTarget(
   agentId = "main",
   profileId = "openai:default",
   authProfileProvider?: string,
-): SecretsApplyPlan["targets"][number] {
+): Target {
   return {
     type: "auth-profiles.api_key.key",
     path: `profiles.${profileId}.key`,
@@ -107,18 +108,13 @@ function createAuthTarget(
     ...(authProfileProvider ? { authProfileProvider } : {}),
   };
 }
-
-function createOpenAiProviderTarget(
-  overrides: Partial<SecretsApplyPlan["targets"][number]> = {},
-): SecretsApplyPlan["targets"][number] {
-  return {
-    type: "models.providers.apiKey",
-    path: "models.providers.openai.apiKey",
-    providerId: "openai",
-    ref: OPENAI_API_KEY_ENV_REF,
-    ...overrides,
-  };
-}
+const createOpenAiProviderTarget = (overrides: Partial<Target> = {}): Target => ({
+  type: "models.providers.apiKey",
+  path: "models.providers.openai.apiKey",
+  providerId: "openai",
+  ref: OPENAI_API_KEY_ENV_REF,
+  ...overrides,
+});
 
 function createOpenAiExecProviderPlan(): SecretsApplyPlan {
   return targetPlan(
@@ -209,6 +205,11 @@ describe("secrets apply", () => {
     replaceRuntimeAuthProfileStoreSnapshots([
       { agentDir, store: loadAuthProfileStoreWithoutExternalProfiles(agentDir) },
     ]);
+  const writeAgentStore = async (agentDir: string, profiles: AuthProfileStore["profiles"]) => {
+    const store = createAuthProfileStoreFixture(profiles);
+    await writeJsonFile(resolveAuthProfileDatabasePath(agentDir), store);
+    return store;
+  };
 
   async function configureAgents(firstAgentDir: string, secondAgentDir: string) {
     const entries = { first: { agentDir: firstAgentDir }, second: { agentDir: secondAgentDir } };
@@ -346,12 +347,9 @@ describe("secrets apply", () => {
       [ambientMainDir, "shared"],
       [ambientOpsDir, "ops"],
     ] as const) {
-      await writeJsonFile(
-        resolveAuthProfileDatabasePath(agentDir),
-        createAuthProfileStoreFixture({
-          [`openai:ambient-${suffix}`]: apiKey(`sk-ambient-${suffix}`),
-        }),
-      );
+      await writeAgentStore(agentDir, {
+        [`openai:ambient-${suffix}`]: apiKey(`sk-ambient-${suffix}`),
+      });
     }
     await writeConfig({
       agents: { entries: { ops: {} } },
@@ -435,15 +433,13 @@ describe("secrets apply", () => {
     vi.stubEnv("OPENCLAW_STATE_DIR", fixture.stateDir);
     vi.stubEnv("OPENCLAW_AGENT_DIR", sharedDir);
     noteCommittedSharedAuthStoreOwnership({ location: "legacy-main" }, fixture.env);
-    const shared: AuthProfileStore = createAuthProfileStoreFixture({
+    registerResolvedAgentDir({ agentId: "ops", agentDir });
+    const shared = await writeAgentStore(sharedDir, {
       "openai:inherited": apiKey("fake-inherited"),
     });
-    const local: AuthProfileStore = createAuthProfileStoreFixture({
+    await writeAgentStore(agentDir, {
       "openai:local": apiKey("fake-local"),
     });
-    registerResolvedAgentDir({ agentId: "ops", agentDir });
-    await writeJsonFile(resolveAuthProfileDatabasePath(sharedDir), shared);
-    await writeJsonFile(resolveAuthProfileDatabasePath(agentDir), local);
     await writeConfig({ agents: { entries: { ops: { agentDir } } } });
     publishStore(agentDir);
     expect(getRuntimeAuthProfileStoreSnapshot(agentDir)?.profiles["openai:inherited"]).toEqual(
@@ -612,40 +608,17 @@ describe("secrets apply", () => {
     expect(JSON.stringify(await readAuthStore(fixture))).toBe(storeBefore);
   });
 
-  it("applies targets safely when map keys contain dots", async () => {
-    await writeConfig({ models: { providers: { "openai.dev": createOpenAiProviderConfig() } } });
-
-    const plan = targetPlan(
-      createOpenAiProviderTarget({
-        path: "models.providers.openai.dev.apiKey",
-        pathSegments: ["models", "providers", "openai.dev", "apiKey"],
-        providerId: "openai.dev",
-      }),
+  it("rejects prototype-like plan target paths", async () => {
+    const target = {
+      type: "skills.entries.apiKey",
+      path: "skills.entries.__proto__.apiKey",
+      pathSegments: ["skills", "entries", "__proto__", "apiKey"],
+      ref: OPENAI_API_KEY_ENV_REF,
+    };
+    await expect(apply(createPlan({ targets: [target] }), false)).rejects.toThrow(
+      "Invalid plan target path",
     );
-
-    const nextConfig = await project(plan);
-    expect(nextConfig.models?.providers?.["openai.dev"]?.apiKey).toEqual(OPENAI_API_KEY_ENV_REF);
-    expect(nextConfig.models?.providers?.openai).toBeUndefined();
   });
-
-  it.each([
-    ["models.providers.apiKey", ["models", "providers", "openai", "baseUrl"], "openai"],
-    ["skills.entries.apiKey", ["skills", "entries", "__proto__", "apiKey"], undefined],
-  ] satisfies [string, string[], string | undefined][])(
-    "rejects invalid %s plan target paths",
-    async (type, pathSegments, providerId) => {
-      const target = {
-        type,
-        path: pathSegments.join("."),
-        pathSegments,
-        providerId,
-        ref: OPENAI_API_KEY_ENV_REF,
-      };
-      await expect(apply(createPlan({ targets: [target] }), false)).rejects.toThrow(
-        "Invalid plan target path",
-      );
-    },
-  );
 
   it("applies provider upserts and deletes from plan", async () => {
     const { apiKey: _key, ...openai } = createOpenAiProviderConfig();

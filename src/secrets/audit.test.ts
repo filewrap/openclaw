@@ -314,33 +314,19 @@ describe("secrets audit", () => {
     );
   });
 
-  it("does not inspect or mutate legacy auth.json during audit", async () => {
-    await fs.writeFile(fixture.authJsonPath, "{invalid-json", "utf8");
-
-    const report = await audit();
-    expectFinding(report, { code: "LEGACY_RESIDUE" });
-    expectFinding(report, { file: fixture.authJsonPath });
-    expect(report.filesScanned).not.toContain(fixture.authJsonPath);
-    await expect(fs.readFile(fixture.authJsonPath, "utf8")).resolves.toBe("{invalid-json");
-    await expectPathMissing(fixture.authStorePath);
-  });
-
-  it("reports Doctor-created auth archives without reading their contents", async () => {
-    const archivePaths = [
-      `${fixture.authJsonPath}.migrated-2026-07-25T12-00-00.000Z-fake`,
-      `${fixture.authJsonPath}.sqlite-import.1753430400000.bak`,
-    ];
-    for (const archivePath of archivePaths) {
-      await fs.writeFile(archivePath, "opaque fake credential bytes", "utf8");
-    }
-
-    const report = await audit();
-    expectFinding(report, { code: "LEGACY_RESIDUE" });
-    for (const archivePath of archivePaths) {
-      expectFinding(report, { file: archivePath });
-      expect(report.filesScanned).not.toContain(archivePath);
-    }
-  });
+  it.each(["", ".migrated-2026-07-25T12-00-00.000Z-fake", ".sqlite-import.1753430400000.bak"])(
+    "reports auth.json%s without inspecting or mutating it",
+    async (suffix) => {
+      const filePath = `${fixture.authJsonPath}${suffix}`;
+      await fs.writeFile(filePath, "{invalid-json", "utf8");
+      const report = await audit();
+      expectFinding(report, { code: "LEGACY_RESIDUE" });
+      expectFinding(report, { file: filePath });
+      expect(report.filesScanned).not.toContain(filePath);
+      await expect(fs.readFile(filePath, "utf8")).resolves.toBe("{invalid-json");
+      await expectPathMissing(fixture.authStorePath);
+    },
+  );
 
   it("skips exec ref resolution during audit unless explicitly allowed", async () => {
     if (process.platform === "win32") {
@@ -481,25 +467,18 @@ describe("secrets audit", () => {
       }),
       ambientAgentDir,
     );
-    const stateDatabase = openOpenClawStateDatabase({ env: fixture.env }).db;
-    stateDatabase
-      .prepare(
-        `INSERT INTO config_machine_state (state_key, value_json, updated_at_ms)
-         VALUES ('auth.sharedStore', ?, 1)`,
-      )
-      .run(JSON.stringify({ location: "state-db" }));
-    stateDatabase
-      .prepare(
-        "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, 1)",
-      )
-      .run(
-        "authProfiles.store",
-        JSON.stringify(
-          createAuthProfileStoreFixture({
-            "openai:target": authProfile("sk-target-plaintext"),
-          }),
-        ),
-      );
+    const insert = openOpenClawStateDatabase({ env: fixture.env }).db.prepare(
+      "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, 1)",
+    );
+    insert.run("auth.sharedStore", JSON.stringify({ location: "state-db" }));
+    insert.run(
+      "authProfiles.store",
+      JSON.stringify(
+        createAuthProfileStoreFixture({
+          "openai:target": authProfile("sk-target-plaintext"),
+        }),
+      ),
+    );
     noteCommittedSharedAuthStoreOwnership({ location: "state-db" }, fixture.env);
 
     const report = await audit();

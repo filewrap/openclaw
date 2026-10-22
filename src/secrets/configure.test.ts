@@ -1,14 +1,14 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 
 const selectMock = vi.hoisted(() => vi.fn());
 const createSecretsConfigIOMock = vi.hoisted(() => vi.fn());
 const loadPersistedAuthProfileStoreMock = vi.hoisted(() => vi.fn());
 const loadPluginManifestRegistryMock = vi.hoisted(() => vi.fn());
 const runSecretsApplyMock = vi.hoisted(() => vi.fn());
-const tempDirs: string[] = [];
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 vi.mock("@clack/prompts", () => ({
   confirm: vi.fn(),
@@ -35,20 +35,7 @@ vi.mock("./apply.js", () => ({
 
 const { runSecretsConfigureInteractive } = await import("./configure.js");
 
-function makeTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-secrets-configure-"));
-  fs.chmodSync(dir, 0o700);
-  tempDirs.push(dir);
-  return dir;
-}
-
 describe("runSecretsConfigureInteractive", () => {
-  afterEach(() => {
-    for (const dir of tempDirs.splice(0)) {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   beforeEach(() => {
     Object.defineProperty(process.stdin, "isTTY", {
       value: true,
@@ -87,7 +74,8 @@ describe("runSecretsConfigureInteractive", () => {
   });
 
   it("adds a plugin preset provider through providers-only configure", async () => {
-    const pluginRoot = makeTempDir();
+    const pluginRoot = tempDirs.make("openclaw-secrets-configure-");
+    fs.chmodSync(pluginRoot, 0o700);
     const resolverPath = path.join(pluginRoot, "vault-secret-ref-resolver.js");
     fs.writeFileSync(resolverPath, "process.stdin.resume();\n");
     fs.chmodSync(resolverPath, 0o600);
@@ -99,18 +87,14 @@ describe("runSecretsConfigureInteractive", () => {
       plugins: [
         {
           id: "vault",
-          name: "Vault",
           origin: "global",
           rootDir: pluginRoot,
           secretProviderIntegrations: {
             vault: {
               providerAlias: "vault",
-              displayName: "HashiCorp Vault",
               source: "exec",
               command: "${node}",
               args: ["./vault-secret-ref-resolver.js"],
-              passEnv: ["VAULT_ADDR", "VAULT_TOKEN"],
-              timeoutMs: 5000,
             },
           },
         },
@@ -125,11 +109,7 @@ describe("runSecretsConfigureInteractive", () => {
     expect([result.plan.targets, result.plan.providerUpserts?.vault]).toEqual([[], vault]);
     expect(runSecretsApplyMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        plan: expect.objectContaining({
-          providerUpserts: expect.objectContaining({
-            vault: expect.objectContaining({ source: "exec" }),
-          }),
-        }),
+        plan: expect.objectContaining({ providerUpserts: expect.objectContaining({ vault }) }),
         write: false,
         allowExec: false,
       }),

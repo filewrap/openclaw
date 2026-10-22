@@ -1,32 +1,24 @@
 import fs from "node:fs/promises";
-import path from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { publicCa, startProxy, useEgressProxyMock } from "./egress.test-support.js";
 import { withConfiguredModelEgress } from "./model-egress.js";
 import { resolveSecretSentinel } from "./sentinel.js";
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const credential = "synthetic-model-egress-api-key";
 let config: OpenClawConfig;
 const { proxy, revoke } = useEgressProxyMock();
 
-beforeEach(async () => {
+beforeEach(() => {
   vi.stubEnv("OPENAI_BASE_URL", undefined);
   vi.stubEnv("OPENCLAW_SECRET_SENTINELS", "off");
-  const dir = tempDirs.make("model-egress-test-");
-  const secretPath = path.join(dir, "key.txt");
-  await fs.writeFile(secretPath, credential, { mode: 0o600 });
+  vi.stubEnv("MODEL_EGRESS_API_KEY", credential);
   config = {
-    secrets: {
-      providers: { model_key: { source: "file", path: secretPath, mode: "singleValue" } },
-    },
     models: {
       providers: {
         openai: {
-          apiKey: { source: "file", provider: "model_key", id: "value" },
+          apiKey: { source: "env", provider: "default", id: "MODEL_EGRESS_API_KEY" },
           baseUrl: "",
           models: [],
         },

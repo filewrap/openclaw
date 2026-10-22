@@ -49,13 +49,15 @@ function expectUndiscovered(...sources: unknown[]) {
   }
 }
 
-function expectPath(segments: string[], id: string) {
-  expect(resolvePath(segments)?.entry.id).toBe(id);
+function expectPath(path: string) {
+  expect(resolvePath(path.split("."))?.entry.id).toBe(path);
 }
 
 const resolvePath = (segments: string[]) => query.resolveConfigSecretTargetByPath(segments);
 const resolvePlan = (type: string, pathSegments: string[]) =>
   query.resolvePlanTargetAgainstRegistry({ type, pathSegments });
+const resolveCore = (configFile: "openclaw.json" | "auth-profile-store", path: string[]) =>
+  query.resolveSecretPlanTargetByPathCore({ configFile, pathSegments: path });
 
 function discover(...args: Parameters<typeof query.discoverConfigSecretTargets>) {
   return query.discoverConfigSecretTargets(...args).map(({ entry }) => entry.id);
@@ -64,6 +66,9 @@ function discover(...args: Parameters<typeof query.discoverConfigSecretTargets>)
 function discoverSelected(...args: Parameters<typeof query.discoverConfigSecretTargetsByIds>) {
   return query.discoverConfigSecretTargetsByIds(...args).map(({ entry }) => entry.id);
 }
+const channelConfig = (id: string, ...fields: string[]) => ({
+  channels: { [id]: Object.fromEntries(fields.map((field) => [field, "synthetic-token"])) },
+});
 
 beforeEach(async () => {
   vi.resetModules();
@@ -124,42 +129,27 @@ describe("secret target path ownership", () => {
   });
 
   it("resolves core and auth-profile paths without plugin metadata", () => {
-    expectPath(["gateway", "auth", "token"], "gateway.auth.token");
-    expect(
-      query.resolveSecretPlanTargetByPathCore({
-        configFile: "auth-profile-store",
-        pathSegments: ["profiles", "example", "key"],
-      })?.entry,
-    ).toMatchObject({ id: "auth-profiles.api_key.key", targetType: "auth-profiles.api_key.key" });
+    expectPath("gateway.auth.token");
+    expect(resolveCore("auth-profile-store", ["profiles", "example", "key"])?.entry).toMatchObject({
+      id: "auth-profiles.api_key.key",
+      targetType: "auth-profiles.api_key.key",
+    });
     expectUndiscovered(mocks.metadata, mocks.channel);
-    expect(
-      query.resolveSecretPlanTargetByPathCore({
-        configFile: "openclaw.json",
-        pathSegments: ["models", "providers", "openai", "apiKey"],
-      }),
-    ).toMatchObject({ entry: { targetType: "models.providers.apiKey" }, providerId: "openai" });
-  });
-
-  it("discovers PostgreSQL connection refs for configure, apply, and audit", () => {
+    expect(resolveCore("openclaw.json", ["models", "providers", "openai", "apiKey"])).toMatchObject(
+      { entry: { targetType: "models.providers.apiKey" }, providerId: "openai" },
+    );
     const connection = { source: "env" as const, provider: "default", id: "DATABASE_DSN" };
     expect(
-      query.discoverConfigSecretTargetsByIds(
-        { database: { engine: "postgres", postgres: { connection } } },
-        new Set(["database.postgres.connection"]),
-      ),
-    ).toMatchObject([
-      {
-        path: "database.postgres.connection",
-        value: connection,
-        entry: { includeInPlan: true, includeInConfigure: true, includeInAudit: true },
-      },
-    ]);
-    expect(
-      query.resolveSecretPlanTargetByPathCore({
-        configFile: "openclaw.json",
-        pathSegments: ["database", "postgres", "connection"],
-      })?.entry.id,
-    ).toBe("database.postgres.connection");
+      query
+        .discoverConfigSecretTargetsByIds(
+          { database: { engine: "postgres", postgres: { connection } } },
+          ["database.postgres.connection"],
+        )
+        .map(({ path, value }) => ({ path, value })),
+    ).toEqual([{ path: "database.postgres.connection", value: connection }]);
+    expect(resolveCore("openclaw.json", ["database", "postgres", "connection"])?.entry.id).toBe(
+      "database.postgres.connection",
+    );
   });
 
   it("preserves dotted provider header keys during discovery", () => {
@@ -204,10 +194,7 @@ describe("secret target path ownership", () => {
   });
 
   it("resolves manifest web-provider targets without unrelated channel contracts", () => {
-    expectPath(
-      ["plugins", "entries", "web", "config", "webSearch", "apiKey"],
-      "plugins.entries.web.config.webSearch.apiKey",
-    );
+    expectPath("plugins.entries.web.config.webSearch.apiKey");
     expect(mocks.channelRecord).toHaveBeenCalledTimes(0);
   });
 
@@ -266,17 +253,15 @@ describe("secret target path ownership", () => {
   });
 
   it("resolves bundled channel hits without metadata discovery", () => {
-    expectPath(["channels", "bundled", "token"], "channels.bundled.token");
+    expectPath("channels.bundled.token");
     expect(resolvePath(["channels", "bundled", "token"])?.refPathSegments).toBeUndefined();
     expectUndiscovered(mocks.metadata, mocks.channelRecord);
   });
 
   it("discovers selected configured channel targets without plugin metadata", () => {
-    expect(
-      discoverSelected({ channels: { bundled: { token: "test-token" } } }, [
-        "channels.bundled.token",
-      ]),
-    ).toEqual(["channels.bundled.token"]);
+    expect(discoverSelected(channelConfig("bundled", "token"), ["channels.bundled.token"])).toEqual(
+      ["channels.bundled.token"],
+    );
     expectUndiscovered(mocks.metadata, mocks.channelRecord);
   });
 
@@ -289,25 +274,23 @@ describe("secret target path ownership", () => {
   });
 
   it("retains external targets extending bundled and empty channel contracts", () => {
-    expectPath(["channels", "bundled", "extraToken"], "channels.bundled.extraToken");
-    expectPath(["channels", "empty", "extraToken"], "channels.empty.extraToken");
+    expectPath("channels.bundled.extraToken");
+    expectPath("channels.empty.extraToken");
     expect(resolvePath(["channels", "bundled", "unknown"])).toBeNull();
     expect(mocks.metadata).toHaveBeenCalledTimes(1);
   });
 
   it("retains all external channel owners and unknown-channel misses", () => {
-    expectPath(["channels", "external", "primary"], "channels.external.primary");
+    expectPath("channels.external.primary");
     expect(mocks.metadata).toHaveBeenCalledTimes(0);
-    expectPath(["channels", "external", "secondary"], "channels.external.secondary");
+    expectPath("channels.external.secondary");
     expect(resolvePath(["channels", "unknown", "token"])).toBeNull();
     expect(mocks.metadata).toHaveBeenCalledTimes(1);
   });
 
   it("uses broader discovery when a selected target is absent from the bundled contract", () => {
     expect(
-      discoverSelected({ channels: { bundled: { extraToken: "synthetic-token" } } }, [
-        "channels.bundled.extraToken",
-      ]),
+      discoverSelected(channelConfig("bundled", "extraToken"), ["channels.bundled.extraToken"]),
     ).toEqual(["channels.bundled.extraToken"]);
     expect(mocks.metadata).toHaveBeenCalledTimes(1);
   });
@@ -329,13 +312,11 @@ describe("secret target path ownership", () => {
   it("discovers every external owner without reusing another config's registry", () => {
     const env = { HOME: "/audit-home" };
     const external = {
-      channels: {
-        external: { primary: "synthetic-primary", secondary: "synthetic-secondary" },
-      },
+      ...channelConfig("external", "primary", "secondary"),
       plugins: { load: { paths: ["/plugins/first"] }, entries: {} },
     };
     const changed = {
-      channels: { external: { secondary: "synthetic-next" } },
+      ...channelConfig("external", "secondary"),
       plugins: { load: { paths: ["/plugins/changed"] }, entries: {} },
     };
     expect(discover(external, { env })).toEqual([

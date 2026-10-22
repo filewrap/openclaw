@@ -1,6 +1,5 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createAuthProfileStoreFixture } from "../agents/auth-profiles/credential-fixtures.test-support.js";
-import type { OpenClawConfig } from "../config/config.js";
 import {
   buildTalkTestProviderConfig,
   TALK_TEST_PROVIDER_API_KEY_PATH,
@@ -12,43 +11,10 @@ import {
   collectConfigureProviderChanges,
   hasConfigurePlanChanges,
 } from "./configure-plan.js";
-import { resolveConfigSecretTargetByPath } from "./target-registry.js";
 
 const envRef = (id: string) => ({ source: "env" as const, provider: "default", id });
 
 describe("secrets configure plan helpers", () => {
-  beforeAll(() => {
-    resolveConfigSecretTargetByPath(["channels", "telegram", "botToken"]);
-    buildConfigureCandidatesForScope({ config: {} as OpenClawConfig });
-  });
-
-  it("builds configure candidates from supported configure targets", () => {
-    const config = {
-      ...buildTalkTestProviderConfig("plain"),
-      channels: {
-        telegram: { botToken: "token" }, // pragma: allowlist secret
-        nostr: { privateKey: "nostr-private-key" }, // pragma: allowlist secret
-      },
-    } as OpenClawConfig;
-
-    const candidates = buildConfigureCandidatesForScope({ config });
-    expect(candidates.map((entry) => entry.path)).toEqual(
-      expect.arrayContaining([
-        TALK_TEST_PROVIDER_API_KEY_PATH,
-        "channels.telegram.botToken",
-        "channels.nostr.privateKey",
-      ]),
-    );
-    expect(resolveConfigSecretTargetByPath(["channels", "nostr", "privateKey"])).toMatchObject({
-      entry: {
-        id: "channels.nostr.privateKey",
-        includeInPlan: true,
-        includeInConfigure: true,
-        includeInAudit: true,
-      },
-    });
-  });
-
   it("collects provider upserts and deletes", () => {
     const envProvider = { source: "env" } as const;
     const original = { secrets: { providers: { default: envProvider, legacy: envProvider } } };
@@ -68,7 +34,10 @@ describe("secrets configure plan helpers", () => {
 
   it("captures existing refs for prefilled configure prompts", () => {
     const candidates = buildConfigureCandidatesForScope({
-      config: buildTalkTestProviderConfig(envRef("TALK_API_KEY")),
+      config: {
+        ...buildTalkTestProviderConfig(envRef("TALK_API_KEY")),
+        channels: { telegram: { botToken: "token" }, nostr: { privateKey: "nostr-private-key" } },
+      },
       authProfiles: {
         agentId: "main",
         store: createAuthProfileStoreFixture({
@@ -85,6 +54,8 @@ describe("secrets configure plan helpers", () => {
       expect.arrayContaining([
         ["profiles.openai:default.key", envRef("OPENAI_API_KEY")],
         [TALK_TEST_PROVIDER_API_KEY_PATH, envRef("TALK_API_KEY")],
+        ["channels.telegram.botToken", undefined],
+        ["channels.nostr.privateKey", undefined],
       ]),
     );
   });

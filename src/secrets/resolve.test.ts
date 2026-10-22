@@ -81,45 +81,30 @@ describe("secret ref resolver", () => {
   };
 
   type ExecProviderConfig = ManualExecSecretProviderConfig & { allowSymlinkCommand?: boolean };
-  type FileProviderConfig = FileSecretProviderConfig;
-
-  function createExecProviderConfig(
-    command: string,
-    overrides: Partial<ExecProviderConfig> = {},
-  ): ExecProviderConfig {
-    return { source: "exec", command, passEnv: ["PATH"], ...overrides };
-  }
 
   function providerOptions(name: string, provider: SecretProviderConfig) {
     return { config: { secrets: { providers: { [name]: provider } } } };
   }
 
-  async function resolveExecSecret(
+  function resolveExecSecret(
     command: string,
     overrides: Partial<ExecProviderConfig> = {},
     id = "openai/api-key",
   ): Promise<string> {
     return resolveSecretRefString(
       { source: "exec", provider: "execmain", id },
-      providerOptions("execmain", createExecProviderConfig(command, overrides)),
+      providerOptions("execmain", { source: "exec", command, passEnv: ["PATH"], ...overrides }),
     );
-  }
-
-  function createFileProviderConfig(
-    filePath: string,
-    overrides: Partial<FileProviderConfig> = {},
-  ): FileProviderConfig {
-    return { source: "file", path: filePath, mode: "json", ...overrides };
   }
 
   function resolveFileSecret(
     filePath: string,
-    overrides: Partial<FileProviderConfig> = {},
+    overrides: Partial<FileSecretProviderConfig> = {},
     id = "/providers/openai/apiKey",
   ) {
     return resolveSecretRefString(
       { source: "file", provider: "filemain", id },
-      providerOptions("filemain", createFileProviderConfig(filePath, overrides)),
+      providerOptions("filemain", { source: "file", path: filePath, mode: "json", ...overrides }),
     );
   }
 
@@ -276,7 +261,7 @@ describe("secret ref resolver", () => {
     const ref = { source: "file", provider: "filemain", id: "/providers/0" } as const;
     const error = await resolveSecretRefValue(
       ref,
-      providerOptions("filemain", createFileProviderConfig(filePath)),
+      providerOptions("filemain", { source: "file", path: filePath, mode: "json" }),
     ).catch((caught: unknown) => caught);
 
     expect(isMissingSecretRefResolutionError({ ref, error })).toBe(true);
