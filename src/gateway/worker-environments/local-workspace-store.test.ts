@@ -478,7 +478,7 @@ it("queues an expanded checkpoint receipt behind another workspace write", async
         await held.promise;
         probe.command(stateWorker, (command, options, scope) => {
           const result = scope.execute(command, options);
-          if (command.type === "localWorkspace.mutate" && command.input.id === checkpointId) {
+          if (command.type === "localWorkspace.mutate") {
             // Release only after the real broker has admitted or refused the second write.
             replies.mockRestore();
             publish?.();
