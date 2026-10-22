@@ -137,9 +137,7 @@ describe("ModelRegistry source composition", () => {
         expect(model).toHaveProperty("contextWindows", undefined);
         expect(model).toHaveProperty("contextWindowDefault", undefined);
       }
-      expect(registry.find(provider, "shared")?.compat).toEqual(
-        baseUrl === rootUrl ? generatedCompat : authoredCompat,
-      );
+      expect(model?.compat).toEqual(baseUrl === rootUrl ? generatedCompat : authoredCompat);
     },
   );
 
@@ -166,7 +164,6 @@ describe("ModelRegistry source composition", () => {
         generated: { ...generated, baseUrl, models: [{ id: "generated-only" }] },
       });
       const model = registry.find(provider, "generated-only");
-      expect(model).toBeDefined();
       expect(registry.hasConfiguredAuth(model!)).toBe(baseUrl === rootUrl);
       expect(registry.getAvailable().some((entry) => entry.id === "generated-only")).toBe(
         baseUrl === rootUrl,

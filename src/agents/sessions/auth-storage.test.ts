@@ -72,6 +72,10 @@ describe("SQLite auth storage", () => {
     writePersistedAuthProfileStoreRaw({ version: 1, profiles }, agentDir);
   }
 
+  const apiKey = (key: string) => ({ type: "api_key" as const, key });
+  const stored = (profile = "test-oauth:default") =>
+    loadPersistedAuthProfileStore(agentDir)?.profiles[profile];
+
   function runtimeProfiles(profiles: AuthProfileStore["profiles"]) {
     replaceRuntimeAuthProfileStoreSnapshots([{ agentDir, store: { version: 1, profiles } }]);
   }
@@ -148,11 +152,11 @@ describe("SQLite auth storage", () => {
   it("initializes detached in-memory credentials without a legacy reload warning", () => {
     const warn = vi.spyOn(sdkDeprecation, "warnPluginSdkDeprecation").mockImplementation(() => {});
     onTestFinished(() => warn.mockRestore());
-    const credential = { type: "api_key" as const, key: "synthetic-initial-key" };
+    const credential = apiKey("synthetic-initial-key");
     const storage = PublicAuthStorage.inMemory({ fixture: credential });
     credential.key = "synthetic-mutated-key";
 
-    expect(storage.get("fixture")).toEqual({ type: "api_key", key: "synthetic-initial-key" });
+    expect(storage.get("fixture")).toEqual(apiKey("synthetic-initial-key"));
     expect(warn).not.toHaveBeenCalled();
 
     storage.reload();
@@ -161,7 +165,7 @@ describe("SQLite auth storage", () => {
       method: "AuthStorage.reload",
       replacement: "AuthStorage.reloadAsync",
     });
-    expect(storage.get("fixture")).toEqual({ type: "api_key", key: "synthetic-initial-key" });
+    expect(storage.get("fixture")).toEqual(apiKey("synthetic-initial-key"));
   });
 
   it("merges async SDK writes and reloads committed peer changes without host SQLite", async () => {
@@ -170,8 +174,8 @@ describe("SQLite auth storage", () => {
       const right = await PublicAuthStorage.forAgentAsync(agentDir);
       await withoutHostSql(async () => {
         await Promise.all([
-          left.setAsync("openai", { type: "api_key", key: "synthetic-openai" }),
-          right.setAsync("anthropic", { type: "api_key", key: "synthetic-anthropic" }),
+          left.setAsync("openai", apiKey("synthetic-openai")),
+          right.setAsync("anthropic", apiKey("synthetic-anthropic")),
         ]);
         await left.reloadAsync();
         expect(left.list().toSorted()).toEqual(["anthropic", "openai"]);
@@ -197,14 +201,12 @@ describe("SQLite auth storage", () => {
       provider: "plugin-oauth",
       context: callbacks,
     });
-    expect(loadPersistedAuthProfileStore(agentDir)?.profiles["plugin-oauth:default"]).toMatchObject(
-      {
-        type: "oauth",
-        provider: "plugin-oauth",
-        access: "fake-access",
-        refresh: "fake-refresh",
-      },
-    );
+    expect(stored("plugin-oauth:default")).toMatchObject({
+      type: "oauth",
+      provider: "plugin-oauth",
+      access: "fake-access",
+      refresh: "fake-refresh",
+    });
   });
 
   it("returns a typed actionable error when an owned OAuth plugin is unavailable", async () => {
@@ -225,9 +227,7 @@ describe("SQLite auth storage", () => {
     const storage = AuthStorage.forAgent(agentDir);
     writePersistedAuthProfileStoreRaw(unreadableStore, agentDir);
 
-    expect(() => storage.set("anthropic", { type: "api_key", key: "fake-new-key" })).toThrow(
-      "is unreadable",
-    );
+    expect(() => storage.set("anthropic", apiKey("fake-new-key"))).toThrow("is unreadable");
     expect(readPersistedAuthProfileStoreRaw(agentDir)).toEqual(unreadableStore);
     expect(storage.has("anthropic")).toBe(false);
   });
@@ -271,20 +271,12 @@ describe("SQLite auth storage", () => {
     // leftover bytes: discarding a completed refresh over it would strand the agent
     // on an expired token. Doctor never overwrites a usable stored credential.
     await expect(storage.getApiKey("test-oauth")).resolves.toBe("not-a-real");
-    expect(
-      loadPersistedAuthProfileStore(agentDir)?.profiles["test-oauth:default"],
-    ).not.toMatchObject({ expires: 1 });
+    expect(stored()).not.toMatchObject({ expires: 1 });
   });
 
   it("keeps stored OAuth identity fields through the published agent sessions SDK", async () => {
-    writeProfiles({
-      "test-oauth:default": {
-        ...expiredOAuth,
-        ...identity,
-        subscriptionType: "max",
-        rateLimitTier: "default_max_20x",
-      },
-    });
+    const metadata = { ...identity, subscriptionType: "max", rateLimitTier: "default_max_20x" };
+    writeProfiles({ "test-oauth:default": { ...expiredOAuth, ...metadata } });
     const storage = await PublicAuthStorage.forAgentAsync(agentDir);
     PublicModelRegistry.inMemory(storage).registerProvider("test-oauth", {
       oauth: oauthProvider(async () => freshOAuth({ refresh: "fake-rotated-refresh" })),
@@ -293,14 +285,12 @@ describe("SQLite auth storage", () => {
     await withoutHostSql(async () => {
       await expect(storage.getApiKey("test-oauth")).resolves.toBe("fake-fresh-access");
     });
-    expect(loadPersistedAuthProfileStore(agentDir)?.profiles["test-oauth:default"]).toMatchObject({
+    expect(stored()).toMatchObject({
       type: "oauth",
       provider: "test-oauth",
       access: "fake-fresh-access",
       refresh: "fake-rotated-refresh",
-      ...identity,
-      subscriptionType: "max",
-      rateLimitTier: "default_max_20x",
+      ...metadata,
     });
     expect(storage.get("test-oauth")).toMatchObject(identity);
   });
@@ -308,9 +298,9 @@ describe("SQLite auth storage", () => {
   it("keeps AuthStorage.create(path) as a named SQLite-backed deprecation", () => {
     const legacyPath = path.join(agentDir, "auth.json");
     const storage = AuthStorage.create(legacyPath);
-    storage.set("openai", { type: "api_key", key: "fake-openai-key" });
+    storage.set("openai", apiKey("fake-openai-key"));
 
-    expect(loadPersistedAuthProfileStore(agentDir)?.profiles["openai:default"]).toMatchObject({
+    expect(stored("openai:default")).toMatchObject({
       key: "fake-openai-key",
     });
     expect(fs.existsSync(legacyPath)).toBe(false);
@@ -352,7 +342,7 @@ describe("SQLite auth storage", () => {
     const storage = AuthStorage.forAgent(agentDir);
     expect(await storage.getApiKey("openai")).toBe("fake-materialized-key");
     expect(await storage.getApiKey("xai")).toBe("fake-materialized-token");
-    storage.set("anthropic", { type: "api_key", key: "fake-anthropic-key" });
+    storage.set("anthropic", apiKey("fake-anthropic-key"));
 
     const persisted = readPersistedAuthProfileStoreRaw(agentDir) as {
       profiles: Record<string, { key?: string; keyRef?: unknown }>;
@@ -395,10 +385,7 @@ describe("SQLite auth storage", () => {
     };
     writePersistedAuthProfileStateRaw({ version: 1, ...state }, agentDir);
 
-    AuthStorage.forAgent(agentDir).set("anthropic", {
-      type: "api_key",
-      key: "not-a-real",
-    });
+    AuthStorage.forAgent(agentDir).set("anthropic", apiKey("not-a-real"));
 
     expect(loadPersistedAuthProfileStore(agentDir)).toMatchObject({
       profiles: {

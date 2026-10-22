@@ -2,8 +2,6 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { queryObjects } from "node:v8";
 import { cleanupSessionResources } from "@openclaw/ai/internal/runtime";
 import { createAssistantMessageEventStream, type AssistantMessage } from "openclaw/plugin-sdk/llm";
-// Agent session SDK tests cover prepared tool wiring, prompt preservation, and
-// session write-settlement behavior.
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { ImageContent, Model, SimpleStreamOptions } from "../../llm/types.js";
@@ -23,6 +21,7 @@ vi.mock("../../llm/stream.js", () => ({
 }));
 import { makeUserMessage } from "../../../test/helpers/user-message.js";
 import { takeRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
+import { createAssistantResultStream } from "./agent-session-loop-correctness.test-support.js";
 import {
   createCompactionExtension,
   createResourceLoader,
@@ -65,19 +64,6 @@ function createAssistantError(errorMessage: string): AssistantMessage {
     errorMessage,
     timestamp: 1,
   };
-}
-
-function createAssistantResultStream(message: AssistantMessage) {
-  const stream = createAssistantMessageEventStream();
-  queueMicrotask(() => {
-    if (message.stopReason === "error" || message.stopReason === "aborted") {
-      stream.push({ type: "error", reason: message.stopReason, error: message });
-    } else {
-      stream.push({ type: "done", reason: message.stopReason, message });
-    }
-    stream.end();
-  });
-  return stream;
 }
 
 function createRecoveredAssistantStream() {
@@ -133,15 +119,7 @@ async function createSessionAndStreamModel(model: Model): Promise<SimpleStreamOp
     modelRegistry: createTestModelRegistry(),
   });
 
-  await session.agent.streamFn?.(
-    model,
-    {
-      messages: [],
-      systemPrompt: "",
-      tools: [],
-    },
-    {},
-  );
+  await session.agent.streamFn?.(model, { messages: [], systemPrompt: "", tools: [] }, {});
 
   return streamMocks.streamSimple.mock.lastCall?.[2] ?? {};
 }
@@ -181,9 +159,7 @@ function createSessionManagerWithPersistedAssistantMessages(
 }
 
 async function createSessionFromManager(sessionManager: SessionManager) {
-  const { session } = await createSdkSession({
-    sessionManager,
-  });
+  const { session } = await createSdkSession({ sessionManager });
   return session;
 }
 
@@ -191,6 +167,37 @@ async function createSessionWithPersistedAssistantContent(content: unknown) {
   return await createSessionFromManager(
     createSessionManagerWithPersistedAssistantMessages([{ content }]),
   );
+}
+
+function createTool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
+  return {
+    name: "custom_lookup",
+    label: "Custom Lookup",
+    description: "Looks up a test value.",
+    promptSnippet: "Lookup test values",
+    promptGuidelines: ["Use custom_lookup for test values."],
+    parameters: Type.Object({}),
+    execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+    ...overrides,
+  };
+}
+
+async function createSettledSession(handlers?: ExtensionFactory) {
+  const events: string[] = [];
+  const sessionManager = SessionManager.inMemory();
+  const { session } = await createSdkSession({
+    sessionManager,
+    resourceLoader: await createResourceLoader(handlers),
+    withSessionWriteSettlement: async (run) => {
+      events.push("settlement:start");
+      try {
+        return await run();
+      } finally {
+        events.push("settlement:end");
+      }
+    },
+  });
+  return { session, sessionManager, events };
 }
 
 describe("createAgentSession fork retention", () => {
@@ -453,19 +460,7 @@ describe("createAgentSession attribution headers", () => {
 
 describe("createAgentSession tool defaults", () => {
   it("keeps tool activation within the prepared allowlist", async () => {
-    const customTool: ToolDefinition = {
-      name: "custom_lookup",
-      label: "Custom Lookup",
-      hideFromChannelProgress: true,
-      description: "Looks up a test value.",
-      promptSnippet: "Lookup test values",
-      promptGuidelines: ["Use custom_lookup for test values."],
-      parameters: Type.Object({}),
-      execute: async () => ({
-        content: [{ type: "text", text: "ok" }],
-        details: {},
-      }),
-    };
+    const customTool = createTool({ hideFromChannelProgress: true });
 
     const { session } = await createSdkSession({
       tools: ["custom_lookup"],
@@ -484,22 +479,14 @@ describe("createAgentSession tool defaults", () => {
   });
 
   it("preserves an exact base system prompt when active tools change", async () => {
-    const customTool: ToolDefinition = {
-      name: "custom_lookup",
-      label: "Custom Lookup",
-      description: "Looks up a test value.",
+    const customTool = createTool({
       promptSnippet: "  Lookup\n test  values  ",
       promptGuidelines: [
         " Use custom_lookup for test values. ",
         "",
         "Use custom_lookup for test values.",
       ],
-      parameters: Type.Object({}),
-      execute: async () => ({
-        content: [{ type: "text", text: "ok" }],
-        details: {},
-      }),
-    };
+    });
 
     const systemPrompt = "You are a personal assistant running inside OpenClaw.";
     const authStorage = AuthStorage.inMemory();
@@ -541,11 +528,7 @@ describe("createAgentSession tool defaults", () => {
   it("keeps the public manual compaction result inside its write settlement", async () => {
     const observed: unknown[] = [];
     const sessionManager = SessionManager.inMemory();
-    sessionManager.appendMessage({
-      role: "user",
-      content: "Earlier context. ".repeat(100),
-      timestamp: 1,
-    });
+    sessionManager.appendMessage(makeUserMessage("Earlier context. ".repeat(100), 1));
     sessionManager.appendMessage(makeUserMessage("Current question", 2));
     const authStorage = AuthStorage.inMemory();
     authStorage.setRuntimeApiKey(testModel.provider, "test-api-key");
@@ -570,21 +553,7 @@ describe("createAgentSession tool defaults", () => {
   });
 
   it("runs session message persistence under the configured write settlement", async () => {
-    // Transcript writes share the caller-provided settlement boundary so
-    // concurrent event handlers cannot interleave persistence.
-    const events: string[] = [];
-    const sessionManager = SessionManager.inMemory();
-    const { session } = await createSdkSession({
-      sessionManager,
-      withSessionWriteSettlement: async (run) => {
-        events.push("settlement:start");
-        try {
-          return await run();
-        } finally {
-          events.push("settlement:end");
-        }
-      },
-    });
+    const { session, sessionManager, events } = await createSettledSession();
 
     const handleAgentEvent = (
       session as unknown as { handleAgentEvent(event: unknown): Promise<void> }
@@ -592,133 +561,60 @@ describe("createAgentSession tool defaults", () => {
 
     await handleAgentEvent({
       type: "message_end",
-      message: {
-        role: "user",
-        content: "hello",
-        timestamp: Date.now(),
-      },
+      message: makeUserMessage("hello", Date.now()),
     });
 
     expect(events).toEqual(["settlement:start", "settlement:end"]);
     expect(sessionManager.getEntries().some((entry) => entry.type === "message")).toBe(true);
   });
 
-  it("runs provider response hooks under the configured write settlement", async () => {
-    const events: string[] = [];
-    const handlers: ExtensionFactory = (api) => {
-      api.on("after_provider_response", async () => {
-        events.push("hook");
-        return undefined;
-      });
-    };
-
-    const { session } = await createSdkSession({
-      resourceLoader: await createResourceLoader(handlers),
-      withSessionWriteSettlement: async (run) => {
-        events.push("settlement:start");
-        try {
-          return await run();
-        } finally {
-          events.push("settlement:end");
-        }
-      },
-    });
-
-    await session.agent.onResponse?.({ status: 200, headers: {} }, testModel);
-
-    expect(events).toEqual(["settlement:start", "hook", "settlement:end"]);
-  });
-
-  it("runs write-capable tool hooks under the configured write settlement", async () => {
-    const events: string[] = [];
-    const handlers: ExtensionFactory = (api) => {
-      api.on("tool_call", async () => {
-        events.push("hook");
-        return undefined;
-      });
-    };
-
-    const { session } = await createSdkSession({
-      resourceLoader: await createResourceLoader(handlers),
-      withSessionWriteSettlement: async (run) => {
-        events.push("settlement:start");
-        try {
-          return await run();
-        } finally {
-          events.push("settlement:end");
-        }
-      },
-    });
-
-    await session.agent.beforeToolCall?.({
-      assistantMessage: {
-        role: "assistant",
-        content: [],
-        api: testModel.api,
-        provider: testModel.provider,
-        model: testModel.id,
-        usage: createZeroUsageFixture(),
-        stopReason: "toolUse",
-        timestamp: Date.now(),
-      },
-      toolCall: { type: "toolCall", id: "call_1", name: "read", arguments: {} },
-      args: {},
-      context: {
-        systemPrompt: "",
-        messages: [],
-        tools: [],
-      },
-    });
-
-    expect(events).toEqual(["settlement:start", "hook", "settlement:end"]);
-  });
-
-  it("fences tool execution when no extension hook is registered", async () => {
-    // Write-capable tools still enter the settlement boundary even without hooks;
-    // it covers shared session state, not just extension execution.
-    const events: string[] = [];
-    const { session } = await createSdkSession({
-      withSessionWriteSettlement: async (run) => {
-        events.push("settlement:start");
-        try {
-          return await run();
-        } finally {
-          events.push("settlement:end");
-        }
-      },
-    });
-
-    await session.agent.beforeToolCall?.({
-      assistantMessage: {
-        role: "assistant",
-        content: [],
-        api: testModel.api,
-        provider: testModel.provider,
-        model: testModel.id,
-        usage: createZeroUsageFixture(),
-        stopReason: "toolUse",
-        timestamp: Date.now(),
-      },
-      toolCall: { type: "toolCall", id: "call_1", name: "write_file", arguments: {} },
-      args: {},
-      context: {
-        systemPrompt: "",
-        messages: [],
-        tools: [],
-      },
-    });
-
-    expect(events).toEqual(["settlement:start", "settlement:end"]);
-  });
+  it.each(["after_provider_response", "tool_call", "no_hook"] as const)(
+    "settles %s inside the write boundary",
+    async (hook) => {
+      const { session, events } = await createSettledSession(
+        hook === "no_hook"
+          ? undefined
+          : (api) => {
+              const recordHook = async () => {
+                events.push("hook");
+                return undefined;
+              };
+              if (hook === "after_provider_response") {
+                api.on("after_provider_response", recordHook);
+              } else {
+                api.on("tool_call", recordHook);
+              }
+            },
+      );
+      if (hook === "after_provider_response") {
+        await session.agent.onResponse?.({ status: 200, headers: {} }, testModel);
+      } else {
+        await session.agent.beforeToolCall?.({
+          assistantMessage: { ...createAssistantError(""), stopReason: "toolUse" },
+          toolCall: {
+            type: "toolCall",
+            id: "call_1",
+            name: hook === "no_hook" ? "write_file" : "read",
+            arguments: {},
+          },
+          args: {},
+          context: { systemPrompt: "", messages: [], tools: [] },
+        });
+      }
+      expect(events).toEqual([
+        "settlement:start",
+        ...(hook === "no_hook" ? [] : ["hook"]),
+        "settlement:end",
+      ]);
+    },
+  );
 });
 
 describe("createAgentSession thinking level clamping", () => {
   it("records declared max thinking in a new embedded session", async () => {
     const sessionManager = SessionManager.inMemory();
-    const { session } = await createAgentSession({
+    const { session } = await createSdkSession({
       cleanupProviderSessionResourcesOnDispose: false,
-      tools: [],
-      systemPrompt: "Test session prompt",
       model: {
         ...testModel,
         id: "custom-reasoner",
@@ -727,9 +623,7 @@ describe("createAgentSession thinking level clamping", () => {
         compat: { supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
       },
       thinkingLevel: "max",
-      resourceLoader: await createResourceLoader(),
       sessionManager,
-      settingsManager: SettingsManager.inMemory(),
       modelRegistry: createTestModelRegistry(),
     });
     try {

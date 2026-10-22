@@ -14,7 +14,10 @@ import {
 } from "../../config/sessions/transcript-write-context.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { runOpenClawAgentWorkerWrite } from "../../state/openclaw-agent-write-admission.js";
-import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import {
+  withOpenClawTestState,
+  type OpenClawTestState,
+} from "../../test-utils/openclaw-test-state.js";
 import { hasModelFallbackStop } from "../failover-error.js";
 import { testModel } from "./agent-session-loop-correctness.test-support.js";
 import { createResourceLoader } from "./agent-session-loop-resource-loader.test-support.js";
@@ -32,15 +35,49 @@ import * as writeAdmission from "./session-manager-write-admission.js";
 import { SessionManager } from "./session-manager.js";
 import { SettingsManager } from "./settings-manager.js";
 
+function sessionTarget(state: OpenClawTestState, sessionId: string) {
+  return {
+    agentId: "main",
+    sessionId,
+    sessionKey: `agent:main:${sessionId}`,
+    storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
+  };
+}
+
+async function seedTarget(target: ReturnType<typeof sessionTarget>) {
+  await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+}
+
+async function createTestSession(
+  sessionManager: SessionManager,
+  cwd: string,
+  options: Partial<Parameters<typeof createAgentSession>[0]> = {},
+) {
+  return createAgentSession({
+    systemPrompt: "Test session prompt",
+    cwd,
+    model: testModel,
+    thinkingLevel: "medium",
+    tools: [],
+    modelRegistry: options.modelRegistry ?? ModelRegistry.inMemory(AuthStorage.inMemory()),
+    sessionManager,
+    settingsManager: SettingsManager.inMemory(),
+    resourceLoader: options.resourceLoader ?? (await createResourceLoader()),
+    ...options,
+  });
+}
+
+function settled<T>(promise: Promise<T>) {
+  return promise.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (error: unknown) => ({ status: "rejected" as const, error }),
+  );
+}
+
 it("restores prepared session context without waiting for an unrelated database writer", async () => {
   await withOpenClawTestState({ label: "sdk-restored-admission" }, async (state) => {
-    const target = {
-      agentId: "main",
-      sessionId: "restored",
-      sessionKey: "agent:main:restored",
-      storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
-    };
-    await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+    const target = sessionTarget(state, "restored");
+    await seedTarget(target);
     const manager = SessionManager.open(target, state.workspaceDir);
     await manager.appendThinkingLevelChange("off");
     const message = { role: "user" as const, content: "Restore these exact bytes", timestamp: 1 };
@@ -64,18 +101,7 @@ it("restores prepared session context without waiting for an unrelated database 
         requestedWrite.resolve("writer-admission");
         return originalWrite(writeManager, write);
       });
-    const authStorage = AuthStorage.inMemory();
-    const restored = createAgentSession({
-      systemPrompt: "Test session prompt",
-      cwd: state.workspaceDir,
-      model: testModel,
-      thinkingLevel: "medium" as const,
-      tools: [],
-      modelRegistry: ModelRegistry.inMemory(authStorage),
-      sessionManager: manager,
-      settingsManager: SettingsManager.inMemory(),
-      resourceLoader: await createResourceLoader(),
-    });
+    const restored = createTestSession(manager, state.workspaceDir);
     try {
       expect(await Promise.race([restored.then(() => "ready"), requestedWrite.promise])).toBe(
         "ready",
@@ -97,19 +123,10 @@ it.each(["metadata", "context loading"] as const)(
   "rejects SDK exposure after retargeting during %s initialization",
   async (after) => {
     await withOpenClawTestState({ label: `sdk-metadata-${after}` }, async (state) => {
-      const original = {
-        agentId: "main",
-        sessionId: "sdk-original",
-        sessionKey: "agent:main:sdk-original",
-        storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
-      };
-      const replacement = {
-        ...original,
-        sessionId: "sdk-replacement",
-        sessionKey: "agent:main:sdk-replacement",
-      };
-      await replaceSessionEntry(original, { sessionId: original.sessionId, updatedAt: 1 });
-      await replaceSessionEntry(replacement, { sessionId: replacement.sessionId, updatedAt: 1 });
+      const original = sessionTarget(state, "sdk-original");
+      const replacement = sessionTarget(state, "sdk-replacement");
+      await seedTarget(original);
+      await seedTarget(replacement);
       SessionManager.open(replacement, state.workspaceDir).appendMessage({
         role: "user",
         content: "Preserve replacement history",
@@ -167,29 +184,23 @@ it.each(["metadata", "context loading"] as const)(
       });
       expect(getOwnedSessionTranscriptWriterFence()).toBeUndefined();
 
-      const outcome = await createAgentSession({
-        systemPrompt: "Test session prompt",
-        cwd: state.workspaceDir,
-        model,
-        thinkingLevel: "high",
-        tools: [],
-        modelRegistry,
-        sessionManager: manager,
-        settingsManager: SettingsManager.inMemory({
-          compaction: { enabled: false },
-          retry: { enabled: false },
+      const outcome = await settled(
+        createTestSession(manager, state.workspaceDir, {
+          model,
+          thinkingLevel: "high",
+          modelRegistry,
+          settingsManager: SettingsManager.inMemory({
+            compaction: { enabled: false },
+            retry: { enabled: false },
+          }),
         }),
-        resourceLoader: await createResourceLoader(),
-      }).then(
-        (value) => ({ status: "fulfilled" as const, value }),
-        (error: unknown) => ({ status: "rejected" as const, error }),
       );
       try {
         expect(intercepted).toHaveBeenCalledOnce();
+        expect.soft(await loadTranscriptEvents(replacement)).toEqual(replacementBefore);
+        expect.soft(outcome.status).toBe("rejected");
         if (after === "context loading") {
           expect(await loadTranscriptEvents(original)).toEqual(originalBefore);
-          expect.soft(await loadTranscriptEvents(replacement)).toEqual(replacementBefore);
-          expect.soft(outcome.status).toBe("rejected");
           if (outcome.status === "rejected") {
             expect(outcome.error).toBeInstanceOf(SessionTranscriptWriterClaimReboundError);
             expect(outcome.error).not.toBeInstanceOf(SessionMetadataCommittedError);
@@ -200,8 +211,6 @@ it.each(["metadata", "context loading"] as const)(
         expect(completed.entry).toBeDefined();
         expect(completed.records).toHaveLength(3);
         expect(await loadTranscriptEvents(original)).toEqual(completed.records);
-        expect.soft(await loadTranscriptEvents(replacement)).toEqual(replacementBefore);
-        expect.soft(outcome.status).toBe("rejected");
         if (outcome.status === "rejected") {
           expect(outcome.error).toBeInstanceOf(SessionMetadataCommittedError);
           expect(outcome.error).toMatchObject({
@@ -232,13 +241,8 @@ it.each([
   "preserves bounded $selection selection $timing SDK history loading",
   async ({ selection, timing }) => {
     await withOpenClawTestState({ label: "sdk-bounded-selection" }, async (state) => {
-      const target = {
-        agentId: "main",
-        sessionId: "bounded-selection",
-        sessionKey: "agent:main:bounded-selection",
-        storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
-      };
-      await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+      const target = sessionTarget(state, "bounded-selection");
+      await seedTarget(target);
       const source = SessionManager.open(target, state.workspaceDir);
       await source.appendThinkingLevelChange("off");
       const first = { role: "user" as const, content: "Selected branch", timestamp: 1 };
@@ -268,20 +272,8 @@ it.each([
       if (timing === "before") {
         select();
       }
-      const authStorage = AuthStorage.inMemory();
-      const pending = createAgentSession({
-        systemPrompt: "Test session prompt",
-        cwd: state.workspaceDir,
-        model: testModel,
-        thinkingLevel: "off",
-        tools: [],
-        modelRegistry: ModelRegistry.inMemory(authStorage),
-        sessionManager: manager,
-        settingsManager: SettingsManager.inMemory(),
-        resourceLoader: await createResourceLoader(),
-      }).then(
-        (value) => ({ status: "fulfilled" as const, value }),
-        (error: unknown) => ({ status: "rejected" as const, error }),
+      const pending = settled(
+        createTestSession(manager, state.workspaceDir, { thinkingLevel: "off" }),
       );
       try {
         if (timing === "during") {
@@ -342,18 +334,7 @@ async function createPersistenceExtensionSession(manager: SessionManager, cwd: s
       extensions.runtime,
     ),
   );
-  const authStorage = AuthStorage.inMemory();
-  const { session } = await createAgentSession({
-    systemPrompt: "Test session prompt",
-    cwd,
-    model: testModel,
-    thinkingLevel: "medium" as const,
-    tools: [],
-    modelRegistry: ModelRegistry.inMemory(authStorage),
-    sessionManager: manager,
-    settingsManager: SettingsManager.inMemory(),
-    resourceLoader,
-  });
+  const { session } = await createTestSession(manager, cwd, { resourceLoader });
   if (!loadedApi) {
     throw new Error("Extension API was not loaded");
   }
@@ -362,13 +343,8 @@ async function createPersistenceExtensionSession(manager: SessionManager, cwd: s
 
 it("awaits extension entry, name, and label persistence before publishing their results", async () => {
   await withOpenClawTestState({ label: "extension-awaited-persistence" }, async (state) => {
-    const target = {
-      agentId: "main",
-      sessionId: "extension-awaited",
-      sessionKey: "agent:main:extension-awaited",
-      storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
-    };
-    await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+    const target = sessionTarget(state, "extension-awaited");
+    await seedTarget(target);
     const manager = await SessionManager.openAsync(target, state.workspaceDir);
     const { session, api } = await createPersistenceExtensionSession(manager, state.workspaceDir);
     try {
@@ -407,14 +383,9 @@ it.each(
   "rejects a queued $storage $surface persistence capability closed before admission",
   async ({ storage, surface }) => {
     await withOpenClawTestState({ label: "extension-persistence-revoked" }, async (state) => {
-      const target = {
-        agentId: "main",
-        sessionId: "extension-revoked",
-        sessionKey: "agent:main:extension-revoked",
-        storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
-      };
+      const target = sessionTarget(state, "extension-revoked");
       if (storage === "persistent") {
-        await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
+        await seedTarget(target);
       }
       const manager =
         storage === "persistent"
@@ -463,19 +434,10 @@ it.each(
 
 it("does not publish a committed session name into a manager retargeted before continuation", async () => {
   await withOpenClawTestState({ label: "session-name-retargeted" }, async (state) => {
-    const target = {
-      agentId: "main",
-      sessionId: "name-original",
-      sessionKey: "agent:main:name-original",
-      storePath: path.join(state.agentDir("main"), "openclaw-agent.sqlite"),
-    };
-    const replacement = {
-      ...target,
-      sessionId: "name-replacement",
-      sessionKey: "agent:main:name-replacement",
-    };
-    await replaceSessionEntry(target, { sessionId: target.sessionId, updatedAt: 1 });
-    await replaceSessionEntry(replacement, { sessionId: replacement.sessionId, updatedAt: 1 });
+    const target = sessionTarget(state, "name-original");
+    const replacement = sessionTarget(state, "name-replacement");
+    await seedTarget(target);
+    await seedTarget(replacement);
     const replacementManager = await SessionManager.openAsync(replacement, state.workspaceDir);
     await replacementManager.appendSessionInfoAsync("Replacement name");
     const replacementBefore = await loadTranscriptEvents(replacement);
@@ -548,8 +510,8 @@ it.each(["SDK initialization", "model transition"] as const)(
         ...relativeTarget,
         storePath: path.join(secondDir, relativeTarget.storePath),
       };
-      await replaceSessionEntry(first, { sessionId: first.sessionId, updatedAt: 1 });
-      await replaceSessionEntry(second, { sessionId: second.sessionId, updatedAt: 1 });
+      await seedTarget(first);
+      await seedTarget(second);
       SessionManager.open(second, secondDir).appendMessage({
         role: "user",
         content: "Leave the other physical database unchanged",
@@ -579,16 +541,11 @@ it.each(["SDK initialization", "model transition"] as const)(
           models: [reasoningModel, plainModel],
         });
         const create = async () =>
-          createAgentSession({
-            systemPrompt: "Test session prompt",
-            cwd: firstDir,
-            sessionManager: manager,
+          createTestSession(manager, firstDir, {
             model: reasoningModel,
             thinkingLevel: "high",
             modelRegistry,
-            tools: [],
             settingsManager: SettingsManager.inMemory({ defaultThinkingLevel: "high" }),
-            resourceLoader: await createResourceLoader(),
           });
         if (operation === "model transition") {
           session = (await create()).session;
