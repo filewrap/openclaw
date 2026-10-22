@@ -1,6 +1,7 @@
-import { getPublicKey, type Event, type Filter } from "nostr-tools";
+import { getPublicKey, type Event } from "nostr-tools";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { relayMocks } from "./buzz-bus.test-helpers.js";
 import type { BuzzConfigInput } from "./config-schema.js";
 import {
   BuzzDirectoryState,
@@ -15,45 +16,13 @@ import {
 } from "./directory.js";
 import type { BuzzRoomMembership } from "./room-membership.js";
 
-const relayMocks = vi.hoisted(() => ({
-  auth: vi.fn(async () => "ok"),
-  close: vi.fn(),
-  connect: vi.fn(async () => {}),
-  filters: [] as Filter[],
-  roomArchived: false,
-  send: vi.fn(async () => {}),
-  subscribe: vi.fn(),
-}));
 type Directory = Pick<BuzzDirectoryState, "listGroups" | "listGroupMembers" | "listPeers" | "self">;
 type ActiveBus = { directory: Directory; refreshDirectory: () => Promise<void> };
-type Handlers = { onevent: (event: Event) => void; oneose: () => void };
 const gatewayMocks = vi.hoisted(() => ({ activeBus: undefined as ActiveBus | undefined }));
 
 vi.mock("nostr-tools", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("nostr-tools")>();
-  return {
-    ...actual,
-    Relay: class {
-      auth = relayMocks.auth;
-      close = relayMocks.close;
-      connect = relayMocks.connect;
-      connected = true;
-      idleSince: number | undefined;
-      ongoingOperations = 0;
-      onauth: unknown;
-      scheduleIdleClose = vi.fn();
-      send = relayMocks.send;
-
-      prepareSubscription(filters: Filter[], handlers: Handlers) {
-        const filter = filters[0] ?? {};
-        relayMocks.filters.push(filter);
-        return {
-          id: `sub:${relayMocks.filters.length}`,
-          ...relayMocks.subscribe(filter, handlers),
-        };
-      }
-    },
-  };
+  const { mockBuzzRelay } = await import("./buzz-bus.test-helpers.js");
+  return { ...(await importOriginal<typeof import("nostr-tools")>()), ...mockBuzzRelay() };
 });
 
 vi.mock("./gateway.js", () => ({
@@ -105,8 +74,24 @@ function event(params: Partial<Event> & Pick<Event, "kind">): Event {
 describe("Buzz live directory", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    relayMocks.filters.length = 0;
-    relayMocks.roomArchived = false;
+    relayMocks.subscriptions.length = 0;
+    relayMocks.connected = true;
+    relayMocks.connect.mockResolvedValue();
+    relayMocks.send.mockResolvedValue();
+    relayMocks.auth.mockResolvedValue("ok");
+    relayMocks.roomMetadataEvents = [room("Engineering")];
+    relayMocks.profileEvents = [profile(ALICE_PROFILE)];
+    relayMocks.membershipEvents = [
+      event({
+        kind: 39_002,
+        tags: [
+          ["d", ROOM_ID],
+          ["p", BOT_PUBLIC_KEY, "", "bot"],
+          ["p", MEMBER_PUBLIC_KEY, "", "member"],
+          ["p", RELAY_PUBLIC_KEY, "", "member"],
+        ],
+      }),
+    ];
     gatewayMocks.activeBus = undefined;
     vi.stubGlobal(
       "fetch",
@@ -117,26 +102,6 @@ describe("Buzz live directory", () => {
         }),
       ),
     );
-    relayMocks.subscribe.mockImplementation((filter: Filter, handlers: Handlers) => {
-      const emit = (params: Parameters<typeof event>[0]) => handlers.onevent(event(params));
-      if (filter.kinds?.includes(39_002)) {
-        emit({
-          kind: 39_002,
-          tags: [
-            ["d", ROOM_ID],
-            ["p", BOT_PUBLIC_KEY, "", "bot"],
-            ["p", MEMBER_PUBLIC_KEY, "", "member"],
-            ["p", RELAY_PUBLIC_KEY, "", "member"],
-          ],
-        });
-      } else if (filter.kinds?.includes(39_000)) {
-        handlers.onevent(room("Engineering", relayMocks.roomArchived || undefined));
-      } else if (filter.kinds?.includes(0)) {
-        handlers.onevent(profile(ALICE_PROFILE));
-      }
-      queueMicrotask(() => handlers.oneose());
-      return { close: vi.fn() };
-    });
   });
 
   afterEach(() => {
@@ -157,7 +122,7 @@ describe("Buzz live directory", () => {
       expect.objectContaining({ kind: "user", id: MEMBER_PUBLIC_KEY, ...ALICE }),
     ]);
 
-    expect(relayMocks.filters).toEqual([
+    expect(relayMocks.subscriptions.map(({ filter }) => filter)).toEqual([
       { ...roomFilter, kinds: [39_000] },
       { ...roomFilter, kinds: [39_002] },
       { kinds: [0], authors: [BOT_PUBLIC_KEY, MEMBER_PUBLIC_KEY, RELAY_PUBLIC_KEY], limit: 3 },
@@ -240,10 +205,10 @@ describe("Buzz live directory", () => {
   });
 
   it("does not load peers or memberships from archived rooms", async () => {
-    relayMocks.roomArchived = true;
+    relayMocks.roomMetadataEvents = [room("Engineering", true)];
     await expect(listBuzzDirectoryPeersLive(directoryParams())).resolves.toEqual([]);
 
-    expect(relayMocks.filters).toEqual([
+    expect(relayMocks.subscriptions.map(({ filter }) => filter)).toEqual([
       { ...roomFilter, kinds: [39_000] },
       { kinds: [0], authors: [BOT_PUBLIC_KEY], limit: 1 },
     ]);
@@ -332,7 +297,7 @@ function profile(content: Record<string, string> | string, overrides: Partial<Ev
 function room(name: string, archived?: boolean, overrides: Partial<Event> = {}) {
   return event({
     kind: BUZZ_ROOM_METADATA_KIND,
-    pubkey: "d".repeat(64),
+    pubkey: RELAY_PUBLIC_KEY,
     tags: [
       ["d", ROOM_ID],
       ["name", name],

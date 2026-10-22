@@ -6,6 +6,14 @@ type Handlers = {
   oneose?: () => void;
   onclose: (reason: string) => void;
 };
+type PrepareSubscription = (
+  filters: Filter[],
+  handlers: Handlers,
+) => {
+  id: string;
+  close: ReturnType<typeof vi.fn>;
+  closed: boolean;
+};
 
 export const relayMocks = {
   connect: vi.fn<() => Promise<void>>(),
@@ -31,16 +39,7 @@ export const relayMocks = {
   }>,
 };
 
-export const mockBuzzRelay = (
-  prepare?: (
-    filters: Filter[],
-    handlers: Handlers,
-  ) => {
-    id: string;
-    close: ReturnType<typeof vi.fn>;
-    closed: boolean;
-  },
-) => ({
+export const mockBuzzRelay = (prepare?: PrepareSubscription) => ({
   Relay: class {
     onauth?: (template: unknown) => Promise<unknown>;
     idleSince: number | undefined;

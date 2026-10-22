@@ -91,7 +91,7 @@ function createCredentialConfig(
       ? { ...selectedAccount, accounts: { ada: healthyAccount } }
       : { ...healthyAccount, accounts: { ada: selectedAccount } },
   );
-  return { cfg, healthyAccount };
+  return { cfg, healthyAccount, selectedAccount };
 }
 
 async function createStoredCredentials(source: "env" | "file") {
@@ -385,7 +385,7 @@ it.each([
     poisonAmbientCredentials();
     const stored = await createStoredCredentials(source);
     const configuredKey = stored.privateKey;
-    const { cfg, healthyAccount } = createCredentialConfig(
+    const { cfg, healthyAccount, selectedAccount } = createCredentialConfig(
       accountId,
       configuredKey,
       stored.authTag,
@@ -406,13 +406,9 @@ it.each([
     const { accounts, ...root } = result.cfg.channels!.buzz!;
     const selected = accountId === "default" ? root : accounts.ada;
     expect(accountId === "default" ? accounts.ada : root).toEqual(healthyAccount);
-    expect(selected).toMatchObject({
-      enabled: true,
-      privateKey: configuredKey,
-      authTag: stored.authTag,
-      groupPolicy: "allowlist",
-      groupAllowFrom: [],
-      groups: { [ROOM_A]: { enabled: true, requireMention: false, groupAllowFrom: [] } },
+    expect(selected).toEqual({
+      ...selectedAccount,
+      groups: { [ROOM_A]: { ...selectedAccount.groups[ROOM_A], enabled: true } },
       defaultTo: ROOM_A,
     });
     expect(cfg).toEqual(before);

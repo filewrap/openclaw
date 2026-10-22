@@ -22,11 +22,12 @@ const SENDER_PUBLIC_KEY = getPublicKey(Uint8Array.from(Buffer.from(SENDER_PRIVAT
 const SENDER_SECRET_KEY = Uint8Array.from(Buffer.from(SENDER_PRIVATE_KEY, "hex"));
 const RELAY_PUBLIC_KEY = "f".repeat(64);
 let stateDir: string;
+const buses: BuzzBus[] = [];
 
-function startTestBus(
+async function startTestBus(
   overrides: Partial<Parameters<typeof startBuzzBus>[0]> = {},
 ): Promise<BuzzBus> {
-  return startBuzzBus({
+  const bus = await startBuzzBus({
     scheduler: createTestPluginServiceScheduler(),
     accountId: ACCOUNT_ID,
     relayUrl: "wss://buzz.example.com",
@@ -35,6 +36,8 @@ function startTestBus(
     onMessage: async () => {},
     ...overrides,
   });
+  buses.push(bus);
+  return bus;
 }
 
 function sendTestTextOneShot(
@@ -56,15 +59,22 @@ function signSenderEvent(template: Parameters<typeof finalizeEvent>[0]): Event {
 function senderMessage(
   content: string,
   overrides: Partial<Parameters<typeof finalizeEvent>[0]> = {},
+  secretKey = SENDER_SECRET_KEY,
 ) {
-  return signSenderEvent({
-    kind: 9,
-    created_at: 1_700_000_000,
-    tags: [["h", CHANNEL_ID]],
-    content,
-    ...overrides,
-  });
+  return finalizeEvent(
+    {
+      kind: 9,
+      created_at: 1_700_000_000,
+      tags: [["h", CHANNEL_ID]],
+      content,
+      ...overrides,
+    },
+    secretKey,
+  );
 }
+
+const botMessage = (content: string, overrides: Parameters<typeof senderMessage>[1] = {}) =>
+  senderMessage(content, overrides, Uint8Array.from(Buffer.from(PRIVATE_KEY, "hex")));
 
 function relayEvent(kind: number, overrides: Partial<Event>): Event {
   return {
@@ -164,6 +174,7 @@ export const buzzTestData = {
   SENDER_PUBLIC_KEY,
   RELAY_PUBLIC_KEY,
   senderMessage,
+  botMessage,
   relayEvent,
 };
 
@@ -173,6 +184,7 @@ export function useBuzzBusLifecycleFixture() {
     stateDir = mkdtempSync(path.join(tmpdir(), "openclaw-buzz-dedupe-"));
     vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
     vi.clearAllMocks();
+    buses.length = 0;
     relayMocks.subscriptions.length = 0;
     relayMocks.profileEvents = [];
     relayMocks.roomMetadataEvents = [];
@@ -208,10 +220,16 @@ export function useBuzzBusLifecycleFixture() {
     );
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllEnvs();
-    rmSync(stateDir, { recursive: true, force: true });
+  afterEach(async () => {
+    try {
+      for (const bus of buses.toReversed()) {
+        await bus.close();
+      }
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
   return {
     ...buzzTestData,
