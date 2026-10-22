@@ -337,7 +337,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "extensions/browser/src/browser/pw-tools-core.waits-next-download-saves-it.test.ts",
   "extensions/browser/src/browser/routes/agent.existing-session.test.ts",
   "extensions/browser/src/browser/routes/agent.snapshot.local-managed.test.ts",
-  "extensions/browser/src/browser/routes/agent.snapshot.timeout.test.ts",
   "extensions/browser/src/browser/routes/dispatcher.path-normalization.test.ts",
   "extensions/browser/src/browser/server.agent-contract-core.test.ts",
   "extensions/browser/src/browser/server.historical-target.test.ts",
