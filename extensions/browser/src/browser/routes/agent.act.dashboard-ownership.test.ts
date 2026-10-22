@@ -164,8 +164,18 @@ function batch(actions: BrowserActRequest[]): BrowserActRequest {
   return { kind: "batch", stopOnError: false, actions };
 }
 
-function dashboardRoute(tab: BrowserTab, route: "/act" | "/navigate" = "/act") {
+function dashboardRoute(
+  tab: BrowserTab,
+  route: "/act" | "/navigate" = "/act",
+  beforeResolve?: () => Promise<void>,
+) {
   const context = createDashboardRouteContext(tab, { evaluateEnabled: true });
+  if (beforeResolve) {
+    context.forProfile().ensureTabAvailable = async () => {
+      await beforeResolve();
+      return tab;
+    };
+  }
   const { app, postHandlers } = createBrowserRouteApp();
   registerBrowserAgentActRoutes(app, context);
   registerBrowserAgentSnapshotRoutes(app, context);
@@ -180,6 +190,7 @@ describe("dashboard action ownership", () => {
     { revoke: "replacement", boundary: "nested batch" },
     { revoke: "Stop", boundary: "submit" },
     { revoke: "replacement", boundary: "navigation preparation" },
+    { revoke: "replacement", boundary: "target resolution" },
   ])("blocks $boundary after $revoke before tab close", async ({ revoke, boundary }) => {
     const { targetId, tab, assertCurrent } = await dashboardTarget();
     const { ready, closing, complete } = heldOperation(targetId);
@@ -215,10 +226,13 @@ describe("dashboard action ownership", () => {
               ]),
               targetId,
             };
-    const running = startRoute(dashboardRoute(tab), {
-      body,
-      assertCurrent,
-    });
+    const running = startRoute(
+      dashboardRoute(tab, "/act", boundary === "target resolution" ? ready.block : undefined),
+      {
+        body,
+        assertCurrent,
+      },
+    );
     const { response } = running;
     await complete(running, revoke, async () => {
       expect(nextEffect).not.toHaveBeenCalled();

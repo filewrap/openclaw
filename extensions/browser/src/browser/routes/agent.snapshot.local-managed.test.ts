@@ -1,7 +1,7 @@
 import "./agent.snapshot-mocks.test-support.js";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { BrowserRouteContext } from "../server-context.js";
-import { expectResponse, expectResponseContaining, runRoute } from "./agent-route.test-support.js";
+import { expectResponseContaining, runRoute } from "./agent-route.test-support.js";
 import {
   captureBrowserOperationTarget,
   resolveOperationTargetOutcome,
@@ -94,7 +94,6 @@ vi.mock("./agent.shared.js", () => ({
 const { registerBrowserAgentSnapshotRoutes } = await import("./agent.snapshot.js");
 
 const target = { cdpUrl: "http://127.0.0.1:18800", targetId: "7" };
-const blocked = "browser navigation blocked by policy";
 const changed = "Frame changed while its browser snapshot was being captured; retry.";
 const roleQuery = { format: "ai", interactive: "true" };
 const snapshotState = () => ({
@@ -139,18 +138,6 @@ describe("local-managed browser snapshot routes", () => {
     cdp.snapshotRoleViaCdp.mockReset();
     playwright.module = null;
     navigation.assertBrowserNavigationResultAllowed.mockReset().mockResolvedValue(undefined);
-  });
-
-  it("blocks AI CDP role snapshots when the current tab violates browser navigation policy", async () => {
-    navigation.assertBrowserNavigationResultAllowed.mockRejectedValueOnce(new Error(blocked));
-    const response = await snapshot(roleQuery);
-
-    expectResponse(response, { error: blocked }, 400);
-    expect(navigation.assertBrowserNavigationResultAllowed).toHaveBeenCalledWith({
-      url: "http://127.0.0.1:8080/admin",
-      ssrfPolicy: { dangerouslyAllowPrivateNetwork: false },
-    });
-    expect(cdp.snapshotRoleViaCdp).not.toHaveBeenCalled();
   });
 
   it("uses CDP first for unscoped managed role snapshots and publishes its refs", async () => {

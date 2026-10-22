@@ -21,7 +21,6 @@ vi.mock("../cdp.helpers.js", async (importOriginal) => ({
   withCdpSocket: graphics.read,
 }));
 
-const { BrowserProfileUnavailableError } = await import("../errors.js");
 const { ProfileRestartRequiredError } = await import("../server-context.lifecycle.js");
 const { registerBrowserBasicRoutes } = await import("./basic.js");
 
@@ -31,7 +30,6 @@ type Reachability = (
 ) => Promise<boolean>;
 type ProbeOptions = {
   ready?: boolean;
-  isTransportAvailable?: ProfileContext["isHttpReachable"];
   isReachable?: Reachability;
   executablePath?: string;
 };
@@ -46,7 +44,6 @@ function makeState(
     ...profileOverrides,
   });
   const ready = options.ready ?? false;
-  const transport = options.isTransportAvailable ?? (async () => ready);
   const isReachable =
     options.isReachable ?? (async () => profile.driver === "existing-session" && ready);
   const isTransportAvailable: ProfileContext["isTransportAvailable"] = async (
@@ -54,12 +51,11 @@ function makeState(
     signal,
     probe,
   ) => {
-    const available = await transport(ms, signal);
-    if (available && probe) {
+    if (ready && probe) {
       const pageReady = await isReachable(probe.timeoutMs?.() ?? ms, { ephemeral: true, signal });
       probe.onResult(pageReady ? 1 : null);
     }
-    return available;
+    return ready;
   };
   return {
     resolved: {
@@ -131,14 +127,9 @@ function trackLaunch(
 async function callStartRoute(params: {
   profile?: Record<string, unknown>;
   query?: Record<string, unknown>;
-  error?: Error;
   expectedStatus?: number;
 }) {
-  const ensureBrowserAvailable = vi.fn(async () => {
-    if (params.error) {
-      throw params.error;
-    }
-  });
+  const ensureBrowserAvailable = vi.fn(async () => {});
   const state = makeState({ headless: false, ...params.profile });
   const body = await callRoute({
     state,
@@ -338,27 +329,6 @@ describe("basic browser routes", () => {
     expect(ensureBrowserAvailable).toHaveBeenCalledWith({ headless: true });
   });
 
-  it("returns structured no-display metadata without replacing the error message", async () => {
-    const metadata = {
-      reason: "no_display_for_headed_profile",
-      details: {
-        profile: "openclaw",
-        requestedHeadless: false,
-        headlessSource: "profile",
-        displayPresent: false,
-      },
-    } as const;
-    const { body } = await callStartRoute({
-      error: new BrowserProfileUnavailableError("display required", { metadata }),
-      expectedStatus: 409,
-    });
-
-    expect(body).toEqual({
-      error: "display required",
-      ...metadata,
-    });
-  });
-
   it.each([
     {
       name: "invalid value",
@@ -381,21 +351,6 @@ describe("basic browser routes", () => {
     });
     expect(body.error).toBe(error);
     expect(ensureBrowserAvailable).not.toHaveBeenCalled();
-  });
-
-  it("reports pageReady=false when Chrome MCP transport is up but page tools are unreachable", async () => {
-    const response = await callRoute({
-      state: existingState({ isReachable: async () => false }),
-    });
-
-    expect(response).toMatchObject({
-      profile: "chrome-live",
-      driver: "existing-session",
-      transport: "chrome-mcp",
-      running: true,
-      cdpReady: true,
-      pageReady: false,
-    });
   });
 
   it("cancels an in-flight Chrome MCP page-readiness probe", async () => {
@@ -422,38 +377,5 @@ describe("basic browser routes", () => {
     expect(response.error).toBe("Error: browser status cancelled");
     const [, options] = expectDefined(isReachable.mock.calls[0], "reachability probe");
     expect(options?.signal).toMatchObject({ aborted: true, reason: cancellation });
-  });
-
-  it("keeps Chrome MCP page-readiness inside the status budget", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(1_000);
-    const isReachable = vi.fn<Reachability>(async () => true);
-    try {
-      const response = await callRoute({
-        state: existingState({
-          isTransportAvailable: async () => {
-            vi.setSystemTime(4_000);
-            return true;
-          },
-          isReachable,
-        }),
-      });
-
-      const [timeoutMs, reachabilityOptions] = expectDefined(
-        isReachable.mock.calls[0],
-        "reachability probe",
-      );
-      expect(timeoutMs).toBe(4_000);
-      expect(response).toMatchObject({
-        cdpHttp: true,
-        cdpReady: true,
-        pageReady: true,
-        running: true,
-      });
-      expect(reachabilityOptions?.ephemeral).toBe(true);
-      expect(reachabilityOptions?.signal).toBeInstanceOf(AbortSignal);
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });

@@ -9,12 +9,11 @@ import type { BrowserContext, Frame, Page } from "playwright-core";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test-support.js";
 import { resolveBrowserConfig } from "../config.js";
-import { getPlaywrightCore } from "../playwright-core.runtime.js";
 import { closePlaywrightBrowserConnection } from "../pw-session.js";
 import * as pageCdp from "../pw-session.page-cdp.js";
 import { createBrowserRouteContext, type BrowserServerState } from "../server-context.js";
-import { getFreePort } from "../test-port.js";
 import { atBarrier, gate, runRoute } from "./agent-route.test-support.js";
+import { launchChromiumRoutePage } from "./existing-session.test-support.js";
 import { registerBrowserRoutes } from "./index.js";
 import { createBrowserRouteApp } from "./test-helpers.js";
 
@@ -124,23 +123,11 @@ describe.runIf(process.env.OPENCLAW_BROWSER_SCOPED_REFS_E2E === "1")(
         throw new Error("Missing fixture port");
       }
       fixturePort = address.port;
-      const port = await getFreePort();
-      cdpUrl = `http://127.0.0.1:${port}`;
-      context = await getPlaywrightCore().chromium.launchPersistentContext(
+      ({ context, page, cdpUrl, targetId } = await launchChromiumRoutePage(
         path.join(tempDirs.make("openclaw-scoped-refs-"), "profile"),
-        {
-          headless: true,
-          executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-          args: [`--remote-debugging-port=${port}`, "--site-per-process"],
-        },
-      );
-      page = context.pages()[0] ?? (await context.newPage());
+        ["--site-per-process"],
+      ));
       await page.goto(`http://127.0.0.1:${fixturePort}/`);
-      const session = await context.newCDPSession(page);
-      ({
-        targetInfo: { targetId },
-      } = await session.send("Target.getTargetInfo"));
-      await session.detach();
       routes = routeApp(cdpUrl, "scoped");
     }, 30_000);
 
