@@ -18,6 +18,9 @@ function getFinding(findings: ReturnType<typeof collectHooksHardeningFindings>, 
 type AuditOptions = Parameters<typeof runSecurityAuditCore>[0];
 const hookToken = "shared-gateway-token-1234567890";
 const baseHooks = { enabled: true, token: hookToken, defaultSessionKey: "hook:ingress" };
+const passwordRef = { source: "env", provider: "default", id: "GW_PASSWORD" } as const;
+const gatewayPassword = "config-gateway-password-1234567890";
+const reuseId = "hooks.token_reuse_gateway_token";
 function auditSecretReuse(
   auth: NonNullable<OpenClawConfig["gateway"]>["auth"],
   token: string,
@@ -40,69 +43,36 @@ function auditSecretReuse(
 
 describe("security audit hooks ingress findings", () => {
   it("evaluates hooks ingress auth and routing findings", () => {
-    const requestSessionKeyHooks = {
-      ...baseHooks,
-      allowRequestSessionKey: true,
-    } satisfies NonNullable<OpenClawConfig["hooks"]>;
-    const cases: Array<
-      [
-        name: string,
-        cfg: OpenClawConfig,
-        suffix: string,
-        severity: "warn" | "critical",
-        env?: NodeJS.ProcessEnv,
-        extra?: string,
-      ]
-    > = [
-      ["short token", { hooks: { enabled: true, token: "short" } }, "token_too_short", "warn"],
-      [
-        "gateway env token reuse",
-        { hooks: { enabled: true, token: hookToken } },
-        "token_reuse_gateway_token",
-        "critical",
-        { OPENCLAW_GATEWAY_TOKEN: hookToken },
-      ],
-      [
-        "unset default session",
-        { hooks: { enabled: true, token: hookToken } },
-        "default_session_key_unset",
-        "warn",
-      ],
-      [
-        "wildcard agents",
-        { hooks: { ...baseHooks, allowedAgentIds: ["*"] } },
-        "allowed_agent_ids_unrestricted",
-        "warn",
-      ],
-      ["local unrestricted agents", { hooks: baseHooks }, "allowed_agent_ids_unrestricted", "warn"],
-      [
-        "remote unrestricted agents",
-        { gateway: { bind: "lan" }, hooks: baseHooks },
-        "allowed_agent_ids_unrestricted",
-        "critical",
-      ],
-      [
-        "local session override",
-        { hooks: requestSessionKeyHooks },
-        "request_session_key_enabled",
-        "warn",
-        undefined,
-        "request_session_key_prefixes_missing",
-      ],
-      [
-        "remote session override",
-        { gateway: { bind: "lan" }, hooks: requestSessionKeyHooks },
-        "request_session_key_enabled",
-        "critical",
-      ],
-    ];
-    for (const [name, cfg, suffix, severity, env = process.env, extra] of cases) {
+    const requestSessionKeyHooks = { ...baseHooks, allowRequestSessionKey: true };
+    function check(
+      cfg: OpenClawConfig,
+      suffix: string,
+      severity: "warn" | "critical" = "warn",
+      env = process.env,
+    ) {
       const findings = collectHooksHardeningFindings(cfg, env);
-      expect(hasFinding(findings, `hooks.${suffix}`, severity), name).toBe(true);
-      if (extra) {
-        expect(hasFinding(findings, `hooks.${extra}`, "warn"), name).toBe(true);
-      }
+      expect(hasFinding(findings, `hooks.${suffix}`, severity), suffix).toBe(true);
+      return findings;
     }
+    check({ hooks: { enabled: true, token: "short" } }, "token_too_short");
+    check({ hooks: { enabled: true, token: hookToken } }, "token_reuse_gateway_token", "critical", {
+      OPENCLAW_GATEWAY_TOKEN: hookToken,
+    });
+    check({ hooks: { enabled: true, token: hookToken } }, "default_session_key_unset");
+    check({ hooks: { ...baseHooks, allowedAgentIds: ["*"] } }, "allowed_agent_ids_unrestricted");
+    check({ hooks: baseHooks }, "allowed_agent_ids_unrestricted");
+    check(
+      { gateway: { bind: "lan" }, hooks: baseHooks },
+      "allowed_agent_ids_unrestricted",
+      "critical",
+    );
+    const local = check({ hooks: requestSessionKeyHooks }, "request_session_key_enabled");
+    expect(hasFinding(local, "hooks.request_session_key_prefixes_missing", "warn")).toBe(true);
+    check(
+      { gateway: { bind: "lan" }, hooks: requestSessionKeyHooks },
+      "request_session_key_enabled",
+      "critical",
+    );
   });
 
   it("flags explicit audit password reuse when config mode is token", () => {
@@ -119,7 +89,7 @@ describe("security audit hooks ingress findings", () => {
           token: "runtime-only-gateway-password-1234567890",
         },
       },
-      {} as NodeJS.ProcessEnv,
+      {},
       {
         gatewayAuthOverride: {
           mode: "password",
@@ -128,7 +98,7 @@ describe("security audit hooks ingress findings", () => {
       },
     );
 
-    const finding = getFinding(findings, "hooks.token_reuse_gateway_token");
+    const finding = getFinding(findings, reuseId);
     expect(finding).toMatchObject({
       severity: "critical",
       title: expect.stringContaining("Gateway password"),
@@ -138,10 +108,10 @@ describe("security audit hooks ingress findings", () => {
 
   it("keeps persisted SecretRef reuse findings when audit password override differs", async () => {
     const report = await auditSecretReuse(
-      { mode: "password", password: { source: "env", provider: "default", id: "GW_PASSWORD" } },
-      "config-gateway-password-1234567890",
+      { mode: "password", password: passwordRef },
+      gatewayPassword,
       {
-        env: { GW_PASSWORD: "config-gateway-password-1234567890" }, // pragma: allowlist secret
+        env: { GW_PASSWORD: gatewayPassword },
         auditGatewayAuthOverride: {
           mode: "password",
           password: "different-runtime-password-1234567890", // pragma: allowlist secret
@@ -149,7 +119,7 @@ describe("security audit hooks ingress findings", () => {
       },
     );
 
-    const finding = getFinding(report.findings, "hooks.token_reuse_gateway_token");
+    const finding = getFinding(report.findings, reuseId);
     expect(finding).toMatchObject({
       severity: "critical",
       remediation: expect.stringContaining("openclaw doctor --fix"),
@@ -161,25 +131,25 @@ describe("security audit hooks ingress findings", () => {
       {
         mode: "trusted-proxy",
         trustedProxy: { userHeader: "x-forwarded-user" },
-        password: { source: "env", provider: "default", id: "GW_PASSWORD" },
+        password: passwordRef,
       },
       "trusted-proxy-local-password-1234567890",
       { env: { GW_PASSWORD: "trusted-proxy-local-password-1234567890" } }, // pragma: allowlist secret
     );
 
-    expect(hasFinding(report.findings, "hooks.token_reuse_gateway_token", "critical")).toBe(true);
+    expect(hasFinding(report.findings, reuseId, "critical")).toBe(true);
   });
 
   it("skips unavailable gateway auth SecretRefs when auditing hooks token reuse", async () => {
     const report = await auditSecretReuse(
       {
         mode: "password",
-        password: { source: "env", provider: "default", id: "MISSING_GW_PASSWORD" },
+        password: { ...passwordRef, id: "MISSING_GW_PASSWORD" },
       },
       "shared-gateway-password-1234567890",
     );
 
-    expect(hasFinding(report.findings, "hooks.token_reuse_gateway_token", "critical")).toBe(false);
+    expect(hasFinding(report.findings, reuseId, "critical")).toBe(false);
   });
 
   it("does not execute gateway auth SecretRefs during hooks token reuse audit", async () => {
@@ -196,6 +166,6 @@ describe("security audit hooks ingress findings", () => {
       },
     );
 
-    expect(hasFinding(report.findings, "hooks.token_reuse_gateway_token", "critical")).toBe(false);
+    expect(hasFinding(report.findings, reuseId, "critical")).toBe(false);
   });
 });

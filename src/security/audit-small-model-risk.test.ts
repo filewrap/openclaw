@@ -48,41 +48,36 @@ describe("security audit small-model risk findings", () => {
       browser,
     });
 
-    expect(finding.severity).toBe("info");
-    expect(finding.detail).toContain("@ agents.entries.ops.model.primary");
+    expect(finding).toMatchObject({
+      severity: "info",
+      detail: expect.stringContaining("@ agents.entries.ops.model.primary"),
+    });
     expect(finding.detail).toContain("web=[off]");
   });
 
   it("scores small-model risk by tool/sandbox exposure", () => {
-    const cases: Array<{
-      name: string;
-      cfg: OpenClawConfig;
-      expectedSeverity: "info" | "critical";
-      detailIncludes: string[];
-    }> = [
-      {
-        name: "small model with web and browser enabled",
-        cfg: modelConfig("ollama/mistral-8b"),
-        expectedSeverity: "critical",
-        detailIncludes: ["mistral-8b", "web_search", "web_fetch", "browser"],
-      },
-      {
-        name: "small model with sandbox all and web/browser disabled",
-        cfg: {
+    const cases: Array<[OpenClawConfig, "info" | "critical", string[]]> = [
+      [
+        modelConfig("ollama/mistral-8b"),
+        "critical",
+        ["mistral-8b", "web_search", "web_fetch", "browser"],
+      ],
+      [
+        {
           ...modelConfig("ollama/mistral-8b", { sandbox: { mode: "all" } }),
           tools: { web: { search: { enabled: false }, fetch: { enabled: false } } },
           browser: { enabled: false },
         },
-        expectedSeverity: "info",
-        detailIncludes: ["mistral-8b", "sandbox=all"],
-      },
+        "info",
+        ["mistral-8b", "sandbox=all"],
+      ],
     ];
 
-    for (const testCase of cases) {
-      const finding = risk(testCase.cfg, process.env);
-      expect(finding.severity, testCase.name).toBe(testCase.expectedSeverity);
-      for (const snippet of testCase.detailIncludes) {
-        expect(finding.detail, `${testCase.name}:${snippet}`).toContain(snippet);
+    for (const [cfg, severity, snippets] of cases) {
+      const finding = risk(cfg, process.env);
+      expect(finding.severity).toBe(severity);
+      for (const snippet of snippets) {
+        expect(finding.detail).toContain(snippet);
       }
     }
   });

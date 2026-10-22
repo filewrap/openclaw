@@ -1,4 +1,3 @@
-// Covers plugin trust audit findings and remediation hints.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -132,9 +131,8 @@ describe("security audit install metadata findings", () => {
     return dir;
   };
 
-  const runInstallMetadataAudit = async (cfg: OpenClawConfig, stateDir: string) => {
-    return await collectPluginsTrustFindings({ cfg, stateDir });
-  };
+  const runInstallMetadataAudit = (cfg: OpenClawConfig, stateDir: string) =>
+    collectPluginsTrustFindings({ cfg, stateDir });
 
   const writeHookInstalls = (
     stateDir: string,
@@ -411,89 +409,51 @@ describe("security audit extension tool reachability findings", () => {
         mode: 0o700,
       });
       await withEnvAsync(scopedEnv, async () => {
-        const cases = [
-          {
-            name: "flags extensions without plugins.allow",
-            cfg: {} satisfies OpenClawConfig,
-            present: { checkId: "plugins.extensions_no_allowlist", severity: "warn" },
-          },
-          {
-            name: "flags enabled extensions when tool policy can expose plugin tools",
-            cfg: {
-              plugins: { allow: ["some-plugin"] },
-            } satisfies OpenClawConfig,
-            present: { checkId: "plugins.tools_reachable_permissive_policy", severity: "warn" },
-          },
-          {
-            name: "reports canonical agent paths for permissive tool policy",
-            cfg: {
-              plugins: { allow: ["some-plugin"] },
-              agents: { entries: { ops: { tools: { profile: "full" } } } },
-            } satisfies OpenClawConfig,
-            detail: "- agents.entries.ops",
-          },
-          {
-            name: "does not flag plugin tool reachability when profile is restrictive",
-            cfg: {
-              plugins: { allow: ["some-plugin"] },
-              tools: { profile: "coding" },
-            } satisfies OpenClawConfig,
-            absent: "plugins.tools_reachable_permissive_policy",
-          },
-          {
-            name: "reports plugin tools added to a restrictive profile",
-            cfg: {
-              plugins: { allow: ["some-plugin"] },
-              tools: { profile: "coding", alsoAllow: ["group:plugins"] },
-            } satisfies OpenClawConfig,
-            present: { checkId: "plugins.tools_reachable_permissive_policy", severity: "warn" },
-          },
-          {
-            name: "keeps plugin-group auditing for installed indexes without tool contracts",
-            tools: undefined,
-            cfg: {
-              plugins: { allow: ["some-plugin"] },
-              tools: { profile: "coding", alsoAllow: ["group:plugins"] },
-            } satisfies OpenClawConfig,
-            present: { checkId: "plugins.tools_reachable_permissive_policy", severity: "warn" },
-          },
-          {
-            name: "does not invent tools for an explicitly empty tool contract",
-            tools: [] as string[],
-            cfg: { plugins: { allow: ["some-plugin"] } } satisfies OpenClawConfig,
-            absent: "plugins.tools_reachable_permissive_policy",
-          },
-          {
-            name: "honors a denied concrete tool even when its plugin group is allowed",
-            cfg: {
-              plugins: { allow: ["some-plugin"] },
-              tools: {
-                profile: "coding",
-                alsoAllow: ["group:plugins"],
-                deny: ["some_plugin_tool"],
-              },
-            } satisfies OpenClawConfig,
-            absent: "plugins.tools_reachable_permissive_policy",
-          },
-        ] as const;
-
-        for (const testCase of cases) {
-          mockPluginTools.names = "tools" in testCase ? testCase.tools : ["some_plugin_tool"];
-          const findings = await collectPluginsTrustFindings({ cfg: testCase.cfg, stateDir });
-          if ("present" in testCase) {
-            expect(findings, testCase.name).toContainEqual(
-              expect.objectContaining(testCase.present),
+        const reachable = "plugins.tools_reachable_permissive_policy";
+        const declared = ["some_plugin_tool"];
+        const allowed: OpenClawConfig = { plugins: { allow: ["some-plugin"] } };
+        const grouped: OpenClawConfig = {
+          ...allowed,
+          tools: { profile: "coding", alsoAllow: ["group:plugins"] },
+        };
+        const cases: Array<
+          [string, OpenClawConfig, string[] | undefined, string | false, string?]
+        > = [
+          ["no allowlist", {}, declared, "plugins.extensions_no_allowlist"],
+          ["permissive", allowed, declared, reachable],
+          [
+            "agent scope",
+            { ...allowed, agents: { entries: { ops: { tools: { profile: "full" } } } } },
+            declared,
+            reachable,
+            "- agents.entries.ops",
+          ],
+          ["restrictive", { ...allowed, tools: { profile: "coding" } }, declared, false],
+          ["plugin group", grouped, declared, reachable],
+          ["missing contract", grouped, undefined, reachable],
+          ["empty contract", allowed, [], false],
+          [
+            "concrete deny",
+            { ...grouped, tools: { ...grouped.tools, deny: declared } },
+            declared,
+            false,
+          ],
+        ];
+        for (const [name, cfg, tools, checkId, detail] of cases) {
+          mockPluginTools.names = tools;
+          const findings = await collectPluginsTrustFindings({ cfg, stateDir });
+          if (checkId) {
+            expect(findings, name).toContainEqual(
+              expect.objectContaining({ checkId, severity: "warn" }),
             );
-          }
-          if ("detail" in testCase) {
+          } else {
             expect(
-              findings.find(
-                (entry) => entry.checkId === "plugins.tools_reachable_permissive_policy",
-              )?.detail,
-            ).toContain(testCase.detail);
+              findings.some((entry) => entry.checkId === reachable),
+              name,
+            ).toBe(false);
           }
-          if ("absent" in testCase) {
-            expect(findings.some((entry) => entry.checkId === testCase.absent)).toBe(false);
+          if (detail) {
+            expect(findings.find((entry) => entry.checkId === reachable)?.detail).toContain(detail);
           }
         }
       });

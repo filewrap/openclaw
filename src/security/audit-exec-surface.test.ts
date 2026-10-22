@@ -94,25 +94,15 @@ describe("security audit exec surface findings", () => {
     ).toBe(warns);
   });
 
-  it("flags open channel access combined with exec-enabled scopes", async () => {
-    const findings = await collectSecurityAuditFindings({
-      channels: { discord: { groupPolicy: "open" } },
-      tools: { exec: { mode: "allowlist", host: "gateway" } },
-    });
-
-    expect(hasFinding("security.exposure.open_channels_with_exec", "warn", findings)).toBe(true);
-  });
-
-  it("escalates open channel exec exposure when full exec is configured", async () => {
-    const findings = await collectSecurityAuditFindings({
-      channels: { slack: { dmPolicy: "open" } },
-      tools: { exec: { mode: "full" } },
-    });
-
-    expect(hasFinding("tools.exec.security_full_configured", "critical", findings)).toBe(true);
-    expect(hasFinding("security.exposure.open_channels_with_exec", "critical", findings)).toBe(
-      true,
-    );
+  it.each([
+    [{ discord: { groupPolicy: "open" } }, { mode: "allowlist", host: "gateway" }, "warn"],
+    [{ slack: { dmPolicy: "open" } }, { mode: "full" }, "critical"],
+  ] as const)("reports open channel exec exposure: %j", async (channels, exec, severity) => {
+    const findings = await collectSecurityAuditFindings({ channels, tools: { exec } });
+    expect(hasFinding("security.exposure.open_channels_with_exec", severity, findings)).toBe(true);
+    if (severity === "critical") {
+      expect(hasFinding("tools.exec.security_full_configured", severity, findings)).toBe(true);
+    }
   });
 
   it("uses configured plugin and selected channel policies throughout the audit", async () => {

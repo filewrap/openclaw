@@ -28,6 +28,13 @@ describe("security fix", () => {
     return dir;
   };
 
+  const createConfig = async (prefix: string, cfg: unknown) => {
+    const stateDir = await createStateDir(prefix);
+    const configPath = path.join(stateDir, "openclaw.json");
+    await fs.writeFile(configPath, JSON.stringify(cfg), "utf-8");
+    return { stateDir, configPath };
+  };
+
   const runFix = (
     stateDir: string,
     configPath: string,
@@ -81,30 +88,26 @@ describe("security fix", () => {
           return { config: cfg, changes: [] };
         }
         const changes: string[] = [];
-        const maybeApply = (prefix: string, holder: Record<string, unknown>) => {
-          if (holder.groupPolicy !== "open") {
-            return;
-          }
-          const allowFrom = Array.isArray(holder.allowFrom) ? holder.allowFrom : [];
-          const groupAllowFrom = Array.isArray(holder.groupAllowFrom) ? holder.groupAllowFrom : [];
-          if (allowFrom.length > 0 || groupAllowFrom.length > 0) {
-            return;
-          }
-          holder.groupAllowFrom = [...storeAllowFrom];
-          changes.push(`${prefix}groupAllowFrom=pairing-store`);
-        };
-
-        maybeApply("channels.whatsapp.", whatsapp);
+        const holders: Array<[string, Record<string, unknown>]> = [
+          ["channels.whatsapp.", whatsapp],
+        ];
         const accounts = whatsapp.accounts;
         if (accounts && typeof accounts === "object") {
-          for (const [accountId, value] of Object.entries(accounts)) {
-            if (!value || typeof value !== "object") {
-              continue;
+          for (const [id, account] of Object.entries(accounts)) {
+            if (account && typeof account === "object") {
+              holders.push([
+                `channels.whatsapp.accounts.${id}.`,
+                account as Record<string, unknown>,
+              ]);
             }
-            maybeApply(
-              `channels.whatsapp.accounts.${accountId}.`,
-              value as Record<string, unknown>,
-            );
+          }
+        }
+        for (const [prefix, holder] of holders) {
+          const allowFrom = Array.isArray(holder.allowFrom) ? holder.allowFrom : [];
+          const groupAllowFrom = Array.isArray(holder.groupAllowFrom) ? holder.groupAllowFrom : [];
+          if (holder.groupPolicy === "open" && !allowFrom.length && !groupAllowFrom.length) {
+            holder.groupAllowFrom = [...storeAllowFrom];
+            changes.push(`${prefix}groupAllowFrom=pairing-store`);
           }
         }
 
@@ -173,9 +176,7 @@ describe("security fix", () => {
     channels: OpenClawConfig["channels"];
     unseeded?: boolean;
   }>)("$name", async (scenario) => {
-    const stateDir = await createStateDir("group-policy");
-    const configPath = path.join(stateDir, "openclaw.json");
-    await fs.writeFile(configPath, JSON.stringify(scenario.cfg), "utf-8");
+    const { stateDir, configPath } = await createConfig("group-policy", scenario.cfg);
     const res = await runFix(stateDir, configPath, [
       createWhatsAppConfigFixTestPlugin(scenario.store),
     ]);
@@ -193,53 +194,38 @@ describe("security fix", () => {
 
   it("collects permission targets for credentials + agent auth/sessions + include files", async () => {
     const stateDir = await createStateDir("includes");
-
-    const includePath = path.join(stateDir, "includes", "extra.json5");
-    await writePublicFile(includePath);
-
-    const configPath = path.join(stateDir, "openclaw.json");
+    const at = (...parts: string[]) => path.join(stateDir, ...parts);
+    const configPath = at("openclaw.json");
     await writePublicFile(configPath, `{ "$include": "./includes/extra.json5" }\n`);
-
-    const credsDir = path.join(stateDir, "credentials");
-    const credentialPath = path.join(credsDir, "oauth.json");
-    await writePublicFile(credentialPath);
-
-    const agentDir = path.join(stateDir, "agents", "main", "agent");
-    const authDatabasePath = path.join(agentDir, "openclaw-agent.sqlite");
-    const authProfilesPath = path.join(agentDir, "auth-profiles.json");
-
-    const sessionsDir = path.join(stateDir, "agents", "main", "sessions");
-    await fs.mkdir(sessionsDir, { recursive: true });
-    const sessionsStorePath = path.join(sessionsDir, "sessions.json");
-    const transcriptPath = path.join(sessionsDir, "sess-main.jsonl");
-    await writePublicFile(transcriptPath, '{"type":"session"}\n');
-
+    await writePublicFile(at("includes", "extra.json5"));
+    await writePublicFile(at("credentials", "oauth.json"));
+    await writePublicFile(
+      at("agents", "main", "sessions", "sess-main.jsonl"),
+      '{"type":"session"}\n',
+    );
     const result = await runFix(stateDir, configPath, []);
-    const canonicalIncludePath = await fs.realpath(includePath);
-
     expect(result.actions.map((action) => action.path)).toEqual([
       stateDir,
       configPath,
-      canonicalIncludePath,
-      credsDir,
-      credentialPath,
-      path.join(stateDir, "agents", "main"),
-      agentDir,
-      authDatabasePath,
-      `${authDatabasePath}-wal`,
-      `${authDatabasePath}-shm`,
-      `${authDatabasePath}-journal`,
-      authProfilesPath,
-      sessionsDir,
-      sessionsStorePath,
-      transcriptPath,
+      await fs.realpath(at("includes", "extra.json5")),
+      at("credentials"),
+      at("credentials", "oauth.json"),
+      at("agents", "main"),
+      at("agents", "main", "agent"),
+      ...["", "-wal", "-shm", "-journal"].map((suffix) =>
+        at("agents", "main", "agent", `openclaw-agent.sqlite${suffix}`),
+      ),
+      at("agents", "main", "agent", "auth-profiles.json"),
+      at("agents", "main", "sessions"),
+      at("agents", "main", "sessions", "sessions.json"),
+      at("agents", "main", "sessions", "sess-main.jsonl"),
     ]);
   });
 
   it("tightens the live legacy main auth store for a named default roster", async () => {
-    const stateDir = await createStateDir("named-default-legacy-auth");
-    const configPath = path.join(stateDir, "openclaw.json");
-    await fs.writeFile(configPath, JSON.stringify({ agents: { entries: { ops: {} } } }), "utf-8");
+    const { stateDir, configPath } = await createConfig("named-default-legacy-auth", {
+      agents: { entries: { ops: {} } },
+    });
     const legacyAuthPath = path.join(stateDir, "agents", "main", "agent", "auth-profiles.json");
     await writePublicFile(legacyAuthPath);
 
@@ -255,24 +241,18 @@ describe("security fix", () => {
     { name: "rejects escaped includes", allowed: false },
     { name: "keeps explicitly allowed include roots", allowed: true },
   ])("$name", async ({ allowed }) => {
-    const stateDir = await createStateDir("include-boundary");
-    const configPath = path.join(stateDir, "openclaw.json");
-    const safePath = path.join(stateDir, "safe.json5");
     const externalPath = path.join(
       fixtureRoot,
       allowed ? "shared-includes/shared.json5" : "escaped.json5",
     );
+    const { stateDir, configPath } = await createConfig("include-boundary", {
+      $include: allowed ? externalPath : ["./safe.json5", "../escaped.json5"],
+    });
+    const safePath = path.join(stateDir, "safe.json5");
     await writePublicFile(externalPath);
     if (!allowed) {
       await writePublicFile(safePath);
     }
-    await fs.writeFile(
-      configPath,
-      JSON.stringify({
-        $include: allowed ? externalPath : ["./safe.json5", "../escaped.json5"],
-      }),
-      "utf-8",
-    );
     const result = await runFix(
       stateDir,
       configPath,
