@@ -1,4 +1,4 @@
-import { createEffect, onSettled } from "solid-js";
+import { createEffect, createSignal, onSettled } from "solid-js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type {
   SystemAgentSetupActivateParams,
@@ -25,6 +25,7 @@ import { formatModelSetupError } from "./model-setup-task-result.ts";
 import { createNativeModelSetup } from "./native-model-setup.tsx";
 import { candidateActivation, type ModelSetupPrepareOption } from "./prepare-options.ts";
 import { manualProviderActivation } from "./provider-picker.tsx";
+import type { ModelSetupDetection } from "./rpc.ts";
 import { createModelSetupDetectRequest, createModelSetupVerifyRequest } from "./rpc.ts";
 import {
   activationTargetId,
@@ -161,27 +162,23 @@ export function createModelSetup(
 
   const runDetection = createModelSetupDetectRequest({
     getHello: () => context.gateway.snapshot.hello,
-    onComplete: (outcome) => {
+    onComplete: (outcome): boolean => {
       if (
         state.detectionRequest !== outcome.token ||
         context.gateway.snapshot.client !== outcome.client ||
         context.gateway.snapshot.hello !== outcome.hello ||
         agentSelection().state.selectedId !== outcome.agentId
       ) {
-        return;
+        return false;
       }
       state.detectionRequest = null;
       if ("error" in outcome) {
-        const message = formatModelSetupError(outcome.error);
-        if (state.pageState.phase === "ready") {
-          state.detectionError = message;
-        } else {
+        if (state.pageState.phase !== "ready") {
           firstRun.setReadyConnection(null);
-          state.pageState = { phase: "detect-error", message };
+          state.pageState = { phase: "detect-error" };
         }
-        return;
+        return true;
       }
-      state.detectionError = null;
       firstRun.setReadyConnection({
         client: outcome.client,
         hello: outcome.hello,
@@ -194,10 +191,13 @@ export function createModelSetup(
       ) {
         state.manualProviderId = "";
       }
+      return true;
     },
   });
 
   const runVerification = createModelSetupVerifyRequest();
+
+  const [detectionIdentity, setDetectionRequest] = createSignal<ModelSetupDetection>();
 
   let feedbackState: ModelSetupActivationState | undefined;
 
@@ -246,6 +246,7 @@ export function createModelSetup(
     if (observation.kind === "pending") {
       if (!wizard.hasAdmittedSession) {
         state.pageState = { phase: "loading" };
+        setDetectionRequest(undefined);
       }
       wizard.suspend(suspendedNotice);
       return;
@@ -281,18 +282,10 @@ export function createModelSetup(
     } else {
       firstRun.connectionChanged(connection);
     }
-    resetActivity();
-    state.pageState = { phase: "loading" };
-    if (canUseSetup(connection.client)) {
-      void detect();
-    }
-  }
-
-  function resetActivity(): void {
     manualProviderRevealPending = false;
     login.reset();
     state.detectionRequest = null;
-    state.detectionError = null;
+    setDetectionRequest(undefined);
     retireWizardMutation();
     void runDetection([null, null, null]);
     state.activationState = { phase: "idle" };
@@ -300,6 +293,10 @@ export function createModelSetup(
     iconLoader.reset();
     pendingPrepareOption = null;
     void wizard.cancel();
+    state.pageState = { phase: "loading" };
+    if (canUseSetup(connection.client)) {
+      void detect();
+    }
   }
 
   function canUseSetup(client: GatewayBrowserClient | null): client is GatewayBrowserClient {
@@ -319,7 +316,6 @@ export function createModelSetup(
       return null;
     }
     resetVerify();
-    state.detectionError = null;
     // Only a cold load replaces the content. Same-owner rescans keep forms and
     // focus mounted; a changed connection clears them in synchronizeGateway.
     if (state.pageState.phase !== "ready") {
@@ -327,7 +323,9 @@ export function createModelSetup(
     }
     const token = {};
     state.detectionRequest = token;
-    const outcome = await runDetection([client, agentSelection().state.selectedId, token]);
+    const completion = runDetection([client, agentSelection().state.selectedId, token]);
+    setDetectionRequest({ completion });
+    const outcome = await completion;
     return outcome?.token === token && "value" in outcome ? outcome.value : null;
   }
 
@@ -538,7 +536,7 @@ export function createModelSetup(
         wizardDialog = element;
       },
       detecting: state.detectionRequest !== null,
-      detectionError: state.detectionError,
+      detectionIdentity,
       embedded: props.embedded ?? false,
       agentLabel: props.agentLabel ?? "",
       credentialChoices: props.credentialChoices ?? [],
