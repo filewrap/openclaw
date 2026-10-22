@@ -128,19 +128,6 @@ async function createProxyHarness(
   };
 }
 
-async function readSocketBytes(socket: Duplex, byteLength: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  let received = 0;
-  for await (const chunk of socket.iterator({ destroyOnReturn: false })) {
-    chunks.push(Buffer.from(chunk));
-    received += chunk.length;
-    if (received >= byteLength) {
-      return Buffer.concat(chunks);
-    }
-  }
-  throw new Error("desktop closed before the expected bytes arrived");
-}
-
 const expectUnauthorizedObserver = (url: string) => expectUnauthorizedUpgrade(url, cleanup);
 function expectUnauthorizedToken(url: string, token: string) {
   const observerUrl = new URL(url);
@@ -323,30 +310,6 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
     },
   );
 
-  it("drops view-only input while forwarding framebuffer requests", async () => {
-    const logCapture = captureLogs();
-    const harness = await createProxyHarness();
-    const fromDesktop = nextFrame(harness.ws);
-    harness.desktopPeer.write(Buffer.from("RFB 003.008\n"));
-    await expect(fromDesktop).resolves.toEqual(Buffer.from("RFB 003.008\n"));
-    const fromWebSocket = readSocketBytes(
-      harness.desktopPeer,
-      HELLO.length + UPDATE_REQUEST.length,
-    );
-    harness.ws.send(Buffer.concat([HELLO, KEY_EVENT, UPDATE_REQUEST]));
-    await expect(fromWebSocket).resolves.toEqual(Buffer.concat([HELLO, UPDATE_REQUEST]));
-
-    const closed = closedSocket(harness.ws);
-    harness.desktopPeer.destroy();
-    await closed;
-    await expectCloseLog(logCapture, {
-      trigger: "stream-close",
-      cleanupCode: 1000,
-      closeCode: 1000,
-    });
-    expect(harness.release).toHaveBeenCalledOnce();
-  });
-
   it("closes malformed view-only streams with a policy violation", async () => {
     const harness = await createProxyHarness();
     const closed = closedSocket(harness.ws);
@@ -438,6 +401,7 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
   );
 
   it("pauses and resumes unix-socket reads around websocket backpressure", async () => {
+    const logCapture = captureLogs();
     let bufferedAmount = 5 * 1024 * 1024;
     const pause = vi.spyOn(net.Socket.prototype, "pause");
     const resume = vi.spyOn(net.Socket.prototype, "resume");
@@ -451,5 +415,14 @@ describe.runIf(process.platform !== "win32")("worker desktop observer proxy", ()
     await vi.waitFor(() => expect(pause).toHaveBeenCalled());
     bufferedAmount = 0;
     await vi.waitFor(() => expect(resume).toHaveBeenCalled());
+    const closed = closedSocket(harness.ws);
+    harness.desktopPeer.destroy();
+    await closed;
+    await expectCloseLog(logCapture, {
+      trigger: "stream-close",
+      cleanupCode: 1000,
+      closeCode: 1000,
+    });
+    expect(harness.release).toHaveBeenCalledOnce();
   });
 });

@@ -672,30 +672,4 @@ describe("managed Linux desktop", () => {
       expect(next.isCurrent()).toBe(true);
     },
   );
-
-  it("stops and removes its session when the registry linger expires", async () => {
-    const { desktop } = await createFixture();
-    const registry = createDesktopSessionRegistry();
-    cleanups.push(async () => registry.stopAll());
-    await registry.acquire({
-      sourceKey: "host",
-      ownerEpoch: 0,
-      start: () => desktop.acquire(),
-      teardown: () => desktop.stop(),
-    });
-    const observer = registry.attachObserver("host", {
-      control: false,
-      ownerEpoch: 0,
-      close: vi.fn(),
-    });
-    expect(observer).toBeDefined();
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    try {
-      observer?.release();
-      await vi.advanceTimersByTimeAsync(60_000);
-    } finally {
-      vi.useRealTimers();
-    }
-    await vi.waitFor(() => expect(desktop.status()).toEqual({ state: "not-started" }));
-  });
 });

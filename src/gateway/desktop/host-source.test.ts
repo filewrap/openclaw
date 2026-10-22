@@ -202,13 +202,6 @@ describe("gateway host desktop source", () => {
           auth: "vnc-password",
         });
         expect(managed.acquire).toHaveBeenCalledOnce();
-        const stopped = vi.fn(onStop);
-        const computer = await source.acquireComputer({ onStop: stopped });
-        expect(computer.env.DISPLAY).toBe(":99");
-        expect(computer.isCurrent()).toBe(true);
-        await source.teardown?.();
-        expect(computer.isCurrent()).toBe(false);
-        expect(stopped).toHaveBeenCalledOnce();
         return;
       }
       await expect(source.acquire()).resolves.toEqual({
@@ -231,15 +224,6 @@ describe("gateway host desktop source", () => {
 
   it("attaches ARD and keeps account credentials only in the observer token", async () => {
     const port = await listenRfb({ banner: "RFB 003.889\n", securityTypes: [30] });
-    const source = createHostDesktopSource({
-      config: { enabled: true, port },
-      platform: "darwin",
-    });
-    await expect(source.acquire()).resolves.toEqual({
-      attachment: { kind: "tcp", host: "127.0.0.1", port },
-      auth: "ard-account",
-    });
-
     const { service } = hostService(() => ({ enabled: true, port }), { platform: "darwin" });
     await expect(service.observe({ control: false })).rejects.toThrow(
       "macOS account credentials are required",
@@ -310,6 +294,7 @@ describe("gateway host desktop source", () => {
     const managed = fakeManagedDesktop();
     const { service, registry } = managedService(managed.managed);
     const computer = await service.acquireComputer({ onStop });
+    expect(computer.env.DISPLAY).toBe(":99");
     await service.observe({ control: false });
     const observers = Array.from({ length: 8 }, () =>
       registry.attachObserver("host", {

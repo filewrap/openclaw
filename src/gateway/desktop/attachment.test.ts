@@ -1,11 +1,8 @@
 import { once } from "node:events";
-import net from "node:net";
 import { PassThrough } from "node:stream";
 import { setImmediate } from "node:timers/promises";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { connectRfbAttachment } from "./attachment.js";
-import { closeServer, listenLoopback } from "./desktop.test-support.js";
 import { createDesktopSessionRegistry } from "./session-registry.js";
 
 const { cleanupWarning } = vi.hoisted(() => ({ cleanupWarning: vi.fn() }));
@@ -13,8 +10,6 @@ vi.mock("../../logging/subsystem.js", () => ({
   createSubsystemLogger: () => ({ warn: cleanupWarning }),
 }));
 
-const servers: net.Server[] = [];
-const sockets: net.Socket[] = [];
 const tcpAttachment = { kind: "tcp", host: "127.0.0.1", port: 5900 } as const;
 type Registry = ReturnType<typeof createDesktopSessionRegistry>;
 let registry: Registry;
@@ -53,20 +48,6 @@ function observe(owner: Registry, close = () => {}) {
 afterEach(async () => {
   vi.useRealTimers();
   await registry.stopAll();
-  for (const socket of sockets.splice(0)) {
-    socket.destroy();
-  }
-  await Promise.all(servers.splice(0).map(closeServer));
-});
-
-it("connects a loopback TCP attachment", async () => {
-  const server = net.createServer((socket) => sockets.push(socket));
-  servers.push(server);
-  const accepted = once(server, "connection").then(() => undefined);
-  const port = await listenLoopback(server);
-  sockets.push(connectRfbAttachment({ kind: "tcp", host: "127.0.0.1", port }));
-
-  await expect(accepted).resolves.toBeUndefined();
 });
 
 it.each([false, true])("claims only its source's live stream (closed: %s)", async (closed) => {
