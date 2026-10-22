@@ -139,50 +139,42 @@ export function ChatDetailsProcesses(props: Props) {
     </Show>
   );
   const Content = (contentProps: { loading: boolean; retry: () => void }) => (
-    <Show when={props.onOpen}>
+    <>
       <Show when={!hasRunning()}>
         <ProcessError loading={contentProps.loading} retry={contentProps.retry} />
       </Show>
       <Show when={hasRunning()}>
-        <ChatDetailsDesktopSection
-          section="processes"
-          title={t("chat.sessionDetails.processes")}
-          expanded={props.expanded}
-          presented={props.presented}
-          onExpandedChange={(expanded) => props.onExpandedChange(expanded)}
-        >
-          <div class="chat-details-processes" aria-busy={contentProps.loading ? "true" : "false"}>
-            <ProcessError loading={contentProps.loading} retry={contentProps.retry} />
-            <div
-              class="chat-details-processes__list"
-              role="list"
-              aria-label={t("chat.sessionDetails.processes")}
-            >
-              <For each={rows()} keyed={(row) => row.instanceId}>
-                {(row) => (
-                  <ProcessRow
-                    row={row()}
-                    presentation={presentation}
-                    presented={props.presented}
-                    onOpen={open}
-                  />
-                )}
-              </For>
-            </div>
-            <Show when={snapshot()?.truncated}>
-              <div class="chat-details__muted">{t("chat.processesPanel.listTruncated")}</div>
-            </Show>
+        <div class="chat-details-processes" aria-busy={contentProps.loading ? "true" : "false"}>
+          <ProcessError loading={contentProps.loading} retry={contentProps.retry} />
+          <div
+            class="chat-details-processes__list"
+            role="list"
+            aria-label={t("chat.sessionDetails.processes")}
+          >
+            <For each={rows()} keyed={(row) => row.instanceId}>
+              {(row) => (
+                <ProcessRow
+                  row={row()}
+                  presentation={presentation}
+                  presented={props.presented}
+                  onOpen={open}
+                />
+              )}
+            </For>
           </div>
-        </ChatDetailsDesktopSection>
+          <Show when={snapshot()?.truncated}>
+            <div class="chat-details__muted">{t("chat.processesPanel.listTruncated")}</div>
+          </Show>
+        </div>
       </Show>
-    </Show>
+    </>
   );
   const retry = () => void props.processes()?.refresh();
   const consumeRead = () => {
     latest(presentation.read);
     return null;
   };
-  return (
+  const ReadContent = () => (
     <Errored
       fallback={(_error, reset) => (
         <Content
@@ -199,5 +191,21 @@ export function ChatDetailsProcesses(props: Props) {
         <Content loading={isPending(presentation.read)} retry={retry} />
       </Loading>
     </Errored>
+  );
+  // The disclosure's layout owner must survive pending and errored body reads.
+  return (
+    <Show when={props.onOpen}>
+      <Show when={hasRunning()} fallback={<ReadContent />}>
+        <ChatDetailsDesktopSection
+          section="processes"
+          title={t("chat.sessionDetails.processes")}
+          expanded={props.expanded}
+          presented={props.presented}
+          onExpandedChange={(expanded) => props.onExpandedChange(expanded)}
+        >
+          <ReadContent />
+        </ChatDetailsDesktopSection>
+      </Show>
+    </Show>
   );
 }
