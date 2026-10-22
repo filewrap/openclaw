@@ -331,6 +331,7 @@ export function PluginsPageView(props: { page: PluginsPageModel }) {
                   pluginIconLoading={page().icons.installed.isLoading}
                   canInstall={page().canMutate()}
                   installProgress={page().consent.read().installProgress}
+                  inventory={page().state.result?.plugins}
                   entryHref={(id) => pathForPluginCatalogEntry(id, page().context.basePath)}
                   onIntentChange={(intent) => void page().discovery.selectIntent(intent)}
                   onCategoryChange={(category) => void page().discovery.selectCategory(category)}
@@ -399,6 +400,7 @@ export function PluginsPageView(props: { page: PluginsPageModel }) {
               registerIcon={page().icons.register}
               consent={consent()}
               inspection={page().consent.read().inspection}
+              inspectionRead={page().consent.read().inspectionRead}
               loading={page().consent.read().inspectionLoading}
               error={page().consent.read().inspectionError}
               iconUrl={icon().url}
