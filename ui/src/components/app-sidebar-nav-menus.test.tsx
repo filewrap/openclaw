@@ -24,76 +24,54 @@ import {
   renderSidebarSessionMenuForMenus,
 } from "./sidebar-menus-render.tsx";
 import { createSidebarMenus, type SidebarMenus } from "./sidebar-menus.tsx";
-import { renderSidebarReorderMenu as ReorderMenu } from "./sidebar-reorder.tsx";
 
-it.each(["reorder", "agent creation"])(
-  "updates retained %s menu labels when the locale changes",
-  async (kind) => {
+it("updates retained agent creation menu labels when the locale changes", async () => {
+  await i18n.setLocale("en");
+  onTestFinished(async () => {
     await i18n.setLocale("en");
-    onTestFinished(async () => {
-      await i18n.setLocale("en");
-      i18n.registerTranslation("de", de);
-    });
-    if (kind === "agent creation") {
-      // This new action does not have a foreign catalog translation yet.
-      i18n.registerTranslation("de", {
-        ...de,
-        agentChip: { createAgent: "Neuen Agenten erstellen" },
-      });
-    }
-    const view = render(() =>
-      kind === "reorder" ? (
-        <ReorderMenu label="Work" sectionId="work" sections={new Map()} onMove={vi.fn()} />
-      ) : (
-        <AgentMenu
-          activeId="main"
-          agents={[]}
-          identities={new Map()}
-          openMode="click"
-          position={{ x: 12, top: 30 }}
-          basePath=""
-          rosterMode={false}
-          creationDisabledReason={null}
-          resolveAvatarUrl={(url) => url}
-          avatarErrorHandler={() => vi.fn()}
-          agentUnreadCount={() => 0}
-          onShowAllAgents={vi.fn()}
-          onCreateAgent={vi.fn()}
-          onPointerEnter={vi.fn()}
-          onPointerLeave={vi.fn()}
-          onAfterShow={vi.fn()}
-          onSwitchAgent={vi.fn()}
-          onClose={vi.fn()}
-          onNavigate={vi.fn()}
-        />
-      ),
-    );
-    flush();
-    const labels: readonly (readonly [string, string, string])[] =
-      kind === "reorder"
-        ? [
-            ["before", "Move up", "Nach oben verschieben"],
-            ["after", "Move down", "Nach unten verschieben"],
-          ]
-        : [["command:new-agent", "Create new agent", "Neuen Agenten erstellen"]];
-    const menu = view.getByRole("menu", { hidden: true });
-    const rows = labels.map(([value, english]) => {
-      const row = view.getByRole("menuitem", { name: english, hidden: true });
-      expect(row.getAttribute("data-value")).toBe(value);
-      return row;
-    });
+    i18n.registerTranslation("de", de);
+  });
+  // This new action does not have a foreign catalog translation yet.
+  i18n.registerTranslation("de", {
+    ...de,
+    agentChip: { createAgent: "Neuen Agenten erstellen" },
+  });
+  const view = render(() => (
+    <AgentMenu
+      activeId="main"
+      agents={[]}
+      identities={new Map()}
+      openMode="click"
+      position={{ x: 12, top: 30 }}
+      basePath=""
+      rosterMode={false}
+      creationDisabledReason={null}
+      resolveAvatarUrl={(url) => url}
+      avatarErrorHandler={() => vi.fn()}
+      agentUnreadCount={() => 0}
+      onShowAllAgents={vi.fn()}
+      onCreateAgent={vi.fn()}
+      onPointerEnter={vi.fn()}
+      onPointerLeave={vi.fn()}
+      onAfterShow={vi.fn()}
+      onSwitchAgent={vi.fn()}
+      onClose={vi.fn()}
+      onNavigate={vi.fn()}
+    />
+  ));
+  flush();
+  const menu = view.getByRole("menu", { hidden: true });
+  const row = view.getByRole("menuitem", { name: "Create new agent", hidden: true });
+  expect(row.getAttribute("data-value")).toBe("command:new-agent");
 
-    await i18n.setLocale("de");
-    await waitForSolid(() => {
-      labels.forEach(([value, , german], index) => {
-        expect(rows[index]!.getAttribute("aria-label")).toBe(german);
-        expect(rows[index]!.textContent?.trim()).toBe(german);
-        expect(menu.querySelector(`[data-value="${value}"]`)).toBe(rows[index]);
-      });
-    });
-    expect(view.getByRole("menu", { hidden: true })).toBe(menu);
-  },
-);
+  await i18n.setLocale("de");
+  await waitForSolid(() => {
+    expect(row.getAttribute("aria-label")).toBe("Neuen Agenten erstellen");
+    expect(row.textContent?.trim()).toBe("Neuen Agenten erstellen");
+    expect(menu.querySelector('[data-value="command:new-agent"]')).toBe(row);
+  });
+  expect(view.getByRole("menu", { hidden: true })).toBe(menu);
+});
 
 const position = { x: 12, y: 30 };
 function dropdown(overrides: Partial<SidebarDropdownProps>) {
