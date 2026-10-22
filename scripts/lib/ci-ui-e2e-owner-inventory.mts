@@ -584,7 +584,6 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
     ["chat", "usage"],
     ["ui/src/pages/chat/chat-pane.ts"],
   ),
-  pageWatch("ui/src/e2e/chat-follow-maintenance.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-goal-elapsed.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-goal-recovery.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-guardian-review.e2e.test.ts", ["chat"]),
@@ -601,19 +600,12 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
     ["ui/src/components/session-menu-solid.tsx"],
   ),
   pageWatch("ui/src/e2e/chat-heartbeat-activity-rollup.e2e.test.ts", ["chat"]),
-  pageWatch(
-    "ui/src/e2e/chat-history-activity-anchor.e2e.test.ts",
-    ["chat"],
-    ["ui/src/pages/chat/chat-pane.ts"],
-  ),
   pageWatch("ui/src/e2e/chat-history-loading.e2e.test.ts", ["chat"]),
-  pageWatch("ui/src/e2e/chat-history-prepend-anchor.e2e.test.ts", ["chat"]),
   pageWatch(
-    "ui/src/e2e/chat-history-stale-geometry.e2e.test.ts",
+    "ui/src/e2e/chat-history-prepend-anchor.e2e.test.ts",
     ["chat"],
-    ["ui/src/pages/chat/session-snapshot-database.ts"],
+    ["ui/src/pages/chat/chat-pane.ts", "ui/src/pages/chat/session-snapshot-database.ts"],
   ),
-  pageWatch("ui/src/e2e/chat-image-approval-loading.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-image-loading.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-image-virtual-remount.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-interrupted-reply.e2e.test.ts", ["chat"]),
@@ -633,11 +625,6 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
   ),
   pageWatch("ui/src/e2e/chat-mobile-bubble-margin.e2e.test.ts", ["chat"]),
   pageWatch("ui/src/e2e/chat-model-picker-composition.e2e.test.ts", ["chat"]),
-  pageWatch(
-    "ui/src/e2e/chat-model-selection-recovery.e2e.test.ts",
-    ["chat"],
-    ["ui/src/pages/chat/chat-pane.ts"],
-  ),
   pageWatch("ui/src/e2e/chat-motion.e2e.test.ts", ["chat"]),
   pageWatch(
     "ui/src/e2e/chat-native-runtime-recovery.e2e.test.ts",
@@ -652,7 +639,6 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
     ["ui/src/components/image-lightbox.tsx"],
   ),
   pageWatch("ui/src/e2e/chat-only-model.e2e.test.ts", ["chat"]),
-  pageWatch("ui/src/e2e/chat-outbox-agent-scope.e2e.test.ts", ["chat"]),
   pageWatch(
     "ui/src/e2e/chat-outbox-capacity.e2e.test.ts",
     ["chat", "config"],
@@ -1061,17 +1047,6 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
     ["cron"],
     ["ui/src/lib/cron/types.ts"],
   ),
-  pageWatch(
-    "ui/src/e2e/cron-history-recovery.e2e.test.ts",
-    ["cron"],
-    [
-      "ui/src/lib/cron/types.ts",
-      "ui/src/pages/cron/cron-page.tsx",
-      "ui/src/pages/cron/cron-page-controller.ts",
-    ],
-  ),
-  pageWatch("ui/src/e2e/cron-job-link.e2e.test.ts", ["cron"], ["ui/src/lib/cron/types.ts"]),
-  pageWatch("ui/src/e2e/cron-pacing.e2e.test.ts", ["cron"], ["ui/src/lib/cron/types.ts"]),
   pageWatch("ui/src/e2e/cron-remove.e2e.test.ts", ["cron"], ["ui/src/lib/cron/types.ts"]),
   pageWatch("ui/src/e2e/cron-run-completion.e2e.test.ts", ["cron"], ["ui/src/lib/cron/types.ts"]),
   pageWatch("ui/src/e2e/cron-run-feedback.e2e.test.ts", ["cron"], ["ui/src/lib/cron/types.ts"]),
@@ -1988,11 +1963,6 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
   pageWatch("ui/src/e2e/sidebar-plugin-order.e2e.test.ts", ["chat", "workboard"]),
   pageWatch("ui/src/e2e/sidebar-refresh-availability.e2e.test.ts", ["new-session"]),
   pageWatch("ui/src/e2e/sidebar-restart-recovery.e2e.test.ts", ["chat"], sessionMenuOwnerRoots),
-  pageWatch(
-    "ui/src/e2e/sidebar-roster-completeness.capture.e2e.test.ts",
-    ["chat"],
-    sessionMenuOwnerRoots,
-  ),
   pageWatch("ui/src/e2e/sidebar-selection-overflow.e2e.test.ts", ["chat"], sessionMenuOwnerRoots),
   pageWatch("ui/src/e2e/sidebar-session-stability.e2e.test.ts", ["chat"], sessionMenuOwnerRoots),
   pageWatch(
@@ -2201,6 +2171,12 @@ const ownerWatches: readonly UiE2eOwnerWatch[] = [
     ],
   ),
   pageWatch("ui/src/e2e/worktrees.e2e.test.ts", ["config", "worktrees"]),
+  pageWatch("ui/src/e2e/chat-image-approval-loading.e2e.test.ts", ["chat"]),
+  pageWatch(
+    "ui/src/e2e/chat-model-selection-recovery.e2e.test.ts",
+    ["chat"],
+    ["ui/src/pages/chat/chat-pane.ts"],
+  ),
 ];
 
 export const UI_E2E_OWNER_WATCHES: readonly UiE2eOwnerWatch[] = ownerWatches.map((watch) => ({
