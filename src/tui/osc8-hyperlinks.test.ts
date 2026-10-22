@@ -8,6 +8,8 @@ const pathUrl = "https://example.com/path";
 const ipv6 = "http://[::1]:8080/path";
 const wikipedia = "https://en.wikipedia.org/wiki/URL_(disambiguation)";
 const query = "https://example.com/v1.0/URL_(disambiguation)?a=1&b=2#section";
+const domain = "https://example.com";
+const wrapped = "https://example.com/a/very/long/path/that/keeps/going/and/going";
 
 describe("extractUrls", () => {
   it.each([
@@ -80,86 +82,59 @@ describe("addOsc8Hyperlinks", () => {
   });
 
   it.each([
-    { prefix: "Visit ", url: "https://example.com", suffix: " for info" },
-    { prefix: "🦞 東京 ", url: "https://example.com/😀/e\u0301", suffix: " 🧑‍💻" },
-    { prefix: "\ud800 ", url: "https://example.com/\udfff", suffix: " \udc00" },
-  ])("wraps a single-line URL with OSC 8 ($url)", ({ prefix, url, suffix }) => {
+    ["plain", "Visit ", domain, " for info"],
+    ["Unicode", "🦞 東京 ", `${domain}/😀/e\u0301`, " 🧑‍💻"],
+    ["lone surrogates", "\ud800 ", `${domain}/\udfff`, " \udc00"],
+    ["bidi isolation", "\u2067مرحبا ", pathUrl, "\u2069"],
+    ["IPv6", "", ipv6, ""],
+    ["parentheses", "Wikipedia (", wikipedia, ")"],
+  ])("wraps %s URLs", (_name, prefix, url, suffix) => {
     expect(addOsc8Hyperlinks([`${prefix}${url}${suffix}`], new Set([url]))).toEqual([
       `${prefix}${link(url)}${suffix}`,
     ]);
   });
 
-  it.each([".", ".?!"])(
-    "keeps trailing GFM punctuation %s outside terminal hyperlink targets",
-    (punctuation) => {
-      const url = "https://example.com/path";
-      const line = `Visit ${url}${punctuation}`;
-
-      expect(addOsc8Hyperlinks([line], extractUrls(line))).toEqual([
-        `Visit ${link(url)}${punctuation}`,
-      ]);
-    },
-  );
-
-  it("preserves punctuation explicitly authored in markdown hyperlink targets", () => {
-    const url = "https://example.com/path.";
-    const line = `Docs (${url})`;
-
-    expect(addOsc8Hyperlinks([line], extractUrls(`[Docs](${url})`))).toEqual([
-      `Docs (${link(url)})`,
-    ]);
+  it.each([
+    ["sentence punctuation", `Visit ${pathUrl}.`, `Visit ${pathUrl}.`, `Visit ${link(pathUrl)}.`],
+    ["GFM punctuation", `Visit ${pathUrl}.?!`, `Visit ${pathUrl}.?!`, `Visit ${link(pathUrl)}.?!`],
+    [
+      "authored punctuation",
+      `[Docs](${pathUrl}.)`,
+      `Docs (${pathUrl}.)`,
+      `Docs (${link(`${pathUrl}.`)})`,
+    ],
+    [
+      "authored and bare occurrences",
+      `[Docs](${pathUrl}.) and ${pathUrl}.`,
+      `Docs (${pathUrl}.) and ${pathUrl}.`,
+      `Docs (${link(`${pathUrl}.`)}) and ${link(pathUrl)}.`,
+    ],
+  ])("preserves %s targets", (_name, markdown, line, expected) => {
+    expect(addOsc8Hyperlinks([line], extractUrls(markdown))).toEqual([expected]);
   });
 
-  it("keeps authored and bare hyperlink occurrences distinct before punctuation", () => {
-    const punctuation = ".";
-    const bareUrl = "https://example.com/path";
-    const authoredUrl = `${bareUrl}${punctuation}`;
-    const markdown = `[Docs](${authoredUrl}) and ${bareUrl}${punctuation}`;
-    const rendered = `Docs (${authoredUrl}) and ${bareUrl}${punctuation}`;
-
-    expect(addOsc8Hyperlinks([rendered], extractUrls(markdown))).toEqual([
-      `Docs (${link(authoredUrl)}) and ${link(bareUrl)}${punctuation}`,
-    ]);
-  });
-
-  it("keeps bidi isolation outside the exact OSC 8 target", () => {
-    const url = "https://example.com/path";
-    expect(addOsc8Hyperlinks([`\u2067مرحبا ${url}\u2069`], new Set([url]))).toEqual([
-      `\u2067مرحبا ${link(url)}\u2069`,
-    ]);
+  it.each([
+    ["scheme split", pathUrl, ["https://", "example.com/path"]],
+    [
+      "three lines",
+      wrapped,
+      ["https://example.com/a/very/lon", "g/path/that/keeps/going/and/g", "oing"],
+    ],
+  ] satisfies [string, string, string[]][])("wraps %s", (_name, url, lines) => {
+    expect(addOsc8Hyperlinks(lines, new Set([url]))).toEqual(lines.map((line) => link(url, line)));
   });
 
   it("keeps a whole code point when a wrapped continuation matches only its high surrogate", () => {
-    const prefix = "https://example.com/";
-    const url = `${prefix}😀/path`;
-
-    expect(addOsc8Hyperlinks([prefix, "😁 next"], new Set([url]))).toEqual([
-      link(url, prefix),
+    const url = `${domain}/😀/path`;
+    expect(addOsc8Hyperlinks([`${domain}/`, "😁 next"], new Set([url]))).toEqual([
+      link(url, `${domain}/`),
       `${link(url, "😁")} next`,
     ]);
   });
 
-  it("wraps a URL with a bracketed IPv6 authority", () => {
-    const url = "http://[::1]:8080/path";
-    expect(addOsc8Hyperlinks([url], new Set([url]))).toEqual([link(url)]);
-  });
-
-  it("wraps a URL broken immediately after its scheme", () => {
-    const fullUrl = "https://example.com/path";
-    const result = addOsc8Hyperlinks(["https://", "example.com/path"], new Set([fullUrl]));
-
-    expect(result).toEqual([link(fullUrl, "https://"), link(fullUrl, "example.com/path")]);
-  });
-
   it("handles URL with ANSI styling codes", () => {
-    const url = "https://example.com";
-    const styledLine = `\x1b[32m${url}\x1b[0m`;
-    const result = addOsc8Hyperlinks([styledLine], new Set([url]));
-
-    expect(result[0]).toContain("\x1b[32m");
-    expect(result[0]).toContain("\x1b[0m");
-    expect(result[0]).toContain(`\x1b]8;;${url}\x07`);
-    expect(result[0]).toContain(`\x1b]8;;\x07`);
+    const result = addOsc8Hyperlinks([`\x1b[32m${domain}\x1b[0m`], new Set([domain]));
+    expect(result).toEqual([`\x1b[32m${link(domain, `${domain}\x1b[0m`)}`]);
   });
 
   it.each([
@@ -173,28 +148,10 @@ describe("addOsc8Hyperlinks", () => {
     ]);
   });
 
-  it("wraps URLs with parentheses in markdown rendered text", () => {
-    const url = "https://en.wikipedia.org/wiki/URL_(disambiguation)";
-    const line = `Wikipedia (${url})`;
-    const result = addOsc8Hyperlinks([line], new Set([url]));
-    expect(result[0]).toBe(`Wikipedia (${link(url)})`);
-  });
-
   it("does not resolve an incomplete URL to another known URL", () => {
-    const url = "https://example.com";
-    const result = addOsc8Hyperlinks(["broken (https://)", url], new Set([url]));
-    expect(result[0]).toBe("broken (https://)");
-    expect(result[1]).toContain(link(url));
-  });
-
-  it("handles URL split across three lines", () => {
-    const fullUrl = "https://example.com/a/very/long/path/that/keeps/going/and/going";
-    const lines = ["https://example.com/a/very/lon", "g/path/that/keeps/going/and/g", "oing"];
-    const result = addOsc8Hyperlinks(lines, new Set([fullUrl]));
-
-    for (const line of result) {
-      expect(line).toContain(`\x1b]8;;${fullUrl}\x07`);
-      expect(line).toContain(`\x1b]8;;\x07`);
-    }
+    expect(addOsc8Hyperlinks(["broken (https://)", domain], new Set([domain]))).toEqual([
+      "broken (https://)",
+      link(domain),
+    ]);
   });
 });

@@ -3,10 +3,12 @@ import { isEmbeddedMode } from "../infra/embedded-mode.js";
 import { defaultRuntime } from "../runtime.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import type { EmbeddedTuiBackend } from "./embedded-backend.js";
-import { captureBackendEvents } from "./embedded-backend.stream.test-support.js";
+import {
+  agentResult,
+  startBackend,
+  type EmbeddedAgentResult,
+} from "./embedded-backend.stream.test-support.js";
 import { deferred, flushMicrotasks, sendMainChat } from "./embedded-backend.test-helpers.js";
-
-type EmbeddedAgentResult = { payloads: Array<{ text: string }>; meta: Record<string, unknown> };
 
 export function registerEmbeddedBackendShutdownTests({
   createBackend,
@@ -28,9 +30,7 @@ export function registerEmbeddedBackendShutdownTests({
       opts.abortSignal?.addEventListener("abort", abortListener);
       return pending.promise;
     });
-    const backend = createBackend();
-    const events = captureBackendEvents(backend);
-    backend.start();
+    const { backend, events } = startBackend(createBackend);
     expect(isEmbeddedMode()).toBe(true);
     expect(defaultRuntime.log).not.toBe(originalRuntimeLog);
     expect(defaultRuntime.error).not.toBe(originalRuntimeError);
@@ -56,7 +56,7 @@ export function registerEmbeddedBackendShutdownTests({
     const { pending, chatStates } = await startMaintenance();
     await flushMicrotasks();
     expect(chatStates()).not.toContain("final");
-    pending.resolve({ payloads: [{ text: "done" }], meta: {} });
+    pending.resolve(agentResult("done"));
     await flushMicrotasks();
     expect(chatStates()).toEqual(["delta", "final"]);
   });
@@ -65,7 +65,7 @@ export function registerEmbeddedBackendShutdownTests({
     const first = deferred<EmbeddedAgentResult>();
     const firstStarted = deferred<void>();
     agentCommandFromIngressMock.mockImplementationOnce((opts: { abortSignal: AbortSignal }) => {
-      opts.abortSignal.addEventListener("abort", () => first.resolve({ payloads: [], meta: {} }));
+      opts.abortSignal.addEventListener("abort", () => first.resolve(agentResult()));
       firstStarted.resolve();
       return first.promise;
     });
@@ -114,10 +114,9 @@ export function registerEmbeddedBackendShutdownTests({
         }
         expect(isEmbeddedMode()).toBe(true);
         // Abort does not settle maintenance or release embedded runtime ownership.
-        pending.resolve({
-          payloads: expired ? [] : [{ text: "done" }],
-          meta: expired ? { aborted: true } : {},
-        });
+        pending.resolve(
+          agentResult(expired ? undefined : "done", expired ? { aborted: true } : {}),
+        );
         await stopPromise;
         if (!expired) {
           expect(abortListener).not.toHaveBeenCalled();
