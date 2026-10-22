@@ -1,6 +1,7 @@
 import {
   createMemo,
   createSignal,
+  createStore,
   Errored,
   isPending,
   latest,
@@ -67,7 +68,7 @@ export function CronScratchEditor(props: Props) {
 }
 
 function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () => boolean }) {
-  const [view, setView] = createSignal<{
+  const [view, setView] = createStore<{
     snapshot: CronScratchGetResult | null;
     draft: string;
     busy: boolean;
@@ -93,21 +94,21 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
   onSettled(() => () => {
     disposed = true;
   });
-  const sizeBytes = createMemo(() => new TextEncoder().encode(view().draft).length);
-  const disabled = () => isPending(read) || view().busy || !props.connected || view().conflict;
+  const sizeBytes = createMemo(() => new TextEncoder().encode(view.draft).length);
+  const disabled = () => isPending(read) || view.busy || !props.connected || view.conflict;
   const isCurrent = () => !disposed && props.isCurrent();
 
   async function request(content?: string | null) {
     const client = props.scope.gateway.snapshot.client;
-    const snapshot = view().snapshot;
+    const snapshot = view.snapshot;
     const saving = content !== undefined;
     if (!client || !props.scope.jobId || pending || !isCurrent()) {
       return;
     }
-    if (saving && (!snapshot || view().conflict)) {
+    if (saving && (!snapshot || view.conflict)) {
       return;
     }
-    if (typeof content === "string" && view().redacted) {
+    if (typeof content === "string" && view.redacted) {
       return;
     }
     if (
@@ -115,12 +116,17 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
       snapshot &&
       new TextEncoder().encode(content).length > snapshot.maxBytes
     ) {
-      setView((state) => ({ ...state, message: t("cron.scratch.tooLarge") }));
+      setView((state) => {
+        state.message = t("cron.scratch.tooLarge");
+      });
       return;
     }
     // Guard duplicate admission synchronously; signals publish on the next Solid flush.
     pending = true;
-    setView((state) => ({ ...state, busy: saving, message: "" }));
+    setView((state) => {
+      state.busy = saving;
+      state.message = "";
+    });
     try {
       const result = saving
         ? await client.request<CronScratchSetResult>("cron.scratch.set", {
@@ -133,34 +139,42 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
         return;
       }
       if ("reason" in result) {
-        setView((state) => ({ ...state, conflict: true, message: t("cron.scratch.conflict") }));
+        setView((state) => {
+          state.conflict = true;
+          state.message = t("cron.scratch.conflict");
+        });
         return;
       }
       const raw = result.scratch?.content ?? "";
       const draft = redactToolDetail(raw);
-      setView((state) => ({
-        ...state,
+      setView((state) => {
         // Retain revision metadata only; raw scratch must not enter diagnostic state dumps.
-        snapshot: {
+        state.snapshot = {
           ...result,
           scratch: result.scratch ? { ...result.scratch, content: "" } : null,
-        },
-        draft,
-        redacted: draft !== raw,
-        conflict: false,
-        message: saving ? t(content === null ? "cron.scratch.removed" : "cron.scratch.saved") : "",
-      }));
+        };
+        state.draft = draft;
+        state.redacted = draft !== raw;
+        state.conflict = false;
+        state.message = saving
+          ? t(content === null ? "cron.scratch.removed" : "cron.scratch.saved")
+          : "";
+      });
     } catch (error) {
       if (isCurrent()) {
         if (!saving) {
           throw error;
         }
-        setView((state) => ({ ...state, message: formatUiError(error) }));
+        setView((state) => {
+          state.message = formatUiError(error);
+        });
       }
     } finally {
       pending = false;
       if (isCurrent()) {
-        setView((state) => ({ ...state, busy: false }));
+        setView((state) => {
+          state.busy = false;
+        });
       }
     }
   }
@@ -180,13 +194,13 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
           <button
             type="button"
             class="btn btn--sm"
-            disabled={isPending(read) || view().busy || !props.connected}
+            disabled={isPending(read) || view.busy || !props.connected}
             onClick={loadScratch}
           >
-            {t(view().snapshot ? "cron.scratch.reload" : "cron.scratch.load")}
+            {t(view.snapshot ? "cron.scratch.reload" : "cron.scratch.load")}
           </button>
-          <Show when={view().snapshot}>
-            <Show when={!view().snapshot?.scratch}>
+          <Show when={view.snapshot}>
+            <Show when={!view.snapshot?.scratch}>
               <p class="cron-help">{t("cron.scratch.empty")}</p>
             </Show>
             <label class="field">
@@ -194,38 +208,40 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
               <textarea
                 class="settings-input mono"
                 rows={8}
-                value={view().draft}
-                readonly={disabled() || view().redacted}
-                maxlength={view().snapshot?.maxBytes}
+                value={view.draft}
+                readonly={disabled() || view.redacted}
+                maxlength={view.snapshot?.maxBytes}
                 onInput={(event) => {
                   const draft = event.currentTarget.value;
-                  setView((state) => ({ ...state, draft }));
+                  setView((state) => {
+                    state.draft = draft;
+                  });
                 }}
               />
             </label>
             <p class="cron-help">
               {t("cron.scratch.limit", {
                 bytes: String(sizeBytes()),
-                max: String(view().snapshot?.maxBytes),
+                max: String(view.snapshot?.maxBytes),
               })}
             </p>
-            <Show when={view().redacted}>
+            <Show when={view.redacted}>
               <p class="cron-help">{t("cron.scratch.redacted")}</p>
             </Show>
             <button
               type="button"
               class="btn btn--sm"
               disabled={
-                disabled() || view().redacted || sizeBytes() > (view().snapshot?.maxBytes ?? 0)
+                disabled() || view.redacted || sizeBytes() > (view.snapshot?.maxBytes ?? 0)
               }
-              onClick={() => void request(view().draft)}
+              onClick={() => void request(view.draft)}
             >
               {t("cron.scratch.save")}
             </button>{" "}
             <button
               type="button"
               class="btn btn--sm danger"
-              disabled={disabled() || !view().snapshot?.scratch}
+              disabled={disabled() || !view.snapshot?.scratch}
               onClick={() => void request(null)}
             >
               {t("cron.scratch.clear")}
@@ -240,9 +256,9 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
           >
             {readResult()}
           </Errored>
-          <Show when={view().message}>
+          <Show when={view.message}>
             <p class="cron-help" role="status">
-              {view().message}
+              {view.message}
             </p>
           </Show>
         </details>
