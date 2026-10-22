@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, assert, expect, it, vi } from "vitest";
 import beamPlugin from "../../extensions/beam/index.js";
+import { createBeamTestCatalog } from "../../extensions/beam/src/beam.test-support.js";
 import type { OpenClawConfig } from "../../src/config/types.openclaw.js";
 import {
   createGatewaySchedulerClock,
@@ -133,33 +134,14 @@ it.skipIf(process.platform === "win32")(
     activateSecretsRuntimeSnapshot(snapshot);
     let reads = 0;
     let reloadDuringRead: (() => void) | undefined;
-    const { clock, scheduler } = await startMirror(snapshot.config, {
-      id: "claude",
-      label: "Synthetic catalog",
-      async list() {
-        const session = {
-          threadId: "t1",
-          recencyAt: Date.now(),
-          status: "stored",
-          archived: false,
-          canContinue: false,
-          canArchive: false,
-        };
-        return [
-          {
-            hostId: "gateway:local",
-            label: "Local",
-            kind: "gateway",
-            connected: true,
-            sessions: [session],
-          },
-        ];
-      },
-      async read({ hostId, threadId }) {
-        reloadDuringRead?.();
-        return { hostId, threadId, items: [{ type: "agentMessage", text: String(++reads) }] };
-      },
-    });
+    const { clock, scheduler } = await startMirror(
+      snapshot.config,
+      createBeamTestCatalog({
+        sessions: () => [{ threadId: "t1", recencyAt: Date.now() }],
+        onRead: () => reloadDuringRead?.(),
+        items: () => [{ type: "agentMessage", text: String(++reads) }],
+      }),
+    );
     try {
       await clock.wake();
       await clock.advanceBy(30_000);
