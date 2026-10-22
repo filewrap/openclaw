@@ -620,6 +620,79 @@ then omit it for paired timing.
 Failed attempts retain the available browser probe under `failure`, including
 failures in the final Details assertions; they are diagnostics, not accepted samples.
 
+Add `--activity-row-mix` to the two-session patch workload to cycle selected-session
+label changes, other-session status changes, selected-session status changes,
+sidebar hover, sidebar scrolling, session opening through the sidebar, and opening
+the session menu with an owner-submenu hover. The two keys must be visible in the
+synthetic sidebar; the reload fixture's session 1 and pinned session 2 work. Use
+`--reload-census` to count every browser RPC. Each action records its following
+observation window, `sessions.changed` events, `sessions.describe` requests and
+session-scoped `models.list` requests; the report also normalizes the warm window
+to requests per tab-minute. An interval contains deferred work from preceding
+actions too, so use the retained event timestamps for causal attribution. Closed
+menu panel, owner-submenu and avatar inventories are captured at readiness and
+before the activity window. The menu step waits for its root panel and the owner
+search input, recording their separate automation-to-visible times. With
+`--screenshot`, the first open owner menu is also captured beside the final image;
+omit screenshots during paired timing. This mode does not need model inference.
+
+On Linux, pass `--gateway-pid <pid>` using `gatewayPid` from the reload fixture's
+ready record to capture that Gateway's main-thread CPU during the warm window.
+CPU per action and (with `--reload-census`) CPU per browser RPC include controller
+patches and background work; they are workload-normalized costs, not handler
+self-time. Keep both sides' fixture, interval, seed and duration identical, and
+keep caller-stack recording off for timing runs. The report retains each RPC's
+timestamps for latency analysis; report sample counts with any derived tails.
+
+Use `--activity-delete-sessions <key-a>,<key-b>,...` with `--load-runs 1` and
+`--expect-session <different-visible-key>` to isolate unrelated session removals.
+Supply one distinct existing synthetic key per interval: 12 keys with
+`--duration 24 --interval-ms 2000` performs 12 deletions. This mode excludes other activity
+modes, preserves the visible conversation, requires each deletion to succeed,
+and waits for its keyed `sessions.changed` event. The retained event trace also
+shows any unscoped deletion notification and its following browser requests.
+Deleted keys are consumed; use fresh keys or a fresh synthetic fixture per run.
+
+For account service-tier observations, launch the reload fixture with
+`--service-tier-port <unused-loopback-port>` and run the browser probe with
+`--activity-service-tiers --load-runs 1 --expect-session <existing-key>`.
+The fixture serves a synthetic OpenAI Responses endpoint returning `fast`; its
+log records only the requested/returned tier and timestamp, never prompt content.
+The probe creates two uniquely named sessions using the real `openclaw` runtime
+and `openai/gpt-5` model: one requests priority, the other ultrafast. It completes
+one warmup turn per session before browser navigation, then alternates real
+`chat.send` turns and waits for successful `agent.wait` settlement. No inference
+credentials or external provider calls are needed. The visible conversation
+remains unchanged so catalog/descriptor requests expose cross-session effects.
+
+Use `--duration 42 --interval-ms 2000` for 21 measured initiating turns and
+`--reload-census --gateway-pid <fixture-pid>` for browser request counts and
+Gateway main-thread CPU. Verify the fixture log contains the expected alternating
+priority/ultrafast requests in addition to both warmups; a successful controller
+response alone does not prove model execution. Compare total CPU and CPU per
+fixed initiating turn, not CPU per remaining browser RPC. This mode excludes
+patch, delete, mixed-interaction, catalog-refresh and cron workloads.
+
+For steady model selection with multiple active conversations, use
+`--activity-run-mix --activity-session agent:main:main --activity-models openai/gpt-5`.
+Start the reload fixture with
+`--subagent-seed --service-tier-port <unused-loopback-port>` to expose its native
+spawn tool and synthetic provider.
+The probe asks its synthetic provider to invoke `sessions_spawn` once,
+finds that exact native child by parent and unique label, then warms three
+conversations and completes concurrent real turns in each. `--activity-cron` replaces every fourth cohort
+with a forced cron run. `--activity-interactions` adds separately timed sidebar
+hover, model-picker opening, and conversation navigation after each cohort.
+Initial catalog/descriptor responses settle before the warm window; the report
+retains actual elapsed time and a post-window model/speed-control observation.
+
+Launch the reload fixture with `--stream-delay-ms 75` to stream three chunks per
+response, and `--service-tier-responses fast,default` to alternate provider tier
+observations while model selections and requested tiers remain fixed. The default
+is still a single immediate response returning `fast`. Compare steady responses
+and changing observations separately; these synthetic transitions establish the
+invalidation path, not the production frequency of provider tier changes.
+
 For active-session loads, add `--activity-session <synthetic-key>` and configure
 that isolated Gateway with two loopback mock-provider models:
 
@@ -2196,6 +2269,7 @@ Supported scenarios:
 | ---------------------- | ---------------------------------------------------------------------------------------------------------- |
 | `sessions.list`        | One compact sidebar page RPC, `archived=all`, `--limit` rows                                               |
 | `sessions.describe`    | One detailed parent-row RPC, including the harness's synthetic children                                    |
+| `sessions.patch`       | One title, expiring status-note, or model-selection mutation on a retained fixture session                 |
 | `connect`              | One owned socket replacement and validated hello handshake; no sidebar restoration                         |
 | `reconnect`            | One owned socket replacement, subscriptions, and verified current sidebar                                  |
 | `subscribe`            | One `sessions.subscribe` snapshot registration/refresh RPC on the sender, with the same page shape as list |
@@ -2212,6 +2286,63 @@ and update timestamps with the pre-storm page. The report separates handshake
 latency from time until all sidebars are current. Intentional disconnection does
 not imply event replay. These scenarios isolate RPC costs; they do not generate
 background session activity at production rates.
+
+For entry-patch transfer measurements, prepare separate matching small fixtures
+sequentially, then run the existing driver against the source Gateway:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/team-shape-fixture.ts \
+  --state-dir /path/to/new-fixture --sessions 5000 --runs 6000 \
+  --approvals 0 --cron 0 --projects 0 --transcript-mib 16 --port 41580
+node --import ./scripts/tsx.mjs scripts/perf/transcript-broadcast-measure.ts \
+  --state-dir /path/to/new-fixture --entry src/entry.ts --scenario sessions.patch \
+  --port 41580 --mock-port 41581 --clients 8 --runs 1 --rpc-concurrency 4 \
+  --warmup-operations 240 --operations 2400 --rounds 1 \
+  --allocations --diagnostics --trace-gc --capture-responses \
+  --start-at <shared-future-epoch-ms> --revision <measured-commit-sha>
+```
+
+No Gateway bundle is required for this source entry. The fixture retains 5,000
+session entries and 6,000 run records with only 16 MiB of synthetic transcript
+content; inspect the generated database sizes before choosing larger fixtures.
+Each connected client has a distinct unarchived fixture target. Successive
+mutations set a unique user title (`label`), set an expiring status note, select
+a second configured synthetic model, then clear each of those fields. Every
+response verifies the changed value. Warmup and measured operations continue
+the same mutation sequence, avoiding repeated no-op writes. Connected clients
+subscribe to session rows, so row publication is included. This scenario does
+not drive viewer-declaration churn or real running/settled agent lifecycles;
+use the separate `transcript-broadcast` or `memory-soak` turn scenario for that
+additional coverage.
+
+The report includes allocation and promotion per completed patch, worker message
+counts and known payload bytes, and RPC p50/p95/p99 with sample counts. Worker
+payload bytes include transferred buffers; they are not an exact count of bytes
+deserialized by `node:v8`. Each profile's `.deserialize.json` sidecar separately
+records exact main-isolate `v8.deserialize` input bytes and call counts, grouped
+by the decoded root's `kind` (or `untyped`). The observer runs only inside profile
+captures and is restored afterward. Divide a group's bytes by the completed
+operation count to compare deserialize bytes per patch or turn. The generic
+entry-patch transfer also carries lifecycle and transcript work, so inspect these
+groups in a matched real-turn scenario before attributing its cost to the
+`sessions.patch` RPC. Inspect `unmeasuredMessages` and allocation caller stacks
+alongside them. `--capture-responses` also saves six complete mutation
+responses in `patch-responses.json` after measurement. Compare those goldens
+between revisions, normalizing only recorded timestamps and sandbox paths;
+fixture session identities and requested values are deterministic.
+
+Use the host's shared guard and exclusive measurement slot, run both sides
+concurrently with the same start time and interleaved CPUs, and swap sides for
+the second pair. Report absolute and relative paired deltas. Baselines differing
+by more than 5× or opposite-signed pair deltas are inconclusive; if such a metric
+gates, run a third pair and decide on the absolute mean. A p95 requires 200
+samples per side and a p99 requires 1,000. Major GC tails are context below 50
+collections per side. Report each side's maximum GC pause; per-pause tails are
+context when collection counts fall at least 20% without increased total GC time,
+unless the candidate maximum exceeds the greater of 50 ms or twice the baseline
+maximum. Gate on total GC time per patch, promotion, and eligible event-loop
+p99. Reject a mean paired regression of at least 20%, or at least 10% in both
+pairs, subject to those sample-count and inconclusive-result rules.
 
 Every measured scenario records per-method request-to-response p50/p99, call rate,
 and uncompressed wire response bytes. Transcript samples also report
@@ -2293,14 +2424,6 @@ and sandbox paths. Capture remains
 opt-in; the additional requests do not warm the measured workload.
 For `sessions.list` response comparisons, `--capture-responses` can run without
 allocation or CPU profiling.
-
-For a bounded owner probe without a Gateway, run
-`node --import ./scripts/tsx.mjs scripts/perf/session-list-order-measure.ts`.
-It reports five sampled allocation/thread-CPU observations for preparation per row
-and warm top-200 sorting over 5,000 rows, plus the selected keys for all three sorts.
-Use `--count-work` in a separate process for exact comparator, pin, activity, and
-key-normalization call counts. That pass enables coverage before loading the owner
-and excludes performance measurements. Run the same script on both revisions.
 
 For profile-reference filtering over 5,000 prepared sessions, run:
 
