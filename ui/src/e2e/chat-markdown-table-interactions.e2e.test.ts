@@ -141,6 +141,10 @@ ${auditMarkdownTable}`,
       })
       .toBe(true);
     await page.getByRole("button", { name: "Close Files" }).click();
+    await waitForLayoutSettled(
+      page,
+      '.chat-thread, [data-entry-id="wrapping-table"] .markdown-table',
+    );
     await expand.click();
     const dialog = page.locator(".markdown-table-dialog");
     await dialog.waitFor({ state: "visible" });
