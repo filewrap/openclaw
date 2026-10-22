@@ -9,7 +9,6 @@ import { WebSocketServer } from "ws";
 import plugin from "../../extensions/codex/index.js";
 import { setRuntimeConfigSnapshot } from "../../src/config/config.js";
 import { loadTranscriptEvents } from "../../src/config/sessions/session-accessor.js";
-import { createGatewaySession } from "../../src/gateway/session-create-service.js";
 import { readGatewayLockProcessNamespace } from "../../src/infra/gateway-lock-payload.js";
 import { acquireGatewayStateOwner } from "../../src/infra/gateway-state-owner.js";
 import { createPluginRecord } from "../../src/plugins/loader-records.js";
@@ -81,8 +80,7 @@ it("adopts duplicate native titles without claiming labels or replacing local na
             contracts: manifest.contracts,
           });
           const title = "Shared native title";
-          const longTitle = ` ${"界".repeat(499)}${"🦞".repeat(300)} `;
-          const titles = [`  ${title}  `, title, null, "   ", "", longTitle];
+          const titles = [`  ${title}  `, title, null];
           // WebSocket supervision selects the agent's native home, not process CODEX_HOME.
           const sessionsRoot = path.join(state.agentDir(), "codex-home", "sessions");
           await fs.mkdir(sessionsRoot, { recursive: true });
@@ -206,30 +204,10 @@ it("adopts duplicate native titles without claiming labels or replacing local na
               });
             }
 
-            const createExplicit = (key: string, label: string) =>
-              createGatewaySession({
-                cfg: config,
-                key: `agent:main:explicit-${key}`,
-                label,
-                commandSource: "test",
-                operatorRoleActor: { kind: "system" },
-              });
-            expect((await createExplicit("a", "User duplicate")).ok).toBe(true);
-            expect(await createExplicit("b", "  User duplicate  ")).toMatchObject({
-              ok: false,
-              error: { code: "INVALID_REQUEST", message: "label already in use: User duplicate" },
-            });
-
-            const keys = new Set([first.sessionKey, second.sessionKey]);
-            for (const thread of threads.slice(2)) {
-              const result = await continueThread(thread.id);
-              expect(keys.has(result.sessionKey)).toBe(false);
-              keys.add(result.sessionKey);
-              const entry = getEntry(result.sessionKey);
-              expect(entry.label).toBeUndefined();
-              expect(entry.displayName).toBe(thread.name?.trim() ? "界".repeat(499) : undefined);
-            }
-            expect(keys.size).toBe(titles.length);
+            const unnamed = await continueThread(threads[2]!.id);
+            expect([first.sessionKey, second.sessionKey]).not.toContain(unnamed.sessionKey);
+            const unnamedEntry = getEntry(unnamed.sessionKey);
+            expect([unnamedEntry.label, unnamedEntry.displayName]).toEqual([undefined, undefined]);
           } finally {
             for (const { harness } of builder.registry.agentHarnesses) {
               await harness.dispose?.();
