@@ -241,7 +241,7 @@ export function withLocalWorkspaceStore<T>(
                         type: "localWorkspace.manifest",
                         input: { id: params.worktreeId, revision: previous.revision, action },
                       },
-                      { context, current: true, live: true },
+                      { context, current: true, live: true, signal: lease.signal },
                     );
                     assertCurrent();
                     if (!result) {

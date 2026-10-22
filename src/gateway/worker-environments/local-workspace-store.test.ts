@@ -19,6 +19,7 @@ import {
 } from "../../state/openclaw-state-db.js";
 import { withOpenClawStateLeaseAsync } from "../../state/openclaw-state-lease.js";
 import type { OpenClawStateLeaseIdentity } from "../../state/openclaw-state-lease.types.js";
+import * as stateRead from "../../state/openclaw-state-read-operation.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import * as stateWorker from "../../state/openclaw-state-worker-store.js";
 import {
@@ -161,6 +162,39 @@ it("preserves the acknowledged row when a stale revision conflicts", async () =>
   expect(retainedGuard).toThrow();
   expect(await readLocalWorkspaceProjection(worktreeId, env)).toEqual(committed);
   expect(committed).toMatchObject({ revision: 1, baseline_ref: "sha256:accepted" });
+});
+
+it("cancels an accepted manifest read when the workspace lease ends", async () => {
+  const controller = new AbortController();
+  const started = Promise.withResolvers<AbortSignal>();
+  const completion = Promise.withResolvers<never>();
+  const startRead = stateRead.startOpenClawStateReadOperation;
+  vi.spyOn(stateRead, "startOpenClawStateReadOperation").mockImplementation(
+    (command, selection) => {
+      if (command.type !== "localWorkspace.manifest") {
+        return startRead(command, selection);
+      }
+      started.resolve(selection.signal);
+      return completion.promise;
+    },
+  );
+  const worktreeId = randomUUID();
+  const reason = new Error("workspace lease cancelled during manifest read");
+  const outcome = withLocalWorkspaceStore(
+    { worktreeId, env, signal: controller.signal },
+    async (store) => {
+      const row = await store.create(localWorkspaceProjectionFixture(worktreeId, root));
+      await store.manifest(row, { kind: "materialize" });
+    },
+  ).catch((error: unknown) => error);
+  const readSignal = await started.promise;
+  controller.abort(reason);
+  try {
+    expect(readSignal.aborted).toBe(true);
+  } finally {
+    completion.reject(reason);
+    expect(await outcome).toMatchObject({ code: "OPENCLAW_STATE_LEASE_ABORTED" });
+  }
 });
 
 it("accepts manifest nodes and checkpoint headers atomically and preserves them on rollback", async () => {
