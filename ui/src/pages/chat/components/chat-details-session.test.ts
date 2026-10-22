@@ -138,7 +138,9 @@ it("keeps compaction busy until the owning request settles and uses the current 
   );
   const element = view.container.querySelector("openclaw-chat-context-panel")!;
   await element.updateComplete;
-  await waitForSolid(() => expect(element.querySelector(".chat-context__compact")).not.toBeNull());
+  await waitForSolid(() =>
+    expect(element.querySelector<HTMLButtonElement>(".chat-context__compact")?.disabled).toBe(false),
+  );
   const button = element.querySelector<HTMLButtonElement>(".chat-context__compact")!;
   try {
     button.click();

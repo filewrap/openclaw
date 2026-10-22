@@ -271,9 +271,6 @@
     .chat-pr__number,
     .chat-pr__state,
     .chat-pr__stale,
-    .chat-details__context-budget,
-    .chat-details__context-budget strong,
-    .chat-details__stats,
     .chat-context__tokens,
     .chat-context__percent,
     .chat-context__label small,
@@ -396,12 +393,7 @@
 
 .chat-details
   .chat-details-desktop-body
-  :is(
-    .task-progress-details__count,
-    .chat-details__context-budget strong,
-    .chat-context__tokens,
-    .chat-context__percent
-  ) {
+  :is(.task-progress-details__count, .chat-context__tokens, .chat-context__percent) {
   color: var(--muted);
 }
 
