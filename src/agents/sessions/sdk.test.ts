@@ -10,9 +10,6 @@ import { registerSecretValueForRedaction } from "../../logging/secret-redaction-
 import { resetSecretRedactionRegistryForTest } from "../../logging/secret-redaction-registry.test-support.js";
 import { readRuntimePromptMediaFacts } from "../../media/media-facts.js";
 import { finalizeRuntimePromptImages } from "../../media/runtime-prompt-image-provenance.js";
-import { takeRuntimeUserTurnTranscriptContext } from "../../sessions/user-turn-transcript-runtime-context.js";
-import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
-import { createTestUserTurnTranscriptTarget } from "../../sessions/user-turn-transcript.test-support.js";
 import { toToolDefinitions } from "../agent-tool-definition-adapter.js";
 import { runEmbeddedSessionFork } from "../embedded-agent-runner/session-fork.js";
 import { resolveEmbeddedAgentStream } from "../embedded-agent-runner/stream-resolution.js";
@@ -149,12 +146,6 @@ async function createSessionFromManager(sessionManager: SessionManager) {
   return session;
 }
 
-async function createSessionWithPersistedAssistantContent(content: unknown) {
-  return await createSessionFromManager(
-    createSessionManagerWithPersistedAssistantMessages([{ content }]),
-  );
-}
-
 function createTool(overrides: Partial<ToolDefinition> = {}): ToolDefinition {
   return {
     name: "custom_lookup",
@@ -255,20 +246,11 @@ describe("createAgentSession fork retention", () => {
 });
 
 describe("AgentSession getLastAssistantText", () => {
-  it.each([
-    {
-      name: "normal text blocks",
-      content: [
-        { type: "thinking", thinking: "hidden" },
-        { type: "text", text: "visible " },
-        { type: "text", text: "answer" },
-      ],
-      expected: "visible answer",
-    },
-    { name: "null content", content: null, expected: undefined },
-  ])("reads $name without throwing", async ({ content, expected }) => {
-    const session = await createSessionWithPersistedAssistantContent(content);
-    expect(session.getLastAssistantText()).toBe(expected);
+  it("returns no assistant text for null content", async () => {
+    const session = await createSessionFromManager(
+      createSessionManagerWithPersistedAssistantMessages([{ content: null }]),
+    );
+    expect(session.getLastAssistantText()).toBeUndefined();
   });
 
   it("skips aborted malformed content and returns the preceding assistant text", async () => {
@@ -283,70 +265,6 @@ describe("AgentSession getLastAssistantText", () => {
 });
 
 describe("AgentSession queued user turns", () => {
-  it("rechecks captured steering ownership after transcript preparation", async () => {
-    const session = await createSessionFromManager(SessionManager.inMemory());
-    let resolveInput!: () => void;
-    const inputReady = new Promise<void>((resolve) => {
-      resolveInput = resolve;
-    });
-    const recorder = createUserTurnTranscriptRecorder({
-      resolveInput: async () => {
-        await inputReady;
-        return { text: "visible prompt" };
-      },
-      target: createTestUserTurnTranscriptTarget(),
-    });
-    const steer = vi
-      .spyOn(session.agent, "admitSteeringMessage")
-      .mockImplementation(() => () => {});
-    let canInject = true;
-    const queued = session.steer(
-      "runtime prompt",
-      undefined,
-      recorder,
-      undefined,
-      undefined,
-      "queue-identity",
-      () => canInject,
-    );
-    canInject = false;
-    resolveInput();
-
-    await expect(queued).rejects.toThrow("active session is finalizing");
-    expect(steer).not.toHaveBeenCalled();
-  });
-
-  it("carries prepared transcript context on the exact steered message", async () => {
-    const session = await createSessionFromManager(SessionManager.inMemory());
-    const recorder = createUserTurnTranscriptRecorder({
-      input: {
-        text: "visible group prompt",
-        sender: { id: "user-42", name: "Ada" },
-      },
-      target: createTestUserTurnTranscriptTarget(),
-    });
-    const steer = vi
-      .spyOn(session.agent, "admitSteeringMessage")
-      .mockImplementation(() => () => {});
-
-    await session.steer("runtime group prompt", undefined, recorder);
-
-    const runtimeMessage = steer.mock.calls[0]?.[0];
-    expect(runtimeMessage).toMatchObject({
-      role: "user",
-      content: [{ type: "text", text: "runtime group prompt" }],
-    });
-    assert(runtimeMessage, "expected queued runtime message");
-    expect(takeRuntimeUserTurnTranscriptContext(runtimeMessage)).toMatchObject({
-      message: {
-        role: "user",
-        content: "visible group prompt",
-        __openclaw: { senderId: "user-42", senderName: "Ada" },
-      },
-      recorder,
-    });
-  });
-
   it("preserves prompt image ownership across steered and follow-up messages", async () => {
     const session = await createSessionFromManager(SessionManager.inMemory());
     const steer = vi

@@ -2,7 +2,7 @@ import { access, mkdir, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createAssistantMessageEventStream } from "openclaw/plugin-sdk/llm";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { getRuntimeConfig } from "../../config/config.js";
 import { setRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import {
@@ -223,19 +223,14 @@ describe("SDK credential migration", () => {
           maxTokens: 1000,
         });
         const runtimeConfig = getRuntimeConfig();
-        const { session } = await createAgentSession({
-          systemPrompt: "Test session prompt",
+        const manager = SessionManager.inMemory();
+        const { session } = await createTestSession(manager, manager.getCwd(), {
           modelRegistry: ModelRegistry.create(
             AuthStorage.forAgent(agentDir, runtimeConfig),
             path.join(agentDir, "models.json"),
             { config: runtimeConfig },
           ),
           model,
-          thinkingLevel: "medium",
-          resourceLoader: await createResourceLoader(),
-          settingsManager: SettingsManager.inMemory(),
-          sessionManager: SessionManager.inMemory(),
-          tools: [],
         });
         const credential = "synthetic-fallback-key";
         const providerIo = vi.fn(() => createAssistantMessageEventStream());
@@ -486,10 +481,25 @@ async function createTestSession(
   });
 }
 
-function settled<T>(promise: Promise<T>) {
-  return promise.then(
-    (value) => ({ status: "fulfilled" as const, value }),
-    (error: unknown) => ({ status: "rejected" as const, error }),
+function registryFor(...models: (typeof testModel)[]) {
+  const auth = AuthStorage.inMemory();
+  auth.setRuntimeApiKey(testModel.provider, "synthetic-sdk-key");
+  const registry = ModelRegistry.inMemory(auth);
+  registry.registerProvider(testModel.provider, {
+    api: testModel.api,
+    baseUrl: testModel.baseUrl,
+    models,
+  });
+  return registry;
+}
+
+async function rejectedSession(pending: ReturnType<typeof createTestSession>) {
+  return pending.then(
+    ({ session }) => {
+      session.dispose();
+      throw new Error("Expected SDK initialization to reject");
+    },
+    (error: unknown) => error,
   );
 }
 
@@ -586,67 +596,46 @@ it.each(["metadata", "context loading"] as const)(
               manager.setSessionTarget(replacement);
               return context;
             });
+      onTestFinished(() => intercepted.mockRestore());
       const model = {
         ...testModel,
         id: "sdk-metadata-fixture",
         reasoning: true,
-        contextWindow: 32_768,
-        maxTokens: 8_192,
       };
-      const authStorage = AuthStorage.inMemory();
-      authStorage.setRuntimeApiKey(model.provider, "synthetic-sdk-key");
-      const modelRegistry = ModelRegistry.inMemory(authStorage);
-      modelRegistry.registerProvider(model.provider, {
-        api: model.api,
-        baseUrl: model.baseUrl,
-        models: [model],
-      });
       expect(getOwnedSessionTranscriptWriterFence()).toBeUndefined();
 
-      const outcome = await settled(
+      const error = await rejectedSession(
         createTestSession(manager, state.workspaceDir, {
           model,
           thinkingLevel: "high",
-          modelRegistry,
+          modelRegistry: registryFor(model),
           settingsManager: SettingsManager.inMemory({
             compaction: { enabled: false },
             retry: { enabled: false },
           }),
         }),
       );
-      try {
-        expect(intercepted).toHaveBeenCalledOnce();
-        expect.soft(await loadTranscriptEvents(replacement)).toEqual(replacementBefore);
-        expect.soft(outcome.status).toBe("rejected");
-        if (after === "context loading") {
-          expect(await loadTranscriptEvents(original)).toEqual(originalBefore);
-          if (outcome.status === "rejected") {
-            expect(outcome.error).toBeInstanceOf(SessionTranscriptWriterClaimReboundError);
-            expect(outcome.error).not.toBeInstanceOf(SessionMetadataCommittedError);
-            expect(hasModelFallbackStop(outcome.error)).toBe(false);
-          }
-          return;
-        }
+      expect(intercepted).toHaveBeenCalledOnce();
+      expect.soft(await loadTranscriptEvents(replacement)).toEqual(replacementBefore);
+      if (after === "context loading") {
+        expect(await loadTranscriptEvents(original)).toEqual(originalBefore);
+        expect(error).toBeInstanceOf(SessionTranscriptWriterClaimReboundError);
+        expect(error).not.toBeInstanceOf(SessionMetadataCommittedError);
+        expect(hasModelFallbackStop(error)).toBe(false);
+      } else {
         expect(completed.entry).toBeDefined();
         expect(completed.records).toHaveLength(3);
         expect(await loadTranscriptEvents(original)).toEqual(completed.records);
-        if (outcome.status === "rejected") {
-          expect(outcome.error).toBeInstanceOf(SessionMetadataCommittedError);
-          expect(outcome.error).toMatchObject({
-            committedEntry: completed.entry,
-            committedTarget: original,
-            committedVersion: {
-              generation: completed.watermark?.generation,
-              rawSeq: completed.watermark?.maxSeq,
-            },
-          });
-          expect(hasModelFallbackStop(outcome.error)).toBe(true);
-        }
-      } finally {
-        intercepted.mockRestore();
-        if (outcome.status === "fulfilled") {
-          outcome.value.session.dispose();
-        }
+        expect(error).toBeInstanceOf(SessionMetadataCommittedError);
+        expect(error).toMatchObject({
+          committedEntry: completed.entry,
+          committedTarget: original,
+          committedVersion: {
+            generation: completed.watermark?.generation,
+            rawSeq: completed.watermark?.maxSeq,
+          },
+        });
+        expect(hasModelFallbackStop(error)).toBe(true);
       }
     });
   },
@@ -691,49 +680,45 @@ it.each([
       if (timing === "before") {
         select();
       }
-      const pending = settled(
-        createTestSession(manager, state.workspaceDir, { thinkingLevel: "off" }),
-      );
+      const pending = createTestSession(manager, state.workspaceDir, { thinkingLevel: "off" });
+      void pending.catch(() => {});
       try {
         if (timing === "during") {
           const reachedReader = await Promise.race([
             entered.promise.then(() => true),
-            pending.then(() => false),
+            pending.then(
+              () => false,
+              () => false,
+            ),
           ]);
           expect(reachedReader, "SDK history completed before the reader pause").toBe(true);
           select();
           release.resolve();
         }
-        const outcome = await pending;
         if (timing === "during") {
-          expect(outcome.status).toBe("rejected");
-          if (outcome.status === "rejected") {
-            expect(String(outcome.error)).toContain("changed during initial context read");
-          }
+          await expect(pending).rejects.toThrow("changed during initial context read");
           expect(manager.getLeafId()).toBe(selection === "branch" ? firstId : null);
           expect(await loadTranscriptEvents(target)).toEqual(before);
         } else {
-          expect(outcome.status).toBe("fulfilled");
-          if (outcome.status === "fulfilled") {
-            const expected = selection === "branch" ? [first] : [];
-            expect(outcome.value.session.messages).toEqual(expected);
-            const next = {
-              role: "user" as const,
-              content: "Continue selected branch",
-              timestamp: 3,
-            };
-            manager.appendMessage(next);
-            expect(manager.buildSessionContext().messages).toEqual([...expected, next]);
-            expect((await loadTranscriptEvents(target)).slice(0, before.length)).toEqual(before);
-          }
+          const { session } = await pending;
+          const expected = selection === "branch" ? [first] : [];
+          expect(session.messages).toEqual(expected);
+          const next = {
+            role: "user" as const,
+            content: "Continue selected branch",
+            timestamp: 3,
+          };
+          manager.appendMessage(next);
+          expect(manager.buildSessionContext().messages).toEqual([...expected, next]);
+          expect((await loadTranscriptEvents(target)).slice(0, before.length)).toEqual(before);
         }
       } finally {
         release.resolve();
         intercepted?.mockRestore();
-        const outcome = await pending;
-        if (outcome.status === "fulfilled") {
-          outcome.value.session.dispose();
-        }
+        await pending.then(
+          ({ session }) => session.dispose(),
+          () => {},
+        );
       }
     });
   },
@@ -947,18 +932,9 @@ it.each(["SDK initialization", "model transition"] as const)(
           ...testModel,
           id: "cwd-reasoning",
           reasoning: true,
-          contextWindow: 32_768,
-          maxTokens: 8_192,
         };
         const plainModel = { ...reasoningModel, id: "cwd-plain", reasoning: false };
-        const authStorage = AuthStorage.inMemory();
-        authStorage.setRuntimeApiKey(testModel.provider, "synthetic-cwd-key");
-        const modelRegistry = ModelRegistry.inMemory(authStorage);
-        modelRegistry.registerProvider(testModel.provider, {
-          api: testModel.api,
-          baseUrl: testModel.baseUrl,
-          models: [reasoningModel, plainModel],
-        });
+        const modelRegistry = registryFor(reasoningModel, plainModel);
         const create = async () =>
           createTestSession(manager, firstDir, {
             model: reasoningModel,

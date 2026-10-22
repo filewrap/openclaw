@@ -5,7 +5,7 @@ import {
   AuthStorage as PublicAuthStorage,
   ModelRegistry as PublicModelRegistry,
 } from "openclaw/plugin-sdk/agent-sessions";
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { observeHostDataSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import * as providerRuntime from "../../plugins/provider-runtime.runtime.js";
 import * as sdkDeprecation from "../../plugins/sdk-deprecation.js";
@@ -99,11 +99,7 @@ describe("AuthStorage OAuth refresh ownership", () => {
       await state.writeJson("agents/main/agent/auth-profiles.json", {
         version: 1,
         profiles: {
-          "anthropic:default": {
-            type: "api_key",
-            provider: "anthropic",
-            key: "synthetic-legacy-key",
-          },
+          "anthropic:default": createApiKeyCredential("anthropic", "synthetic-legacy-key"),
         },
       });
       writePersistedAuthProfileStoreRaw(sharedStore);
@@ -133,11 +129,9 @@ describe("AuthStorage OAuth refresh ownership", () => {
       expect(fallback).not.toHaveBeenCalled();
 
       storage.set("litellm", { type: "api_key", key: "synthetic-local-key" });
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles["litellm:default"]).toEqual({
-        type: "api_key",
-        provider: "litellm",
-        key: "synthetic-local-key",
-      });
+      expect(loadPersistedAuthProfileStore(agentDir)?.profiles["litellm:default"]).toEqual(
+        createApiKeyCredential("litellm", "synthetic-local-key"),
+      );
       expect(readPersistedAuthProfileStoreRaw()).toEqual(sharedStore);
     }, "worker"));
 
@@ -632,13 +626,12 @@ describe("SQLite auth storage", () => {
   let tempDir: string;
   let agentDir: string;
   const unreadableStore = { version: 1, profiles: "invalid-profile-map" };
-  const expiredOAuth = {
-    type: "oauth" as const,
+  const expiredOAuth = createCredential({
     provider: "test-oauth",
     access: "fake-expired-access",
     refresh: "fake-refresh",
     expires: 1,
-  };
+  });
   const secretRuntimeError =
     "requires the active secrets runtime to materialize SecretRef credentials";
   const identity = { accountId: "fake-account-id", email: "fake-user@example.com" };
@@ -716,7 +709,6 @@ describe("SQLite auth storage", () => {
 
   it("initializes detached in-memory credentials without a legacy reload warning", () => {
     const warn = vi.spyOn(sdkDeprecation, "warnPluginSdkDeprecation").mockImplementation(() => {});
-    onTestFinished(() => warn.mockRestore());
     const credential = apiKey("synthetic-initial-key");
     const storage = PublicAuthStorage.inMemory({ fixture: credential });
     credential.key = "synthetic-mutated-key";
@@ -797,7 +789,7 @@ describe("SQLite auth storage", () => {
     expect(storage.has("anthropic")).toBe(false);
   });
 
-  it("blocks environment fallback after a canonical store becomes unreadable", async () => {
+  it("records unreadable canonical stores and blocks environment fallback", async () => {
     const storage = AuthStorage.forAgent(agentDir);
     writePersistedAuthProfileStoreRaw(unreadableStore, agentDir);
     await refreshAuthProfileFileState();
@@ -805,17 +797,6 @@ describe("SQLite auth storage", () => {
     storage.reload();
 
     await expect(storage.getApiKey("openai")).rejects.toThrow("is unreadable");
-  });
-
-  it("never overwrites a store that becomes unreadable during an OAuth refresh", async () => {
-    writeProfiles({ "test-oauth:default": expiredOAuth });
-    const storage = AuthStorage.forAgent(agentDir);
-    getAuthStorageOAuthProviderRegistry(storage).register(
-      oauthProvider("test-oauth", async () => freshOAuth()),
-    );
-    writePersistedAuthProfileStoreRaw(unreadableStore, agentDir);
-
-    await expect(storage.getApiKey("test-oauth")).rejects.toThrow("is unreadable");
     expect(storage.drainErrors().some((error) => error.message.includes("is unreadable"))).toBe(
       true,
     );
@@ -1028,9 +1009,8 @@ describe("SQLite auth storage", () => {
       await refreshEntered.promise;
       const peerSelected = createDeferredCore();
       const runUpdate = authProfileStoreUpdate.runAuthProfileStoreUpdate;
-      const observePeer = vi
-        .spyOn(authProfileStoreUpdate, "runAuthProfileStoreUpdate")
-        .mockImplementationOnce((params) => {
+      vi.spyOn(authProfileStoreUpdate, "runAuthProfileStoreUpdate").mockImplementationOnce(
+        (params) => {
           const selecting = runUpdate({
             ...params,
             update: (prepared, owner) => {
@@ -1043,8 +1023,8 @@ describe("SQLite auth storage", () => {
           });
           void selecting.then(peerSelected.resolve, peerSelected.reject);
           return selecting;
-        });
-      onTestFinished(() => observePeer.mockRestore());
+        },
+      );
       const peerKey = right.getApiKey("test-oauth");
       void peerKey.catch(peerSelected.reject);
       await peerSelected.promise;

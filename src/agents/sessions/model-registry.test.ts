@@ -956,20 +956,17 @@ describe("ModelRegistry no-auth", () => {
         },
       };
       const auth = await registry.getApiKeyAndHeaders(requestModel);
-      expect(auth.ok).toBe(true);
-      if (!auth.ok) {
-        throw new Error(auth.error);
-      }
-      expect(auth.apiKey).toBe(CUSTOM_LOCAL_AUTH_MARKER);
       expect(getApiKey).not.toHaveBeenCalled();
       // sdk.no-auth.test.ts owns the OpenAI wire proof after caller-header merging.
-      expect(auth.headers).toEqual({
-        Authorization: null,
-        authorization: null,
-        "X-Provider": "provider",
-        "X-Model": "model",
-        "X-Runtime": "runtime",
-      });
+      expect(auth).toEqual(
+        authResult(CUSTOM_LOCAL_AUTH_MARKER, {
+          Authorization: null,
+          authorization: null,
+          "X-Provider": "provider",
+          "X-Model": "model",
+          "X-Runtime": "runtime",
+        }),
+      );
     },
   );
 

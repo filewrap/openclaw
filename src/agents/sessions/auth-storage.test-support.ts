@@ -83,7 +83,6 @@ function createPublicationCredential(overrides: Partial<OAuthCredential> = {}): 
 }
 
 export async function createSqliteAuthRefreshFixture(agentDir: string) {
-  await fs.mkdir(agentDir, { recursive: true });
   const providerId = "test-oauth";
   const profileId = `${providerId}:default`;
   const initial = createPublicationCredential({ expires: 1 });
