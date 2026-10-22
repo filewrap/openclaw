@@ -117,6 +117,36 @@ describe("ordinary automation scratch editor", () => {
     });
   });
 
+  it.each([
+    { action: "Save scratch", content: "Unsaved draft", message: "Scratch saved." },
+    { action: "Remove scratch", content: null, message: "Scratch removed." },
+  ])("retires a failed reload when $action succeeds", async ({ action, content, message }) => {
+    const request = vi
+      .fn<GatewayBrowserClient["request"]>()
+      .mockResolvedValueOnce(snapshot("Saved notes", 1))
+      .mockRejectedValueOnce(new Error("Synthetic read unavailable"))
+      .mockResolvedValueOnce({ ok: true, ...snapshot(content, 2) });
+    const { editor } = await mount(request);
+    await click(editor, "Load scratch");
+    const textarea = editor.querySelector("textarea")!;
+    textarea.value = "Unsaved draft";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    await click(editor, "Reload scratch");
+    await waitForSolid(() => {
+      expect(editor.textContent).toContain("Synthetic read unavailable");
+      expect(getButtonByText(editor, action).disabled).toBe(false);
+    });
+    expect(textarea.value).toBe("Unsaved draft");
+    await click(editor, action);
+    await waitForSolid(() => {
+      expect(editor.textContent).toContain(message);
+      expect(editor.textContent).not.toContain("Synthetic read unavailable");
+    });
+    expect(editor.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(textarea.value).toBe(content ?? "");
+  });
+
   it("preserves a conflicting draft until reload and distinguishes empty scratch from removal", async () => {
     const request = vi
       .fn<GatewayBrowserClient["request"]>()

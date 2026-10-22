@@ -123,6 +123,9 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
     }
     // Guard duplicate admission synchronously; signals publish on the next Solid flush.
     pending = true;
+    if (saving) {
+      setReadReceipt(undefined);
+    }
     setView((state) => {
       state.busy = saving;
       state.message = "";
@@ -231,9 +234,7 @@ function ScratchFields(props: { scope: Scope; connected: boolean; isCurrent: () 
             <button
               type="button"
               class="btn btn--sm"
-              disabled={
-                disabled() || view.redacted || sizeBytes() > (view.snapshot?.maxBytes ?? 0)
-              }
+              disabled={disabled() || view.redacted || sizeBytes() > (view.snapshot?.maxBytes ?? 0)}
               onClick={() => void request(view.draft)}
             >
               {t("cron.scratch.save")}
