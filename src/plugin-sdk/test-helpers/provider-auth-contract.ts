@@ -168,67 +168,45 @@ export function describeOpenAICodexProviderAuthContract(
       return requireProvider(await registerProviders(openAIPlugin), "openai");
     }
 
-    it("keeps OAuth auth results provider-owned", async () => {
-      await expectOAuthProfile({
+    const stableProfile = (identity: string) =>
+      `openai:id-${Buffer.from(identity, "utf8").toString("base64url")}`;
+    it.each([
+      {
+        name: "keeps OAuth auth results provider-owned",
         profileId: "openai:user@example.com",
         access: "access-token",
         email: "user@example.com",
         loginEmail: "user@example.com",
-      });
-    });
-
-    it("backfills OAuth email from the JWT profile claim", async () => {
-      await expectOAuthProfile({
+      },
+      {
+        name: "backfills OAuth email from the JWT profile claim",
         access: createJwt({ "https://api.openai.com/profile": { email: "jwt-user@example.com" } }),
         profileId: "openai:jwt-user@example.com",
         email: "jwt-user@example.com",
-      });
-    });
-
-    it("uses a stable fallback id when JWT email is missing", async () => {
-      const access = createJwt({
-        "https://api.openai.com/auth": {
-          chatgpt_account_user_id: "user-123__acct-456",
-        },
-      });
-      const expectedStableId = Buffer.from("user-123__acct-456", "utf8").toString("base64url");
-      await expectOAuthProfile({
-        access,
-        profileId: `openai:id-${expectedStableId}`,
-      });
-    });
-
-    it("uses iss and sub to build a stable fallback id when auth claims are missing", async () => {
-      const access = createJwt({
-        iss: "https://accounts.openai.com",
-        sub: "user-abc",
-      });
-      const expectedStableId = Buffer.from("https://accounts.openai.com|user-abc").toString(
-        "base64url",
-      );
-      await expectOAuthProfile({
-        access,
-        profileId: `openai:id-${expectedStableId}`,
-      });
-    });
-
-    it("uses sub alone to build a stable fallback id when iss is missing", async () => {
-      const access = createJwt({
-        sub: "user-abc",
-      });
-      const expectedStableId = Buffer.from("user-abc").toString("base64url");
-      await expectOAuthProfile({
-        access,
-        profileId: `openai:id-${expectedStableId}`,
-      });
-    });
-
-    it("falls back to the default profile when JWT parsing yields no identity", async () => {
-      await expectOAuthProfile({
+      },
+      {
+        name: "uses a stable fallback id when JWT email is missing",
+        access: createJwt({
+          "https://api.openai.com/auth": { chatgpt_account_user_id: "user-123__acct-456" },
+        }),
+        profileId: stableProfile("user-123__acct-456"),
+      },
+      {
+        name: "uses iss and sub to build a stable fallback id when auth claims are missing",
+        access: createJwt({ iss: "https://accounts.openai.com", sub: "user-abc" }),
+        profileId: stableProfile("https://accounts.openai.com|user-abc"),
+      },
+      {
+        name: "uses sub alone to build a stable fallback id when iss is missing",
+        access: createJwt({ sub: "user-abc" }),
+        profileId: stableProfile("user-abc"),
+      },
+      {
+        name: "falls back to the default profile when JWT parsing yields no identity",
         access: "not-a-jwt-token",
         profileId: "openai:default",
-      });
-    });
+      },
+    ])("$name", expectOAuthProfile);
 
     it("surfaces OAuth failures instead of silently succeeding with no profiles", async () => {
       const provider = await getProvider();
@@ -316,22 +294,9 @@ export function describeGithubCopilotProviderAuthContract(
             : String(input);
     }
 
-    function stubGitHubCatalogFetch() {
-      const fetchMock = vi.fn(async (input: unknown) => {
-        const target = resolveFetchTarget(input);
-        const response = buildCopilotSetupResponse(target);
-        if (response) {
-          return response;
-        }
-        throw new Error(`unexpected fetch in github-copilot catalog stub: ${target}`);
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      return fetchMock;
-    }
-
     it("keeps existing device auth results provider-owned", async () => {
       const provider = await getProvider();
-      stubGitHubCatalogFetch();
+      stubGitHubDeviceFlowFetch();
       state.authStore.profiles["github-copilot:github"] = {
         type: "token",
         provider: "github-copilot",
@@ -356,11 +321,11 @@ export function describeGithubCopilotProviderAuthContract(
     });
 
     function stubGitHubDeviceFlowFetch(
-      outcome: { accessToken: string } | { error: "access_denied" | "expired_token" },
+      outcome?: { accessToken: string } | { error: "access_denied" | "expired_token" },
     ) {
       const fetchMock = vi.fn(async (input: unknown) => {
         const target = resolveFetchTarget(input);
-        if (target === "https://github.com/login/device/code") {
+        if (outcome && target === "https://github.com/login/device/code") {
           return Response.json({
             device_code: "device-code-stub",
             user_code: "ABCD-1234",
@@ -369,7 +334,7 @@ export function describeGithubCopilotProviderAuthContract(
             interval: 0,
           });
         }
-        if (target === "https://github.com/login/oauth/access_token") {
+        if (outcome && target === "https://github.com/login/oauth/access_token") {
           const body =
             "accessToken" in outcome
               ? { access_token: outcome.accessToken, token_type: "bearer" }
@@ -412,17 +377,12 @@ export function describeGithubCopilotProviderAuthContract(
     });
 
     it("keeps device auth results provider-owned", async () => {
-      const { result } = await runDeviceFlow({ accessToken: "github-device-token" });
+      const { result, ctx } = await runDeviceFlow({ accessToken: "github-device-token" });
 
       expect(result).toEqual({
         profiles: [copilotProfile("github-device-token", true)],
         defaultModel,
       });
-    });
-
-    it("uses the wizard prompter and openUrl hooks for the device code (no stdin/stdout)", async () => {
-      const { ctx } = await runDeviceFlow({ accessToken: "github-device-token" });
-
       expect(ctx.openUrl).toHaveBeenCalledWith("https://github.com/login/device");
       const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
       const codeNote = noteCalls.find(
@@ -439,23 +399,15 @@ export function describeGithubCopilotProviderAuthContract(
       });
     });
 
-    it("returns no profiles and notes cancellation when the user denies access", async () => {
-      const { result, ctx } = await runDeviceFlow({ error: "access_denied" });
-
+    it.each([
+      ["access_denied", "cancel"],
+      ["expired_token", "expired"],
+    ] as const)("returns no profiles and notes %s", async (error, note) => {
+      const { result, ctx } = await runDeviceFlow({ error });
       expect(result).toEqual({ profiles: [] });
       const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
       expect(
-        noteCalls.some(([msg]) => typeof msg === "string" && msg.toLowerCase().includes("cancel")),
-      ).toBe(true);
-    });
-
-    it("returns no profiles and notes expiry when the device code expires", async () => {
-      const { result, ctx } = await runDeviceFlow({ error: "expired_token" });
-
-      expect(result).toEqual({ profiles: [] });
-      const noteCalls = (ctx.prompter.note as ReturnType<typeof vi.fn>).mock.calls;
-      expect(
-        noteCalls.some(([msg]) => typeof msg === "string" && msg.toLowerCase().includes("expired")),
+        noteCalls.some(([msg]) => typeof msg === "string" && msg.toLowerCase().includes(note)),
       ).toBe(true);
     });
   });

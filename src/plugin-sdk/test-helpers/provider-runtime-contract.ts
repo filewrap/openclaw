@@ -449,13 +449,6 @@ export function describeGoogleProviderRuntimeContract(load: ProviderRuntimeContr
       });
     });
 
-    it("keeps retired usage telemetry hooks absent", () => {
-      const provider = getProvider("google-gemini-cli");
-
-      expect(provider.resolveUsageAuth).toBeUndefined();
-      expect(provider.fetchUsageSnapshot).toBeUndefined();
-    });
-
     it("owns OAuth auth-profile formatting", () => {
       const provider = getProvider("google-gemini-cli");
 

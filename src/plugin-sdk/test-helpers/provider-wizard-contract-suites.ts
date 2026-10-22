@@ -7,11 +7,14 @@ import type { ProviderAuthMethod } from "../plugin-entry.js";
 import type { ProviderPlugin } from "../provider-model-shared.js";
 
 function createAuthMethod(
-  params: Pick<ProviderAuthMethod, "id" | "label"> &
-    Partial<Pick<ProviderAuthMethod, "hint" | "wizard">>,
+  id: string,
+  label: string,
+  wizard?: ProviderAuthMethod["wizard"],
 ): ProviderAuthMethod {
   return {
-    ...params,
+    id,
+    label,
+    ...(wizard ? { wizard } : {}),
     kind: "api_key",
     run: async () => ({ profiles: [] }),
   };
@@ -22,28 +25,20 @@ const TEST_PROVIDERS: ProviderPlugin[] = [
     id: "alpha",
     label: "Alpha",
     auth: [
-      createAuthMethod({
-        id: "api-key",
-        label: "API key",
-        wizard: {
-          choiceLabel: "Alpha key",
-          choiceHint: "Use an API key",
-          groupId: "alpha",
-          groupLabel: "Alpha",
-          onboardingScopes: ["text-inference"],
-          modelTarget: "utility",
-        },
+      createAuthMethod("api-key", "API key", {
+        choiceLabel: "Alpha key",
+        choiceHint: "Use an API key",
+        groupId: "alpha",
+        groupLabel: "Alpha",
+        onboardingScopes: ["text-inference"],
+        modelTarget: "utility",
       }),
-      createAuthMethod({
-        id: "oauth",
-        label: "OAuth",
-        wizard: {
-          choiceId: "alpha-oauth",
-          choiceLabel: "Alpha OAuth",
-          groupId: "alpha",
-          groupLabel: "Alpha",
-          groupHint: "Recommended",
-        },
+      createAuthMethod("oauth", "OAuth", {
+        choiceId: "alpha-oauth",
+        choiceLabel: "Alpha OAuth",
+        groupId: "alpha",
+        groupLabel: "Alpha",
+        groupHint: "Recommended",
       }),
     ],
     wizard: {
@@ -57,7 +52,7 @@ const TEST_PROVIDERS: ProviderPlugin[] = [
   {
     id: "beta",
     label: "Beta",
-    auth: [createAuthMethod({ id: "token", label: "Token" })],
+    auth: [createAuthMethod("token", "Token")],
     wizard: {
       setup: {
         choiceLabel: "Beta setup",
@@ -72,10 +67,7 @@ const TEST_PROVIDERS: ProviderPlugin[] = [
   {
     id: "gamma",
     label: "Gamma",
-    auth: [
-      createAuthMethod({ id: "default", label: "Default auth" }),
-      createAuthMethod({ id: "alt", label: "Alt auth" }),
-    ],
+    auth: [createAuthMethod("default", "Default auth"), createAuthMethod("alt", "Alt auth")],
     wizard: {
       setup: {
         methodId: "alt",
