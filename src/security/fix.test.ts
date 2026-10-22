@@ -113,38 +113,23 @@ describe("security fix", () => {
     groupPolicy: "allowlist",
     accounts: { default: { groupPolicy: "allowlist" }, work: { groupPolicy: "allowlist" } },
   } as const;
-  it.each([
-    {
-      name: "tightens group policies after plugin fixes",
-      channels: rootChannels,
-      pluginChanges: ["channels.whatsapp.groupAllowFrom=pairing-store"],
-      result: {
-        changes: [
-          ...channelIds.map((id) => `channels.${id}.groupPolicy=open -> allowlist`),
-          "channels.whatsapp.groupAllowFrom=pairing-store",
-        ],
-      },
-    },
-    {
-      name: "converts and seeds per-account policies",
-      channels: accountChannels,
-      pluginChanges: ["channels.whatsapp.accounts.a1.groupAllowFrom=pairing-store"],
-      result: { ok: true },
-    },
-    {
-      name: "leaves already allowlisted accounts unseeded",
-      channels: () => ({ whatsapp: allowlisted }),
-      pluginChanges: [],
-      result: { configWritten: false, changes: [] },
-      unseeded: true,
-    },
-  ] satisfies Array<{
+  const rootSeedChange = "channels.whatsapp.groupAllowFrom=pairing-store";
+  const rootChanges = [
+    ...channelIds.map((id) => `channels.${id}.groupPolicy=open -> allowlist`),
+    rootSeedChange,
+  ];
+  it.each<{
     name: string;
     pluginChanges: string[];
     result: Partial<Awaited<ReturnType<typeof fixSecurityFootguns>>>;
     channels: (policy: "open" | "allowlist", seeded?: boolean) => OpenClawConfig["channels"];
-    unseeded?: boolean;
-  }>)("$name", async (scenario) => {
+    unseeded: boolean;
+  }>`
+    name                              | channels                             | pluginChanges                                                     | result                                   | unseeded
+    ${"hardens after plugin fixes"}   | ${rootChannels}                      | ${[rootSeedChange]}                                               | ${{ changes: rootChanges }}              | ${false}
+    ${"hardens account policies"}     | ${accountChannels}                   | ${["channels.whatsapp.accounts.a1.groupAllowFrom=pairing-store"]} | ${{ ok: true }}                          | ${false}
+    ${"preserves restricted holders"} | ${() => ({ whatsapp: allowlisted })} | ${[]}                                                             | ${{ configWritten: false, changes: [] }} | ${true}
+  `("$name", async (scenario) => {
     const originalChannels = scenario.channels("open");
     const { stateDir, configPath } = await createConfig("group-policy", {
       channels: originalChannels,
@@ -161,7 +146,7 @@ describe("security fix", () => {
     const cfg = JSON.parse(await fs.readFile(configPath, "utf-8")) as OpenClawConfig;
     expect(res).toMatchObject(scenario.result);
     expect(cfg.channels).toMatchObject(scenario.channels("allowlist", true));
-    if ("unseeded" in scenario) {
+    if (scenario.unseeded) {
       const whatsapp = expectDefined(cfg.channels?.whatsapp, "whatsapp");
       expect(whatsapp.groupAllowFrom).toBeUndefined();
       for (const id of ["default", "work"]) {

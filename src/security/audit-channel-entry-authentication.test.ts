@@ -30,6 +30,10 @@ const classifyEntryAuthentication = identityEntryAuthenticationClassifier({
 });
 
 type FixtureAccount = { allowFrom: Array<string | number>; dangerouslyAllowNameMatching?: boolean };
+const stableId = "123456789012345678";
+const name = "Alice Example";
+const inertCheckId = "channels.whatsapp.allowFrom.mutable_entries_inert";
+const cfg: OpenClawConfig = { session: { dmScope: "per-account-channel-peer" } };
 
 function createFixturePlugin(accounts: Record<string, FixtureAccount>): ChannelPlugin {
   const accountIds = Object.keys(accounts);
@@ -39,7 +43,6 @@ function createFixturePlugin(accounts: Record<string, FixtureAccount>): ChannelP
     commands: undefined,
     collectAuditFindings: undefined,
     resolveAccount: (_cfg, accountId) => ({
-      accountId: accountId ?? "default",
       config: accounts[accountId ?? "default"],
     }),
   });
@@ -64,11 +67,6 @@ function createFixturePlugin(accounts: Record<string, FixtureAccount>): ChannelP
 }
 
 describe("channel entry authentication audit", () => {
-  const stableId = "123456789012345678";
-  const name = "Alice Example";
-  const inertCheckId = "channels.whatsapp.allowFrom.mutable_entries_inert";
-  const cfg: OpenClawConfig = { session: { dmScope: "per-account-channel-peer" } };
-
   it.each([
     ["default policy", [name, stableId], undefined, 1],
     ["stable IDs only", [stableId], false, 0],
@@ -133,18 +131,12 @@ describe("channel entry authentication audit", () => {
   });
 
   it("warns when real WhatsApp and Slack channel accounts use mutable toolsBySender keys without leaking identifiers", async () => {
-    const { whatsappSetupPlugin } = await loadBundledPluginFacade<{
-      whatsappSetupPlugin: ChannelPlugin;
-    }>({
-      pluginId: "whatsapp",
-      artifactBasename: "api.js",
-    });
-    const { slackPlugin } = await loadBundledPluginFacade<{
-      slackPlugin: ChannelPlugin;
-    }>({
-      pluginId: "slack",
-      artifactBasename: "api.js",
-    });
+    const loadApi = <T extends object>(pluginId: string) =>
+      loadBundledPluginFacade<T>({ pluginId, artifactBasename: "api.js" });
+    const { whatsappSetupPlugin } = await loadApi<{ whatsappSetupPlugin: ChannelPlugin }>(
+      "whatsapp",
+    );
+    const { slackPlugin } = await loadApi<{ slackPlugin: ChannelPlugin }>("slack");
     const { runSecurityAuditCore } = await import("./audit.js");
     const { collectSecurityWarnings } = await import("../commands/doctor-security.js");
     const readOnlyPluginsModule = await import("../channels/plugins/read-only.js");
