@@ -25,11 +25,15 @@ function snapshot(): ChannelsStatusSnapshot {
 it("retains cached channels through retry and retires feedback with the connection", async () => {
   const failed = createDeferred<ChannelsStatusSnapshot>();
   const recovered = createDeferred<ChannelsStatusSnapshot>();
+  const invalidated = createDeferred<ChannelsStatusSnapshot>();
+  const followup = createDeferred<ChannelsStatusSnapshot>();
   const retired = createDeferred<ChannelsStatusSnapshot>();
   const responses = [
     Promise.resolve(snapshot()),
     failed.promise,
     recovered.promise,
+    invalidated.promise,
+    followup.promise,
     retired.promise,
   ];
   const fixture = createApplicationGateway();
@@ -109,6 +113,25 @@ it("retains cached channels through retry and retires feedback with the connecti
       expect(row?.querySelector(".settings-row__title")?.textContent).toBe("Discord recovered");
     });
     refresh().click();
+    const invalidatedRead = channels.state.channelsRead!;
+    fixture.publishEvent({ type: "event", event: "config.changed", payload: {} });
+    invalidated.resolve(snapshot());
+    await invalidatedRead.completion;
+    await waitForSolid(() => {
+      expect(refresh().disabled).toBe(true);
+      expect(refresh().textContent).toContain("Refreshing");
+      expect(mounted.container.contains(row!)).toBe(true);
+      expect(row?.querySelector(".settings-row__title")?.textContent).toBe("Discord");
+    });
+    followup.resolve({ ...snapshot(), channelLabels: { discord: "Configuration refreshed" } });
+    await pending;
+    await waitForSolid(() => {
+      expect(refresh().disabled).toBe(false);
+      expect(row?.querySelector(".settings-row__title")?.textContent).toBe(
+        "Configuration refreshed",
+      );
+    });
+    refresh().click();
     const retiredRefresh = pending;
     await waitForSolid(() => expect(refresh().disabled).toBe(true));
     fixture.publish({
@@ -134,6 +157,8 @@ it("retains cached channels through retry and retires feedback with the connecti
   } finally {
     failed.resolve(snapshot());
     recovered.resolve(snapshot());
+    invalidated.resolve(snapshot());
+    followup.resolve(snapshot());
     retired.resolve(snapshot());
     mounted.unmount();
     channels.dispose();
