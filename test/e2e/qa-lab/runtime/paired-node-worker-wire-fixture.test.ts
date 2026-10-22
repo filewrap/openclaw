@@ -219,7 +219,7 @@ it.each(["keyless", "keyed"] as const)("refreshes waits on %s notices", async (n
     expect(method).toBe("sessions.describe");
     return workspace(placements.get(key));
   });
-  keys.forEach(observe);
+  keys.forEach((key) => observe(key));
   await vi.advanceTimersByTimeAsync(0);
   expect(outcomes.size).toBe(0);
   placements.set(keys[0]!, false);
