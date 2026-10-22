@@ -144,6 +144,59 @@ suite.define(() => {
     },
   );
 
+  it("keeps native horizontal reading and copying after keyboard reveal", async () => {
+    await suite.withPage(
+      { ...desktop, permissions: ["clipboard-read", "clipboard-write"] },
+      async ({ page }) => {
+        const source = Array.from(
+          { length: 12 },
+          (_, index) =>
+            `const deploymentCheck${index} = "${"staging deployment verification ".repeat(6)}";`,
+        ).join("\n");
+        await installMockGateway(page, {
+          agentModel: "openai/gpt-4o",
+          models: [{ id: "gpt-4o", name: "gpt-4o", provider: "openai" }],
+          historyMessages: [
+            { role: "assistant", content: "```ts\n" + source + "\n```", timestamp: 2000 },
+          ],
+        });
+        await page.goto(`${suite.server.baseUrl}chat`);
+        const block = page.locator(".chat-thread .code-block-wrapper");
+        const viewport = block.locator(".code-block-viewport");
+        const copy = block.getByRole("button", { name: "Copy code", exact: true });
+        await copy.focus();
+        // The overflowing reading surface is a native tab stop before disclosure.
+        await page.keyboard.press("Tab");
+        expect(await viewport.evaluate((element) => element === document.activeElement)).toBe(true);
+        const scrolled = viewport.evaluate(
+          (element) =>
+            new Promise<void>((resolve) => {
+              element.addEventListener("scrollend", () => resolve(), { once: true });
+            }),
+        );
+        await page.keyboard.press("ArrowRight");
+        await scrolled;
+        const before = await viewport.evaluate((element) => element.scrollLeft);
+        expect(before).toBeGreaterThan(0);
+        await page.keyboard.press("Tab");
+        const expand = block.locator(".code-block-expand");
+        expect(await expand.evaluate((element) => element === document.activeElement)).toBe(true);
+        await page.keyboard.press("Enter");
+        await expand.waitFor({ state: "hidden" });
+        expect(await viewport.evaluate((element) => element === document.activeElement)).toBe(true);
+        expect(await viewport.evaluate((element) => element.scrollLeft)).toBe(before);
+        await page.keyboard.press("ArrowRight");
+        await expect
+          .poll(() => viewport.evaluate((element) => element.scrollLeft))
+          .toBeGreaterThan(before);
+        await page.keyboard.press("Shift+Tab");
+        expect(await copy.evaluate((element) => element === document.activeElement)).toBe(true);
+        await page.keyboard.press("Enter");
+        await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(source);
+      },
+    );
+  });
+
   it("retains code controls when a streaming fence closes", async () => {
     await suite.withPage(desktop, async ({ page }) => {
       const gateway = await installMockGateway(page);

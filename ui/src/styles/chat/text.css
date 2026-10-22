@@ -1137,7 +1137,9 @@
   overscroll-behavior-inline: contain;
 }
 
-.code-block-viewport :where(pre) {
+/* Outrank passive code and sidebar pre rules: the focused viewport must own
+   horizontal scrolling, not a nested pre that keyboard input cannot reach. */
+.code-block-wrapper .code-block-viewport pre {
   overflow: visible;
 }
 
