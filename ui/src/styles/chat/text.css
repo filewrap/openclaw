@@ -1236,12 +1236,14 @@
 }
 
 .code-block-expand:focus-visible,
+.code-block-viewport:focus-visible,
 .code-block-wrap:focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 
-.code-block-expand:focus-visible {
+.code-block-expand:focus-visible,
+.code-block-viewport:focus-visible {
   /* Keep the bottom edge inside the clipped code wrapper. */
   outline-offset: -2px;
 }
