@@ -98,9 +98,9 @@ it.each([
 });
 
 describe("applyFileBackedSessionStoreMaintenance", () => {
-  const baseMaintenance: Parameters<
-    typeof applyFileBackedSessionStoreMaintenance
-  >[0]["maintenanceConfig"] = {
+  const baseMaintenance: NonNullable<
+    Parameters<typeof applyFileBackedSessionStoreMaintenance>[0]["maintenanceConfig"]
+  > = {
     mode: "enforce" as const,
     pruneAfterMs: 30 * DAY_MS,
     maxEntries: 500,

@@ -54,9 +54,9 @@ const harnessInitial = (
   ...(pluginExtensions ? { pluginExtensions } : {}),
 });
 type Create = Parameters<PluginRuntime["agent"]["session"]["createSessionEntry"]>[0];
-type CreateOptions = Omit<Create, "cfg" | "key" | "initialEntry"> & {
-  initialEntry?: Create["initialEntry"];
-};
+type CreateOptions<T extends Create = Create> = T extends Create
+  ? Omit<T, "cfg" | "key" | "initialEntry"> & { initialEntry?: T["initialEntry"] }
+  : never;
 function sessionFixture(key: string) {
   const runtime = createRuntimeAgent();
   const storePath = runtime.session.resolveStorePath(undefined, { agentId: "main" });
