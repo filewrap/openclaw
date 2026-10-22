@@ -63,7 +63,7 @@ function QuestionCardContents(props: { panel: QuestionPanelProps; host: HTMLElem
               props.host.isConnected &&
               error() === failure &&
               props.panel.model.requestKey === requestKey;
-            setRecovery(
+            void setRecovery(
               retryStaleChunkReloadWhenReachable({ canReload: isCurrent }).then((reloading) => {
                 if (!reloading && isCurrent()) {
                   setAttempt((value) => value + 1);

@@ -10,11 +10,11 @@ export async function questionPanelIn(container: ParentNode): Promise<ChatQuesti
   }
   await card.updateComplete;
   const panel = await waitForSolid(() => {
-    const panel = card.querySelector<ChatQuestionPanel>("openclaw-chat-question-panel");
-    if (!panel) {
+    const loaded = card.querySelector<ChatQuestionPanel>("openclaw-chat-question-panel");
+    if (!loaded) {
       throw new Error("Expected a loaded question panel");
     }
-    return panel;
+    return loaded;
   });
   await panel.updateComplete;
   return panel;
