@@ -158,6 +158,8 @@ export async function executeLocalWorkspaceManifestRead(
       ...manifestDocument(
         Array.from(records.values(), ({ node }) => node).filter((node) => node.path !== ""),
         row.base_commit,
+        // Stored nodes already passed admission, including derived-looking build inputs.
+        [...buildCacheInputPaths(records.keys())],
       ),
     };
   }

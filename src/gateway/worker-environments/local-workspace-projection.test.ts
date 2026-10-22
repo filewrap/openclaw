@@ -838,7 +838,7 @@ it.each(["legacy decoder", "failed restore retry", "retention"] as const)(
   async (mode) => {
     const { restoreProvisionedFiles } = await import("../../agents/worktrees/provisioned-files.js");
     const { service, registry, retentionMs } = await archiveFixture([".env.allowed"]);
-    const originalInput = ".artifacts/build-cache-inputs/archived.json";
+    const originalInput = ".artifacts/build-cache-inputs/node_modules/archived.json";
     await fs.mkdir(path.dirname(path.join(canonical, originalInput)), { recursive: true });
     await writeText(canonical, originalInput, "original archived input\n");
     await git(canonical, "add", "--force", "--", originalInput);
