@@ -1,34 +1,16 @@
 import { writeFile } from "node:fs/promises";
-import http from "node:http";
+import type http from "node:http";
 import { join } from "node:path";
 import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { containerRpcRequest } from "./client-container.js";
+import { useSignalHttpServer } from "./client.test-support.js";
 
-const running: http.Server[] = [];
+const startServer = useSignalHttpServer();
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const params = { account: "+15550001111", recipient: ["+15551234567"], message: "Photo" };
-async function startServer(handler: http.RequestListener) {
-  const server = http.createServer(handler);
-  running.push(server);
-  server.on("clientError", () => {});
-  await new Promise<void>((resolve) => {
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("expected TCP address");
-  }
-  return `http://127.0.0.1:${address.port}`;
-}
-afterEach(async () => {
+afterEach(() => {
   vi.restoreAllMocks();
-  for (const server of running.splice(0)) {
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => {
-      server.close(() => resolve());
-    });
-  }
 });
 function accept(res: http.ServerResponse) {
   res.writeHead(201, { "content-type": "application/json" });

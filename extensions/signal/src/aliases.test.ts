@@ -27,18 +27,12 @@ describe("resolveSignalTarget aliases", () => {
       toString: group,
     });
 
-    expect(resolveSignalTarget({ cfg, input: "constructor" })).toEqual({
-      kind: "user",
-      to: "+15551234567",
-      alias: "constructor",
-      source: "alias",
-    });
-    expect(resolveSignalTarget({ cfg, input: "toString" })).toEqual({
-      kind: "group",
-      to: group,
-      alias: "tostring",
-      source: "alias",
-    });
+    expect(["constructor", "toString"].map((input) => resolveSignalTarget({ cfg, input }))).toEqual(
+      [
+        { kind: "user", to: "+15551234567", alias: "constructor", source: "alias" },
+        { kind: "group", to: group, alias: "tostring", source: "alias" },
+      ],
+    );
 
     const ordinaryCfg = signalConfig({ me: "+15551234567" });
     expect(resolveSignalTarget({ cfg: ordinaryCfg, input: "constructor" })).toBeNull();
@@ -52,24 +46,16 @@ describe("resolveSignalTarget", () => {
       "+15551230000": "+15559990000",
     });
 
-    expect(resolveSignalTarget({ cfg, input: "signal:me" })).toEqual({
-      kind: "user",
-      to: "123e4567-e89b-12d3-a456-426614174000",
-      source: "alias",
-      alias: "me",
-    });
+    const uuid = "123e4567-e89b-12d3-a456-426614174000";
     expect(
-      resolveSignalTarget({ cfg, input: "uuid:123E4567-E89B-12D3-A456-426614174000" }),
-    ).toEqual({
-      kind: "user",
-      to: "123e4567-e89b-12d3-a456-426614174000",
-      source: "raw",
-    });
-    expect(resolveSignalTarget({ cfg, input: "+15551230000" })).toEqual({
-      kind: "user",
-      to: "+15551230000",
-      source: "raw",
-    });
+      ["signal:me", `uuid:${uuid.toUpperCase()}`, "+15551230000"].map((input) =>
+        resolveSignalTarget({ cfg, input }),
+      ),
+    ).toEqual([
+      { kind: "user", to: uuid, source: "alias", alias: "me" },
+      { kind: "user", to: uuid, source: "raw" },
+      { kind: "user", to: "+15551230000", source: "raw" },
+    ]);
   });
 });
 
@@ -77,15 +63,12 @@ describe("listSignalAliasDirectoryEntries", () => {
   it("lists alias-backed peers and groups with alias display names", () => {
     const cfg = signalConfig({ me: "+15551234567", ops: group });
 
-    expect(listSignalAliasDirectoryEntries({ cfg, kind: "user" })).toEqual([
-      { kind: "user", id: "+15551234567", name: "me" },
-    ]);
-    expect(listSignalAliasDirectoryEntries({ cfg, kind: "user", query: "1555" })).toEqual([
-      { kind: "user", id: "+15551234567", name: "me" },
-    ]);
-    expect(listSignalAliasDirectoryEntries({ cfg, kind: "group" })).toEqual([
-      { kind: "group", id: group, name: "ops" },
-    ]);
+    const user = [{ kind: "user", id: "+15551234567", name: "me" }];
+    expect([
+      listSignalAliasDirectoryEntries({ cfg, kind: "user" }),
+      listSignalAliasDirectoryEntries({ cfg, kind: "user", query: "1555" }),
+      listSignalAliasDirectoryEntries({ cfg, kind: "group" }),
+    ]).toEqual([user, user, [{ kind: "group", id: group, name: "ops" }]]);
   });
 
   it("does not let fuzzy peer matches shadow exact group aliases", () => {
