@@ -174,8 +174,12 @@ describe("Buzz mention delivery", () => {
       ];
     }
     const text = native ? "Hello @Alice" : `Hello nostr:${nip19.npubEncode(SENDER_PUBLIC_KEY)}`;
-    await sendTestTextOneShot({ text, ...(native ? { threadId: "root-id" } : {}) });
+    const messageId = await sendTestTextOneShot({
+      text,
+      ...(native ? { threadId: "root-id" } : {}),
+    });
     expect(relayMocks.publish.mock.calls[0]?.[0]).toMatchObject({
+      id: messageId,
       kind: 9,
       content: text,
       tags: [
@@ -435,20 +439,11 @@ describe("Buzz bot-owned thread mentions", () => {
     }
   });
 
-  it("applies the room override only to verified bot roots through room ingress", async () => {
-    const { runtime, account, onMessage } = inboundFixture({ groupPolicy: "open" });
-    let completed = createDeferred<void>();
-    const bus = await startTestBus({
-      onMessage: async (...args) => {
-        try {
-          await onMessage(...args);
-          completed.resolve();
-        } catch (error) {
-          completed.reject(error);
-          throw error;
-        }
-      },
-    });
+  it("applies the room override only to verified bot roots through room ingress", async ({
+    signal,
+  }) => {
+    const { runtime, account, onMessage, receive } = inboundFixture({ groupPolicy: "open" });
+    const bus = await startTestBus({ onMessage });
     const roomSubscription = findSubscription(9);
     expect(roomSubscription).toBeDefined();
     const root = (content: string, tags: string[][] = [["h", CHANNEL_ID]]) =>
@@ -501,7 +496,6 @@ describe("Buzz bot-owned thread mentions", () => {
     try {
       for (const [name, rootEvent, threadId, dispatches, overrides] of cases) {
         const options = { requireMentionInBotThreads: false, ...overrides };
-        completed = createDeferred<void>();
         vi.mocked(runtime.channel.inbound.dispatch).mockClear();
         relayMocks.threadRootEvents = rootEvent ? [rootEvent] : [];
         account.config = {
@@ -514,13 +508,13 @@ describe("Buzz bot-owned thread mentions", () => {
             },
           },
         };
-        roomSubscription?.handlers.onevent(
+        await receive(
           senderMessage(name, {
             created_at: Math.floor(Date.now() / 1000),
             tags: [["h", CHANNEL_ID], ...(threadId ? [["e", threadId, "", "reply"]] : [])],
           }),
+          signal,
         );
-        await completed.promise;
         expect(runtime.channel.inbound.dispatch, name).toHaveBeenCalledTimes(dispatches ? 1 : 0);
       }
     } finally {

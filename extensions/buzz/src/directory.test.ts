@@ -2,13 +2,18 @@ import { getPublicKey, type Event, type Filter } from "nostr-tools";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BuzzConfigInput } from "./config-schema.js";
-import type { BuzzDirectoryState } from "./directory-state.js";
+import {
+  BuzzDirectoryState,
+  BUZZ_PROFILE_KIND,
+  BUZZ_ROOM_METADATA_KIND,
+} from "./directory-state.js";
 import {
   getBuzzDirectorySelf,
   listBuzzDirectoryGroupMembers,
   listBuzzDirectoryGroupsLive,
   listBuzzDirectoryPeersLive,
 } from "./directory.js";
+import type { BuzzRoomMembership } from "./room-membership.js";
 
 const relayMocks = vi.hoisted(() => ({
   auth: vi.fn(async () => "ok"),
@@ -121,27 +126,13 @@ describe("Buzz live directory", () => {
             ["d", ROOM_ID],
             ["p", BOT_PUBLIC_KEY, "", "bot"],
             ["p", MEMBER_PUBLIC_KEY, "", "member"],
+            ["p", RELAY_PUBLIC_KEY, "", "member"],
           ],
         });
       } else if (filter.kinds?.includes(39_000)) {
-        emit({
-          kind: 39_000,
-          tags: [
-            ["d", ROOM_ID],
-            ["name", "Engineering"],
-            ...(relayMocks.roomArchived ? [["archived", "true"]] : []),
-          ],
-        });
+        handlers.onevent(room("Engineering", relayMocks.roomArchived || undefined));
       } else if (filter.kinds?.includes(0)) {
-        emit({
-          kind: 0,
-          pubkey: MEMBER_PUBLIC_KEY,
-          content: JSON.stringify({
-            display_name: "Alice",
-            picture: "https://example.com/alice.png",
-            nip05: "alice@example.com",
-          }),
-        });
+        handlers.onevent(profile(ALICE_PROFILE));
       }
       queueMicrotask(() => handlers.oneose());
       return { close: vi.fn() };
@@ -163,18 +154,13 @@ describe("Buzz live directory", () => {
         limit: 1,
       }),
     ).resolves.toEqual([
-      expect.objectContaining({
-        kind: "user",
-        id: MEMBER_PUBLIC_KEY,
-        name: "Alice",
-        avatarUrl: "https://example.com/alice.png",
-      }),
+      expect.objectContaining({ kind: "user", id: MEMBER_PUBLIC_KEY, ...ALICE }),
     ]);
 
     expect(relayMocks.filters).toEqual([
       { ...roomFilter, kinds: [39_000] },
       { ...roomFilter, kinds: [39_002] },
-      { kinds: [0], authors: [BOT_PUBLIC_KEY, MEMBER_PUBLIC_KEY], limit: 2 },
+      { kinds: [0], authors: [BOT_PUBLIC_KEY, MEMBER_PUBLIC_KEY, RELAY_PUBLIC_KEY], limit: 3 },
     ]);
     expect(relayMocks.auth).toHaveBeenCalledOnce();
     expect(relayMocks.close).toHaveBeenCalledOnce();
@@ -184,6 +170,15 @@ describe("Buzz live directory", () => {
       limit: 1,
     });
     expect(peers.map((entry) => entry.id)).toEqual([MEMBER_PUBLIC_KEY]);
+    await expect(listBuzzDirectoryGroupsLive(params)).resolves.toEqual([
+      expect.objectContaining({ kind: "group", id: `buzz:${ROOM_ID}`, name: "Engineering" }),
+    ]);
+    const members = await listBuzzDirectoryGroupMembers({
+      ...params,
+      groupId: `buzz:${ROOM_ID}`,
+      limit: 2,
+    });
+    expect(members.map((entry) => entry.id)).toEqual([MEMBER_PUBLIC_KEY, RELAY_PUBLIC_KEY]);
   });
 
   it.each([
@@ -283,6 +278,130 @@ describe("Buzz live directory", () => {
 
     await expect(listBuzzDirectoryGroupsLive(directoryParams())).resolves.toEqual([
       { kind: "group", id: `buzz:${ROOM_ID}`, name: "Cached Engineering" },
+    ]);
+  });
+});
+
+const ALICE = {
+  name: "Alice",
+  avatarUrl: "https://example.com/alice.png",
+  handle: "alice@example.com",
+};
+const ALICE_PROFILE = {
+  display_name: ALICE.name,
+  name: "ignored",
+  picture: ALICE.avatarUrl,
+  image: "https://example.com/ignored.png",
+  nip05: ALICE.handle,
+};
+
+function membership(members: string[]): BuzzRoomMembership {
+  return {
+    roomId: ROOM_ID,
+    createdAt: 1_700_000_000,
+    eventId: "1".repeat(64),
+    publisherPublicKey: "d".repeat(64),
+    members: new Set(members),
+    roles: new Map(),
+  };
+}
+
+function profileState(
+  members: string[] = [BOT_PUBLIC_KEY, MEMBER_PUBLIC_KEY],
+  profileLimit?: number,
+): BuzzDirectoryState {
+  const state = new BuzzDirectoryState({
+    publicKey: BOT_PUBLIC_KEY,
+    fallbackProfileName: "OpenClaw",
+    channelIds: [ROOM_ID],
+    profileLimit,
+  });
+  state.replaceMemberships(new Map([[ROOM_ID, membership(members)]]));
+  return state;
+}
+
+function profile(content: Record<string, string> | string, overrides: Partial<Event> = {}) {
+  return event({
+    kind: BUZZ_PROFILE_KIND,
+    pubkey: MEMBER_PUBLIC_KEY,
+    content: typeof content === "string" ? content : JSON.stringify(content),
+    ...overrides,
+  });
+}
+
+function room(name: string, archived?: boolean, overrides: Partial<Event> = {}) {
+  return event({
+    kind: BUZZ_ROOM_METADATA_KIND,
+    pubkey: "d".repeat(64),
+    tags: [
+      ["d", ROOM_ID],
+      ["name", name],
+      ...(archived === undefined ? [] : [["archived", String(archived)]]),
+    ],
+    ...overrides,
+  });
+}
+
+describe("Buzz directory state", () => {
+  it("parses Buzz profile precedence without trusting malformed content", () => {
+    const fallback = profileState();
+    fallback.applyProfileEvent(
+      profile({ name: "Fallback", image: "https://example.com/fallback.png" }),
+    );
+    expect(fallback.listPeers({})).toMatchObject([
+      {
+        name: "Fallback",
+        avatarUrl: "https://example.com/fallback.png",
+      },
+    ]);
+
+    const emptyPrimary = profileState();
+    emptyPrimary.applyProfileEvent(profile({ display_name: "", name: "not-used" }));
+    expect(emptyPrimary.listPeers({})[0]?.name).toBe("bbbbbbbb...bbbbbb");
+
+    expect(profileState().applyProfileEvent(profile("{"))).toBe(false);
+  });
+
+  it("excludes rooms whose latest relay metadata marks them archived", () => {
+    const state = profileState();
+    state.applyRoomEvent(room("Archived room", true, { id: "2".repeat(64) }));
+
+    expect(state.activeRoomIds()).toEqual([]);
+    expect(state.isRoomArchived(ROOM_ID)).toBe(true);
+    expect(state.listPeers({})).toEqual([]);
+    expect(state.listGroups({})).toEqual([]);
+    expect(state.listGroupMembers({ groupId: ROOM_ID })).toEqual([]);
+
+    state.applyRoomEvent(
+      room("Restored room", false, { id: "1".repeat(64), created_at: 1_700_000_001 }),
+    );
+
+    expect(state.activeRoomIds()).toEqual([ROOM_ID]);
+    expect(state.isRoomArchived(ROOM_ID)).toBe(false);
+    expect(state.listPeers({})).not.toEqual([]);
+    expect(state.listGroups({})).toMatchObject([{ id: `buzz:${ROOM_ID}`, name: "Restored room" }]);
+  });
+
+  it("uses deterministic latest-event ordering and bounded profile selection", () => {
+    const state = profileState([BOT_PUBLIC_KEY, RELAY_PUBLIC_KEY, MEMBER_PUBLIC_KEY], 2);
+    const apply = (name: string, overrides: Partial<Event>) =>
+      state.applyProfileEvent(profile({ display_name: name }, overrides));
+    expect(state.profilePublicKeys()).toEqual([BOT_PUBLIC_KEY, MEMBER_PUBLIC_KEY]);
+    expect(apply("First", { id: "2".repeat(64) })).toBe(true);
+    expect(apply("Older tie", { id: "3".repeat(64) })).toBe(false);
+    expect(apply("Winning tie", { id: "1".repeat(64) })).toBe(true);
+    expect(apply("Outside cap", { pubkey: RELAY_PUBLIC_KEY })).toBe(false);
+    expect(state.resolveSenderName(MEMBER_PUBLIC_KEY)).toBe("Winning tie");
+    expect(state.resolveSenderName(RELAY_PUBLIC_KEY)).toBe("cccccccc...cccccc");
+  });
+
+  it("keeps stable fallback identities when the relay budget leaves no profile slots", () => {
+    const state = profileState(undefined, 0);
+
+    expect(state.profilePublicKeys()).toEqual([]);
+    expect(state.self()).toMatchObject({ id: BOT_PUBLIC_KEY, name: "OpenClaw" });
+    expect(state.listPeers({})).toMatchObject([
+      { id: MEMBER_PUBLIC_KEY, name: "bbbbbbbb...bbbbbb" },
     ]);
   });
 });

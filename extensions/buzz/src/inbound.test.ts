@@ -181,7 +181,10 @@ it.each(["denied", "revoked", "other-thread"])(
       params.account.config.groupPolicy = "allowlist";
       params.account.config.groupAllowFrom = [OTHER_PUBLIC_KEY];
     }
-    await params.receive({ text: "Private context" });
+    await params.receive({
+      text: "Private context",
+      mentionedPubkeys: scenario === "denied" ? [BOT_PUBLIC_KEY] : [],
+    });
     expect(runtime.channel.inbound.dispatch).not.toHaveBeenCalled();
     if (scenario === "revoked") {
       setMembership(params.bus, [BOT_PUBLIC_KEY, OTHER_PUBLIC_KEY], new Map(), {
@@ -309,6 +312,12 @@ it.each(["off", "all"] as const)("routes replies and typing with replyToMode=%s"
   expect(typing?.keepaliveIntervalMs).toBe(3_000);
   await typing?.start();
   expect(bus.sendTyping).toHaveBeenCalledWith(target);
+  expect(() => dispatch.delivery.onError?.("send failed", { kind: "final" })).toThrow(
+    "send failed",
+  );
+  expect(() => dispatch.record?.onRecordError?.("store failed")).toThrow(
+    "Buzz session record failed: store failed",
+  );
 });
 
 it("uses current Buzz labels without changing the stable sender identity", async () => {
@@ -447,19 +456,6 @@ it.each([
   },
 );
 
-it("drops mentioned room messages from senders outside the allowlist", async () => {
-  await receive(
-    { mentionedPubkeys: [BOT_PUBLIC_KEY] },
-    {},
-    {
-      groupPolicy: "allowlist",
-      groupAllowFrom: [OTHER_PUBLIC_KEY],
-    },
-  );
-
-  expect(runtime.channel.inbound.dispatch).not.toHaveBeenCalled();
-});
-
 it.each([
   [
     "restrict",
@@ -560,15 +556,3 @@ it.each([false, true])(
     expect(bodyForAgent.length).toBeLessThanOrEqual(4_000);
   },
 );
-
-it("propagates delivery and session-recording failures", async () => {
-  await receive({ mentionedPubkeys: [BOT_PUBLIC_KEY] });
-
-  const dispatch = firstDispatch(runtime);
-  expect(() => dispatch.delivery.onError?.("send failed", { kind: "final" })).toThrow(
-    "send failed",
-  );
-  expect(() => dispatch.record?.onRecordError?.("store failed")).toThrow(
-    "Buzz session record failed: store failed",
-  );
-});

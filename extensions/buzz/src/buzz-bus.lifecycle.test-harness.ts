@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { finalizeEvent, getPublicKey, type Event } from "nostr-tools";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { createTestPluginServiceScheduler } from "openclaw/plugin-sdk/plugin-test-api";
+import { withinTest } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import { sendBuzzTextOneShot, startBuzzBus, type BuzzBus } from "./buzz-bus.js";
 import { relayMocks } from "./buzz-bus.test-helpers.js";
@@ -86,6 +88,7 @@ function hasSubscription(kind: number) {
 }
 
 function inboundFixture(config: ResolvedBuzzAccount["config"], name?: string) {
+  let completion = createDeferred<void>();
   const runtime = createPluginRuntimeMock();
   setBuzzRuntime(runtime);
   const account: ResolvedBuzzAccount = {
@@ -105,17 +108,29 @@ function inboundFixture(config: ResolvedBuzzAccount["config"], name?: string) {
     signal,
     assertCurrent,
   ) => {
-    await handleBuzzInbound({
-      account,
-      cfg: {},
-      bus,
-      message,
-      signal,
-      assertCurrent,
-      historyMap: new Map(),
-    });
+    try {
+      await handleBuzzInbound({
+        account,
+        cfg: {},
+        bus,
+        message,
+        signal,
+        assertCurrent,
+        historyMap: new Map(),
+      });
+      completion.resolve();
+    } catch (error) {
+      completion.reject(error);
+      throw error;
+    }
   };
-  return { runtime, account, onMessage };
+  const receive = async (event: Event, signal: AbortSignal) => {
+    completion = createDeferred<void>();
+    signal.throwIfAborted();
+    findSubscription(9)?.handlers.onevent(event);
+    await withinTest(completion.promise, signal);
+  };
+  return { runtime, account, onMessage, receive };
 }
 
 function roomMetadata(
@@ -140,6 +155,17 @@ function subscriptionIncludesKind(
 ): boolean {
   return subscription.filters.some((filter) => filter.kinds?.includes(kind));
 }
+
+export const buzzTestData = {
+  PRIVATE_KEY,
+  ACCOUNT_ID,
+  CHANNEL_ID,
+  BOT_PUBLIC_KEY,
+  SENDER_PUBLIC_KEY,
+  RELAY_PUBLIC_KEY,
+  senderMessage,
+  relayEvent,
+};
 
 export function useBuzzBusLifecycleFixture() {
   beforeEach(() => {
@@ -188,18 +214,11 @@ export function useBuzzBusLifecycleFixture() {
     rmSync(stateDir, { recursive: true, force: true });
   });
   return {
-    PRIVATE_KEY,
-    ACCOUNT_ID,
-    CHANNEL_ID,
-    BOT_PUBLIC_KEY,
-    SENDER_PUBLIC_KEY,
-    RELAY_PUBLIC_KEY,
+    ...buzzTestData,
     startTestBus,
     sendTestTextOneShot,
     signSenderEvent,
     subscriptionIncludesKind,
-    senderMessage,
-    relayEvent,
     findSubscription,
     hasSubscription,
     inboundFixture,

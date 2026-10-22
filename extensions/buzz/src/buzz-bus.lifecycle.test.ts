@@ -242,7 +242,7 @@ describe("Buzz bus lifecycle", () => {
   it.for(["all", "off"] as const)(
     "signs %s-mode replies and typing without changing inbound threads",
     async (replyToMode, { signal }) => {
-      const { runtime, onMessage } = inboundFixture(
+      const { runtime, onMessage, receive } = inboundFixture(
         {
           groupPolicy: "open",
           replyToMode,
@@ -250,25 +250,9 @@ describe("Buzz bus lifecycle", () => {
         },
         "OpenClaw",
       );
-      const handled = new Map<string, ReturnType<typeof createDeferred<void>>>();
-      const failPending = (error: unknown) => {
-        for (const completion of handled.values()) {
-          completion.reject(error);
-        }
-      };
-      const onAbort = () => failPending(signal.reason);
-      const bus = await startTestBus({
-        onMessage: async (...args) => {
-          await onMessage(...args);
-          handled.get(args[0].id)?.resolve();
-        },
-        onMessageError: failPending,
-      });
-
-      signal.addEventListener("abort", onAbort, { once: true });
+      const bus = await startTestBus({ onMessage });
       try {
         const rootId = "a".repeat(64);
-        const messageSubscription = findSubscription(9);
         for (const [index, parentId] of ["b".repeat(64), undefined].entries()) {
           const inbound = senderMessage(`follow-up ${index + 1}`, {
             created_at: 1_700_000_000 + index,
@@ -282,15 +266,7 @@ describe("Buzz bus lifecycle", () => {
                 : []),
             ],
           });
-          signal.throwIfAborted();
-          const completion = createDeferred<void>();
-          handled.set(inbound.id, completion);
-          messageSubscription?.handlers.onevent(inbound);
-          try {
-            await completion.promise;
-          } finally {
-            handled.delete(inbound.id);
-          }
+          await receive(inbound, signal);
           expect(runtime.channel.inbound.dispatch).toHaveBeenCalledTimes(index + 1);
           const dispatch = vi.mocked(runtime.channel.inbound.dispatch).mock.calls[index]?.[0];
           expect(dispatch?.ctxPayload.MessageThreadId).toBe(parentId ? rootId : undefined);
@@ -316,7 +292,6 @@ describe("Buzz bus lifecycle", () => {
           expect(typing && verifyEvent(typing)).toBe(true);
         }
       } finally {
-        signal.removeEventListener("abort", onAbort);
         await bus.close();
       }
     },
