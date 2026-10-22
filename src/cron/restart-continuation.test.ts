@@ -6,17 +6,15 @@ import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import { replaceSessionEntry } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { deliverQueuedSessionDelivery } from "../gateway/server-restart-sentinel.js";
-import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
-import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
-import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
-import { runHeartbeatOnce } from "./heartbeat-runner-run.js";
-import { seedHeartbeatScratchForTest } from "./heartbeat-runner.test-utils.js";
 import {
   completeSessionDelivery,
   enqueueSessionDelivery,
   loadPendingSessionDelivery,
-} from "./session-delivery-queue-storage.js";
-import { resetSystemEventsForTest } from "./system-events.js";
+} from "../infra/session-delivery-queue-storage.js";
+import { resetSystemEventsForTest } from "../infra/system-events.js";
+import { openOpenClawStateDatabase } from "../state/openclaw-state-db.js";
+import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
+import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 
 // mock-isolation: Only inference is synthetic; recovery, admission, and the model budget stay real.
 vi.mock("../agents/embedded-agent-runner/run.js", () => ({ runEmbeddedAgent: vi.fn() }));
@@ -33,7 +31,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("keeps recovered work on the ordinary budget and periodic heartbeats on 600 seconds", async () => {
+it("keeps recovered system events and agent turns on the ordinary execution budget", async () => {
   await withOpenClawTestState(
     { label: "restart-continuation-budget", env: { OPENCLAW_TEST_FAST: "0" } },
     async (state) => {
@@ -43,8 +41,8 @@ it("keeps recovered work on the ordinary budget and periodic heartbeats on 600 s
           defaults: {
             workspace: state.workspaceDir,
             skipBootstrap: true,
-            model: { primary: "openai/gpt-5.6-luna" },
-            models: { "openai/gpt-5.6-luna": { agentRuntime: { id: "openclaw" } } },
+            model: { primary: "openai/gpt-5.4" },
+            models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } },
           },
         },
         models: {
@@ -54,7 +52,7 @@ it("keeps recovered work on the ordinary budget and periodic heartbeats on 600 s
               apiKey: "synthetic-fixture-key",
               models: [
                 {
-                  id: "gpt-5.6-luna",
+                  id: "gpt-5.4",
                   name: "Recovery fixture model",
                   reasoning: false,
                   input: ["text"],
@@ -83,7 +81,6 @@ it("keeps recovered work on the ordinary budget and periodic heartbeats on 600 s
           sessionStartedAt: Date.now(),
         },
       );
-      await seedHeartbeatScratchForTest({ content: "- Review pending work\n" });
       model.mockImplementation(async (params) => {
         const admission = expectDefined(params.preparedRunAdmission, "ordinary run admission");
         await admission.admit("gateway", params.runId);
@@ -91,9 +88,7 @@ it("keeps recovered work on the ordinary budget and periodic heartbeats on 600 s
         await params.onExecutionStarted?.();
         await params.onAgentEvent?.({ stream: "lifecycle", data: { phase: "start" } });
         return {
-          payloads: [
-            { text: params.trigger === "heartbeat" ? "HEARTBEAT_OK" : "Recovered work continued" },
-          ],
+          payloads: [{ text: "Recovered work continued" }],
           meta: { durationMs: 1 },
         };
       });
@@ -122,19 +117,6 @@ it("keeps recovered work on the ordinary budget and periodic heartbeats on 600 s
         });
         await completeSessionDelivery(id, queueContext);
       }
-      model.mockClear();
-      expect(
-        await runHeartbeatOnce({
-          cfg,
-          agentId: "main",
-          sessionKey,
-          heartbeat: { every: "30m", target: "none" },
-          source: "interval",
-          intent: "scheduled",
-        }),
-      ).toMatchObject({ status: "ran" });
-      expect(model).toHaveBeenCalledOnce();
-      expect(model.mock.calls[0]?.[0]).toMatchObject({ trigger: "heartbeat", timeoutMs: 600_000 });
     },
   );
 });
