@@ -113,6 +113,7 @@ async function openPage(context: BrowserContext) {
   await page.goto(`${suite.server.baseUrl}chat`);
   await page.locator("openclaw-app-sidebar").waitFor();
   await gateway.waitForRequest("chat.startup");
+  await waitForControlUiRoute(page, { routeId: "chat" });
   return { gateway, page };
 }
 
