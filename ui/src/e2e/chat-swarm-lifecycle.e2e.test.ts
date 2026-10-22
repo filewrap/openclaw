@@ -252,6 +252,7 @@ suite.define(() => {
           "sessions.describe": { session: parent },
         },
       });
+      await page.clock.install();
       await page.goto(controlUiSessionUrl(suite.server.baseUrl, sessionKey));
       await gateway.waitForRequest("sessions.list", { match: { spawnedBy: sessionKey } });
       const widget = page.locator('[data-test-id="chat-swarm"]');
@@ -303,6 +304,8 @@ suite.define(() => {
       await gateway.setMethodResponse("sessions.describe", { session: failedParent });
       const reads = (await gateway.getRequests("sessions.list", { spawnedBy: sessionKey })).length;
       await gateway.emitGatewayEvent("sessions.changed", changeEvent);
+      // Let the paced child query run through its normal refresh callback.
+      await page.clock.runFor(5_000);
       await gateway.waitForRequest("sessions.list", {
         after: reads,
         match: { spawnedBy: sessionKey },
