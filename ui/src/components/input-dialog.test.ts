@@ -169,7 +169,8 @@ describe("showInputDialog", () => {
     submitForm();
     submitForm();
     expect(submit).toHaveBeenCalledOnce();
-    await waitForSolid(() => expect(dialogInput().disabled).toBe(true));
+    flush();
+    expect(dialogInput().disabled).toBe(true);
 
     const cancelEvent = new CustomEvent("modal-cancel", { cancelable: true });
     modal.dispatchEvent(cancelEvent);
@@ -181,7 +182,7 @@ describe("showInputDialog", () => {
     expect(document.body.querySelector("openclaw-modal-dialog")).toBeNull();
   });
 
-  it("retires a pending presentation on owner abort and consumes its late failure", async () => {
+  it("keeps the successor editable after an aborted submission fails late", async () => {
     const controller = new AbortController();
     let reject!: (error: Error) => void;
     const submit = vi.fn(
