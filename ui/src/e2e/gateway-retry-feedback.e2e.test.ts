@@ -45,6 +45,15 @@ suite.define(() => {
         await page.clock.runFor(2_001);
         await gateway.closeLatest(1006, "synthetic failed attempt");
         const status = page.locator(".sidebar-shell__footer .gateway-status");
+        const expectMatchingColors = async () => {
+          // A theme change can land between separate browser calls.
+          const colors = await status.evaluate((element) => ({
+            spinner: getComputedStyle(element.querySelector(".session-run-spinner")!)
+              .borderTopColor,
+            label: getComputedStyle(element.querySelector(".gateway-status__label")!).color,
+          }));
+          expect(colors.spinner).toBe(colors.label);
+        };
         await status.getByText("Reconnecting…", { exact: true }).waitFor();
         const capture = async (name: string) => {
           const frame = await takeControlUiScreenshotFrame(page, status, [status], {
@@ -60,15 +69,7 @@ suite.define(() => {
         expect(await status.getByRole("button").count()).toBe(0);
         expect(await status.locator(".session-run-spinner").count()).toBe(1);
         const stateBounds = await status.locator(".gateway-status__state").boundingBox();
-        expect(
-          await status
-            .locator(".session-run-spinner")
-            .evaluate((element) => getComputedStyle(element).borderTopColor),
-        ).toBe(
-          await status
-            .locator(".gateway-status__label")
-            .evaluate((element) => getComputedStyle(element).color),
-        );
+        await expectMatchingColors();
         await capture("reconnecting-backoff");
         const spinner = await status.locator(".session-run-spinner").elementHandle();
         expect(await spinner!.evaluate((element) => getComputedStyle(element).animationName)).toBe(
@@ -125,15 +126,7 @@ suite.define(() => {
         await moving();
         await page.emulateMedia({ colorScheme: "light" });
         await aligned();
-        expect(
-          await status
-            .locator(".session-run-spinner")
-            .evaluate((element) => getComputedStyle(element).borderTopColor),
-        ).toBe(
-          await status
-            .locator(".gateway-status__label")
-            .evaluate((element) => getComputedStyle(element).color),
-        );
+        await expectMatchingColors();
         await capture("reconnecting-light");
         await moving();
         await page.setViewportSize({ width: 390, height: 844 });
