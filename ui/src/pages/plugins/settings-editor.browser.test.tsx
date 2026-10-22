@@ -128,6 +128,8 @@ describe("grouped plugin settings", () => {
           canEditConfig
           configBusy={false}
           configSchemaLoading={false}
+          configRead={undefined}
+          configSchemaRead={undefined}
           configError={null}
           onConfigPatch={onPatch}
           onConfigRemove={vi.fn()}

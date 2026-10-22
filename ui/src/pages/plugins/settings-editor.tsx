@@ -1,4 +1,4 @@
-import { For, Show, createMemo, createSignal } from "solid-js";
+import { For, Show, createMemo, createSignal, onSettled } from "solid-js";
 import { resolveStructuredDraftInitialValue } from "../../components/config-form-structured-draft.ts";
 import { ConfigStructuredDraft } from "../../components/config-form-structured-draft.tsx";
 import { ConfigMapField } from "../../components/config-form.node.collection-map.tsx";
@@ -223,10 +223,14 @@ function EditorSection(props: {
   children: SolidJSX.Element;
   ref?: (element: HTMLElement) => void;
 }) {
+  let section!: HTMLElement;
+  onSettled(() => {
+    props.ref?.(section);
+  });
   return (
     <section
       class="plugin-editor__section"
-      ref={(element) => props.ref?.(element)}
+      ref={(element) => (section = element)}
       id={props.id}
       tabindex={props.id === undefined ? undefined : -1}
     >
