@@ -7,11 +7,6 @@ import type { SessionDeleteRow } from "./selection.ts";
 import type { SessionsPageMenuProps } from "./session-menu.tsx";
 import type { TranscriptSearchProps } from "./transcript-search-view.tsx";
 
-export type SessionsPageMutationResult =
-  | "completed"
-  | "stale"
-  | { status: "failed"; error: unknown };
-
 export type SessionsPageListBinding = {
   sessions: ApplicationContext["sessions"];
   query: ReturnType<typeof buildSessionsListQuery>;

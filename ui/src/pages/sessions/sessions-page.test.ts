@@ -28,7 +28,11 @@ import {
   getRenderedModalDialog,
   waitForConfirmDialogActions,
 } from "../../test-helpers/modal-dialog.ts";
-import { openSubmenu, selectMenuValue } from "../../test-helpers/session-menu.ts";
+import {
+  openSubmenu,
+  selectMenuValue,
+  settleSessionMenu,
+} from "../../test-helpers/session-menu.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import { page as sessionsRoute, type SessionsRouteData } from "./route.ts";
 import {
@@ -37,6 +41,7 @@ import {
   createManagedSessions,
   createPage,
   createRenderedPage,
+  createSessions,
   liveSessions,
   mountMutation,
   openRowMenu,
@@ -657,7 +662,11 @@ describe("sessions page lifecycle", () => {
       preservedWorktrees: [],
     });
     patched.resolve({ ok: true, key: "main", path: "", entry: { sessionId: target.sessionId! } });
-    forked.resolve({ key: "forked", sessionId: "forked-id" });
+    forked.resolve({
+      key: "forked",
+      entry: { sessionId: "forked-id" },
+      initialRun: { status: "idle" },
+    });
     groups.reject(new Error("stale group error"));
     expect(await Promise.all(requests)).toEqual(["stale", "stale", "stale", "stale"]);
     expect(page.result?.sessions.map(({ key }) => key)).toEqual(["main"]);
@@ -669,7 +678,11 @@ describe("sessions page lifecycle", () => {
 
   it("forks an active session from its last completed message", async () => {
     const { page, sessions } = await mountMutation({
-      createResult: vi.fn(async () => ({ key: "active-fork", sessionId: "active-fork-id" })),
+      createResult: vi.fn<SessionCapability["createResult"]>(async () => ({
+        key: "active-fork",
+        entry: { sessionId: "active-fork-id" },
+        initialRun: { status: "idle" },
+      })),
     });
     await page.forkSession("main", true);
     expect(sessions.createResult).toHaveBeenCalledWith(

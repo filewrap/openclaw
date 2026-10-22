@@ -1,7 +1,7 @@
 import type { SessionsListResult } from "../../api/types.ts";
 import { collectKnownSessionGroups } from "../../lib/sessions/grouping.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
-import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts";
+import type { SessionsPageMutationResult } from "./mutation-runner.ts";
 
 export function sessionCategoryNames(
   result: SessionsListResult | null,

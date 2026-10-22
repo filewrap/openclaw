@@ -68,7 +68,10 @@ import { createSessionsArchive } from "./archive-actions.ts";
 import { rememberSessionCustomGroup, sessionCategoryNames } from "./custom-groups.ts";
 import { resolveSessionDeleteOutcome } from "./delete-outcome.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
-import { createSessionsMutationRunner } from "./mutation-runner.ts";
+import {
+  createSessionsMutationRunner,
+  type SessionsPageMutationResult,
+} from "./mutation-runner.ts";
 import { createSessionsDialog } from "./page-dialog.ts";
 import { loadStoredGroupBy, saveStoredGroupBy } from "./page-state.ts";
 import type { SessionsPageRequestScope } from "./request-scope.ts";
@@ -84,11 +87,7 @@ import {
   type SessionsPageMenuProps,
 } from "./session-menu.tsx";
 import type { SessionsAdvancedFiltersProps } from "./sessions-filters.tsx";
-import type {
-  SessionsPageListBinding,
-  SessionsPageMutationResult,
-  SessionsPageState,
-} from "./sessions-page-state.types.ts";
+import type { SessionsPageListBinding, SessionsPageState } from "./sessions-page-state.types.ts";
 
 registerSessionOrganizationEnglish();
 

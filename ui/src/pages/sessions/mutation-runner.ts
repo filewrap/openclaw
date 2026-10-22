@@ -1,5 +1,9 @@
 import type { SessionsPageRequestScope } from "./request-scope.ts";
-import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts";
+
+export type SessionsPageMutationResult =
+  | "completed"
+  | "stale"
+  | { status: "failed"; error: unknown };
 
 export function createSessionsMutationRunner(host: {
   isCurrent: (scope: SessionsPageRequestScope) => boolean;

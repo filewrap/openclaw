@@ -3,8 +3,8 @@ import { t } from "../../i18n/index.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { resolveSessionRenamePatch, resolveSessionRenameValue } from "../../lib/session-rename.ts";
 import type { SessionPatch } from "../../lib/sessions/patch.ts";
+import type { SessionsPageMutationResult } from "./mutation-runner.ts";
 import type { SessionsPageRequestScope } from "./request-scope.ts";
-import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts";
 
 /** Type-only, so the dialog itself stays behind its lazy boundary. */
 type InputDialogOpener = (typeof import("../../components/input-dialog.ts"))["showInputDialog"];

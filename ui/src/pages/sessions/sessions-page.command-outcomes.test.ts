@@ -109,7 +109,7 @@ describe("sessions command outcomes", () => {
       expect(managed.refreshList).toHaveBeenCalledTimes(refreshCalls + 1);
       expect(page.querySelector('[role="alert"]')).toBeNull();
     });
-    page.onSortChange("key");
+    page.onSortChange("key", "asc");
     await page.updateComplete;
     expect(page.querySelector('[role="alert"]')).toBeNull();
     expect(managed.sessions.patch).not.toHaveBeenCalled();

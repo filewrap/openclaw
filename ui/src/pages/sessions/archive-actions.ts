@@ -7,8 +7,8 @@ import {
   resolveUiSessionRowAgentId,
 } from "../../lib/sessions/session-key.ts";
 import { prepareArchiveOutcome } from "./archive-outcome.ts";
+import type { SessionsPageMutationResult } from "./mutation-runner.ts";
 import type { SessionsPageRequestScope } from "./request-scope.ts";
-import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts";
 
 type SessionPageArchiveHost = {
   captureScope: () => SessionsPageRequestScope | null;

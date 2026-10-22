@@ -29,7 +29,7 @@ import {
   runSessionNavigationAction,
 } from "../../lib/sessions/session-menu-navigation.ts";
 import { pluginSessionMenuActions } from "../../plugins/control-ui-actions.ts";
-import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts";
+import type { SessionsPageMutationResult } from "./mutation-runner.ts";
 
 type SessionsPageMenuAction = Exclude<SessionMenuAction, { kind: "snooze" | "wake" }>;
 
