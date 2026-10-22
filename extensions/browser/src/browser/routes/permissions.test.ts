@@ -4,6 +4,7 @@ import {
   BrowserProfileUnavailableError,
   type BrowserNoDisplayErrorMetadata,
 } from "../errors.js";
+import { makeBrowserProfile } from "../server-context.test-harness.js";
 import { createRouteFixture } from "./request.test-support.js";
 
 type Send = (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -36,6 +37,8 @@ vi.mock("../pw-ai-module.js", () => ({ getPwAiModule: pwMocks.getPwAiModule }));
 const { registerBrowserPermissionRoutes } = await import("./permissions.js");
 
 const origin = "https://meet.google.com";
+const cdpUrl = "http://127.0.0.1:18800";
+const wsUrl = "ws://127.0.0.1:18800/devtools/browser/test";
 const requiredPermissions = ["audioCapture", "videoCapture"];
 const optionalPermissions = ["speakerSelection"];
 const mediaRequest = {
@@ -63,21 +66,14 @@ function expectGrant(
 async function callGrant(
   body: Record<string, unknown>,
   options: {
-    profile?: Record<string, unknown>;
+    profile?: Parameters<typeof makeBrowserProfile>[0];
     ssrfPolicy?: Record<string, unknown>;
     ensureBrowserAvailable?: () => Promise<void>;
   } = {},
 ) {
   const routes = createRouteFixture();
   const profileCtx = {
-    profile: {
-      name: "openclaw",
-      cdpUrl: "http://127.0.0.1:18800",
-      cdpHost: "127.0.0.1",
-      cdpIsLoopback: true,
-      driver: "openclaw",
-      ...options.profile,
-    },
+    profile: makeBrowserProfile(options.profile),
     ensureBrowserAvailable: vi.fn(options.ensureBrowserAvailable ?? (async () => {})),
   };
   registerBrowserPermissionRoutes(routes.app, {
@@ -109,7 +105,7 @@ describe("browser permission routes", () => {
 
     expectGrant(response, "playwright", optionalPermissions);
     expect(pwMocks.getPageForTargetId).toHaveBeenCalledWith({
-      cdpUrl: "http://127.0.0.1:18800",
+      cdpUrl,
       targetId: "meet-tab",
       ssrfPolicy: undefined,
     });
@@ -124,16 +120,12 @@ describe("browser permission routes", () => {
 
     expectGrant(response, "cdp");
     expect(profileCtx.ensureBrowserAvailable).toHaveBeenCalled();
-    expect(cdpMocks.getChromeWebSocketEndpoint).toHaveBeenCalledWith(
-      "http://127.0.0.1:18800",
-      1234,
-      undefined,
-    );
-    expect(cdpMocks.withCdpSocket).toHaveBeenCalledWith(
-      "ws://127.0.0.1:18800/devtools/browser/test",
-      expect.any(Function),
-      { commandTimeoutMs: 1234, lookup: undefined, signal: expect.any(AbortSignal) },
-    );
+    expect(cdpMocks.getChromeWebSocketEndpoint).toHaveBeenCalledWith(cdpUrl, 1234, undefined);
+    expect(cdpMocks.withCdpSocket).toHaveBeenCalledWith(wsUrl, expect.any(Function), {
+      commandTimeoutMs: 1234,
+      lookup: undefined,
+      signal: expect.any(AbortSignal),
+    });
     expect(cdpMocks.send).toHaveBeenCalledWith("Browser.grantPermissions", {
       origin,
       permissions: [...requiredPermissions, ...optionalPermissions],
@@ -156,11 +148,7 @@ describe("browser permission routes", () => {
     );
     const { response } = await callGrant(
       {},
-      {
-        ensureBrowserAvailable: async () => {
-          throw error;
-        },
-      },
+      { ensureBrowserAvailable: () => Promise.reject(error) },
     );
 
     expect(response.statusCode).toBe(409);
