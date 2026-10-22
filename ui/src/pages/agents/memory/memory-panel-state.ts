@@ -1,7 +1,7 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { createDeferred } from "@solidjs/signals";
-import { createMemo, createStore, onSettled } from "solid-js";
+import { action, createMemo, createOptimistic, createStore, onSettled } from "solid-js";
 import type { ApplicationContext, ApplicationGateway } from "../../../app/context.ts";
 import { hasOperatorReadAccess } from "../../../app/operator-access.ts";
 import {
@@ -11,11 +11,13 @@ import {
 import { t } from "../../../i18n/index.ts";
 import { registerDreamingEnglish } from "../../../i18n/locales/en-dreaming.ts";
 import { currentConfigObject } from "../../../lib/config/config-state-model.ts";
+import { formatUiError } from "../../../lib/format-error.ts";
 import { formatTimeMs } from "../../../lib/format.ts";
 import { GatewayPageBinding, type GatewayPageChange } from "../../../lib/gateway-page-binding.ts";
 import { pathDisplayName } from "../../../lib/path-display.ts";
 import { isPluginEnabledInConfigSnapshot } from "../../../lib/plugin-activation.ts";
 import { projectOwner, projectMutableSource } from "../../../lib/reactive/projection.ts";
+import { showToast } from "../../../lib/toast.ts";
 import {
   canCallDreamingMethod,
   clearSettledDreamingRead,
@@ -78,6 +80,9 @@ export function createAgentMemory(
   let pendingEnabled: boolean | null = null;
   let wikiPreview: WikiPreviewRequest | null = null;
   let pendingWikiRead: { request: WikiPreviewRequest } | null = null;
+  const [configOpenScope, setConfigOpenScope] = createOptimistic<DreamingState>();
+  const [configOpening, setConfigOpening] = createOptimistic(false);
+  let configOpenLifetime = Promise.withResolvers<void>();
   const [viewState, setViewState] = createStore(createDreamingViewState());
   function updateViewState(update: (draft: DreamingViewState) => void) {
     const now = Date.now();
@@ -99,6 +104,7 @@ export function createAgentMemory(
   const gateway = new GatewayPageBinding(notify, {
     getGateway: () => context.gateway,
     invalidateRequests: ({ identityChanged }) => {
+      retireConfigOpen();
       // Retain published data in a new owner; retired reads can only mutate the old state.
       dreaming = {
         ...dreaming,
@@ -151,11 +157,44 @@ export function createAgentMemory(
   }
 
   function resetTransientState() {
+    retireConfigOpen();
     wikiPreview = null;
     pendingWikiRead = null;
     retireToggle();
     pendingEnabled = null;
   }
+
+  function retireConfigOpen() {
+    configOpenLifetime.resolve();
+    configOpenLifetime = Promise.withResolvers<void>();
+  }
+
+  const openConfig: () => void | Promise<void> = async () => {
+    const scope = captureTaskScope();
+    if (!scope || !isTaskScopeCurrent(scope)) {
+      return;
+    }
+    const retired = configOpenLifetime.promise;
+    const pending = Promise.race([context.runtimeConfig.openFile(), retired]);
+    // The runtime owner publishes admission before the presentation action starts.
+    await Promise.resolve();
+    await presentConfigOpen(scope, pending);
+  };
+
+  const presentConfigOpen = action(function* (scope: DreamingTaskScope, pending: Promise<unknown>) {
+    try {
+      if (isTaskScopeCurrent(scope)) {
+        setConfigOpenScope(scope.state);
+        setConfigOpening(true);
+      }
+      yield pending;
+    } catch (error) {
+      // Expected failures already use the runtime owner's toast contract.
+      if (isTaskScopeCurrent(scope)) {
+        showToast({ message: formatUiError(error) });
+      }
+    }
+  });
 
   function createGatewayState(snapshot = context.gateway.snapshot): DreamingState {
     return {
@@ -457,7 +496,7 @@ export function createAgentMemory(
           void runDreamingTask((current) => loadDreamingResource(current, "dreamDiary")),
         onRefreshImports: () => void loadResources("wikiImportInsights"),
         onRefreshWikiOverview: () => void loadResources("wikiOverview"),
-        onOpenConfig: () => void context.runtimeConfig.openFile(),
+        onOpenConfig: openConfig,
         onOpenWikiPage: openWikiPreview,
         onCloseWikiPreview: () => {
           wikiPreview = null;
@@ -633,6 +672,10 @@ export function createAgentMemory(
     };
   });
   return {
+    configOpening: () => {
+      projection.revision();
+      return configOpening() && configOpenScope() === dreaming;
+    },
     loadResources,
     setEnabled,
     view() {

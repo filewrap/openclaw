@@ -54,7 +54,7 @@ export function AgentMemoryView(props: { state: AgentMemoryState }) {
           </div>
         </div>
       </section>
-      <Dreaming {...model().dreaming} />
+      <Dreaming {...model().dreaming} configOpening={props.state.configOpening()} />
       <DreamingToggleConfirmation {...model().toggle} />
     </>
   );

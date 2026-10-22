@@ -21,6 +21,7 @@ import { createAgentMemory, type AgentMemoryState } from "./memory-panel-state.t
 import { AgentMemoryView } from "./memory-panel-view.tsx";
 import { AgentMemoryPanel } from "./memory-panel.tsx";
 import { installDreamingViewTestTranslations } from "./view.test-helpers.ts";
+import "../../../lib/toast-host.tsx";
 
 vi.mock("../../../components/confirm-dialog.ts", () => ({ showConfirmDialog: vi.fn() }));
 const restoreTranslations = installDreamingViewTestTranslations();
@@ -55,6 +56,7 @@ function contextWithRequest(request: Parameters<typeof createTestGatewayClient>[
       ensureLoaded: vi.fn(async () => undefined),
       refresh: vi.fn(async () => undefined),
       patch: vi.fn(async () => true),
+      openFile: vi.fn(async () => undefined),
       lookupSchemaPath: vi.fn(async () => ({ children: [{ key: "dreaming" }] })),
       subscribe: (listener: () => void) => registerListener(configListeners, listener),
     },
@@ -163,6 +165,70 @@ function click(container: HTMLElement, selector: string) {
   button!.click();
   flush();
 }
+
+it.each([".dreams-diary__header .btn", ".dreams-diary__empty-actions .btn"])(
+  "shows config opening from %s until the owner completes",
+  async (selector) => {
+    const page = await createPage();
+    const pending = deferred<void>();
+    vi.mocked(page.context.runtimeConfig.openFile).mockReturnValueOnce(pending.promise);
+    page.dreaming.onViewStateChange((draft) => {
+      draft.activeSubTab = "diary";
+      draft.activeDiarySubTab = "wiki";
+    });
+    flush();
+    const button = page.container.querySelector<HTMLButtonElement>(selector)!;
+    const originalLabel = button.textContent;
+    button.click();
+    await waitForSolid(() => {
+      expect(button.disabled).toBe(true);
+      expect(button.getAttribute("aria-busy")).toBe("true");
+      expect(button.textContent).toBe("Loading…");
+    });
+    expect(page.context.runtimeConfig.openFile).toHaveBeenCalledOnce();
+    pending.resolve();
+    await waitForSolid(() => {
+      expect(button.disabled).toBe(false);
+      expect(button.hasAttribute("aria-busy")).toBe(false);
+      expect(button.textContent).toBe(originalLabel);
+    });
+  },
+);
+
+it("retires config opening on agent changes and shows a current failure before retry", async () => {
+  const page = await createPage();
+  const host = document.createElement("openclaw-toast-host");
+  document.body.append(host);
+  await host.updateComplete;
+  const pending = deferred<void>();
+  const openFile = vi.mocked(page.context.runtimeConfig.openFile);
+  openFile.mockReturnValueOnce(pending.promise);
+  page.dreaming.onViewStateChange((draft) => {
+    draft.activeSubTab = "diary";
+    draft.activeDiarySubTab = "wiki";
+  });
+  flush();
+  const button = page.container.querySelector<HTMLButtonElement>(
+    ".dreams-diary__empty-actions .btn",
+  )!;
+  button.click();
+  await waitForSolid(() => expect(button.disabled).toBe(true));
+  page.setAgentId("other");
+  await waitForSolid(() => expect(button.disabled).toBe(false));
+  pending.reject(new Error("Retired config opening"));
+  await Promise.allSettled([pending.promise]);
+  await waitForSolid(() => expect(host.textContent).not.toContain("Retired config opening"));
+
+  openFile.mockRejectedValueOnce(new Error("Cannot open configuration"));
+  button.click();
+  await waitForSolid(() => {
+    expect(host.textContent).toContain("Cannot open configuration");
+    expect(button.disabled).toBe(false);
+  });
+  button.click();
+  await waitForSolid(() => expect(openFile).toHaveBeenCalledTimes(3));
+  await waitForSolid(() => expect(button.disabled).toBe(false));
+});
 
 it.each([true, false])(
   "exposes Dreaming switch state through cancellation (%s)",
