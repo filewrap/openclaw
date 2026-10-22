@@ -1,3 +1,6 @@
+import { promisify } from "node:util";
+import { serialize } from "node:v8";
+import { deflateRaw } from "node:zlib";
 import {
   captureWorktreeRunEndContext,
   retainWorktreeRunEndFailure,
@@ -25,6 +28,8 @@ import type {
 } from "./local-workspace-store.kernel.js";
 
 export type { LocalWorkspaceProjection } from "./local-workspace-store.kernel.js";
+
+const compressMutation = promisify(deflateRaw);
 
 export async function hasLocalWorkspaceProjection(id: string, env?: NodeJS.ProcessEnv) {
   const reply = await executeExistingOpenClawStateRead(
@@ -136,9 +141,20 @@ export function withLocalWorkspaceStore<T>(
                   assertCurrent();
                   const previous = row;
                   const capturedMutation = structuredClone(mutation);
+                  const predicates = structuredClone(guard.predicates);
+                  // Large inventories repeat paths and tree bookkeeping in their receipts.
+                  // Charge the broker for compressed bytes without changing its queue limits.
+                  const serialized = serialize(capturedMutation);
+                  const compressed =
+                    serialized.byteLength > 32 * 1024 * 1024
+                      ? await compressMutation(serialized)
+                      : undefined;
+                  const wireMutation =
+                    compressed && compressed.byteLength < serialized.byteLength
+                      ? compressed
+                      : capturedMutation;
                   let admission: SqliteWorkerOperationAdmission | undefined;
                   let settled: Promise<SqliteWorkerOperationSettlement> | undefined;
-                  const predicates = structuredClone(guard.predicates);
                   const assertWrite = () => {
                     assertHost();
                     guard.assertCurrent?.();
@@ -155,7 +171,7 @@ export function withLocalWorkspaceStore<T>(
                               type: "localWorkspace.mutate",
                               input: {
                                 id: params.worktreeId,
-                                mutation: capturedMutation,
+                                mutation: wireMutation,
                                 predicates,
                                 leases: write.identities,
                               },

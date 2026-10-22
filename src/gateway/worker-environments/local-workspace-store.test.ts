@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { deserialize } from "node:v8";
+import { Worker } from "node:worker_threads";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
 import {
   observeHostDataSql,
@@ -11,7 +13,10 @@ import {
   WORKTREE_CREATE_LEASE_SCOPE,
   WORKTREE_MUTATION_LEASE_SCOPE,
 } from "../../agents/worktrees/capacity-contract.js";
-import { SQLITE_WORKER_MAX_MESSAGE_BYTES } from "../../infra/sqlite-worker-contract.js";
+import {
+  type SqliteWorkerReply,
+  SQLITE_WORKER_MAX_MESSAGE_BYTES,
+} from "../../infra/sqlite-worker-contract.js";
 import { sqliteWorkerOwnerProbe as probe } from "../../infra/sqlite-worker-owner-probe.test-support.js";
 import {
   closeOpenClawStateDatabaseAsync,
@@ -436,4 +441,59 @@ it("recovers an oversized committed row after reply loss without replaying or tr
   expect(acknowledged.journal_pack).toEqual(journalPack);
   expect(committed).toEqual(acknowledged);
   expect(committed?.baseline_json).toBe(baseline);
+});
+
+it("queues an expanded checkpoint receipt behind another workspace write", async () => {
+  const busyId = randomUUID();
+  const checkpointId = randomUUID();
+  const checkpoint = JSON.stringify({ syntheticRecords: "x".repeat(72 * 1024 * 1024) });
+  await withLocalWorkspaceStore({ worktreeId: busyId, env }, async (busy) => {
+    const initial = await busy.create(localWorkspaceProjectionFixture(busyId, root));
+    await withLocalWorkspaceStore({ worktreeId: checkpointId, env }, async (store) => {
+      const row = await store.create(localWorkspaceProjectionFixture(checkpointId, root));
+      const held = Promise.withResolvers<void>();
+      let publish: (() => boolean) | undefined;
+      // oxlint-disable-next-line typescript/unbound-method -- Reflect.apply preserves the worker.
+      const emit = Worker.prototype.emit;
+      const replies = vi.spyOn(Worker.prototype, "emit").mockImplementation(function (
+        this: Worker,
+        ...args: Parameters<Worker["emit"]>
+      ) {
+        const reply = args[1] as SqliteWorkerReply;
+        if (args[0] === "message" && reply.ok && !reply.transfer && !reply.input) {
+          const value = deserialize(reply.value);
+          if (value?.worktree_id === busyId && value.revision === 1) {
+            publish = () => {
+              publish = undefined;
+              return Reflect.apply(emit, this, args);
+            };
+            held.resolve();
+            return true;
+          }
+        }
+        return Reflect.apply(emit, this, args);
+      });
+      const pending = busy.update(initial, { paused_runtimes_json: "[]" });
+      try {
+        await held.promise;
+        probe.command(stateWorker, (command, options, scope) => {
+          const result = scope.execute(command, options);
+          if (command.type === "localWorkspace.mutate" && command.input.id === checkpointId) {
+            // Release only after the real broker has admitted or refused the second write.
+            replies.mockRestore();
+            publish?.();
+          }
+          return result;
+        });
+        const accepted = await store.update(row, { checkpoint_json: checkpoint });
+        expect(accepted.checkpoint_json).toBe(checkpoint);
+        await pending;
+      } finally {
+        replies.mockRestore();
+        publish?.();
+        await pending;
+      }
+    });
+  });
+  expect((await readLocalWorkspaceProjection(checkpointId, env))?.checkpoint_json).toBe(checkpoint);
 });
