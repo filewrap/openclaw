@@ -204,6 +204,15 @@ export function ModelSetupWizard(props: WizardViewProps): JSX.Element {
           </div>
           <Show when={displayPhase() !== "step"}>
             <openclaw-modal-actions class="model-setup-wizard__footer">
+              <button
+                ref={autofocusRef}
+                type="button"
+                class="btn"
+                autofocus={displayPhase() !== "done" || !props.doneAction}
+                onClick={() => (canCancel() ? props.onCancel() : props.onClose())}
+              >
+                {t(canCancel() ? "common.cancel" : "common.close")}
+              </button>
               <Show when={displayPhase() === "done" && props.doneAction}>
                 {(action) => (
                   <button
@@ -223,15 +232,6 @@ export function ModelSetupWizard(props: WizardViewProps): JSX.Element {
                   </button>
                 )}
               </Show>
-              <button
-                ref={autofocusRef}
-                type="button"
-                class="btn"
-                autofocus={displayPhase() !== "done" || !props.doneAction}
-                onClick={() => (canCancel() ? props.onCancel() : props.onClose())}
-              >
-                {t(canCancel() ? "common.cancel" : "common.close")}
-              </button>
             </openclaw-modal-actions>
           </Show>
         </div>
