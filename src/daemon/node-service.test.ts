@@ -6,6 +6,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { resolveNodeService } from "./node-service.js";
+import { withDaemonRuntimePinMigration } from "./runtime-pin-state.js";
 
 vi.mock("./launchd-system.js", async (original) => ({
   ...(await original<typeof import("./launchd-system.js")>()),
@@ -28,9 +29,11 @@ afterEach(() => {
 });
 
 it("stages and reads separate node definitions for two profiles beside the default", async () => {
-  vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
   const home = dirs.make("openclaw-node-profiles-");
   await withEnvAsync({ HOME: home, OPENCLAW_STATE_DIR: path.join(home, "state") }, async () => {
+    // Create private stores on the real host before selecting the launchd adapter.
+    await withDaemonRuntimePinMigration(process.env, () => undefined);
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
     const service = resolveNodeService();
     for (const profile of [undefined, "work", "other"]) {
       const env = { ...process.env, OPENCLAW_PROFILE: profile };
