@@ -1,5 +1,4 @@
 // Publishes a Doctor pass's outcome to the updater that launched it.
-import { measureGatewayBootstrapStep } from "../cli/startup-trace.js";
 import type { beginDoctorMaintenance } from "../commands/doctor-maintenance.js";
 import { retainCurrentDeferredPluginMigrationWarnings } from "../infra/deferred-plugin-migration-warnings.js";
 import { formatUpdateDoctorConfigChange } from "../infra/update-doctor-config.js";
@@ -63,14 +62,12 @@ export async function publishDoctorUpdateResult(params: {
 /** Publish the updater receipt even when releasing maintenance reports a failure. */
 export async function finishDoctorMaintenance(
   params: Omit<Parameters<typeof publishDoctorUpdateResult>[0], "updateResult"> & {
-    resources: AsyncDisposableStack;
+    release: () => Promise<void>;
     updateResult?: Parameters<typeof publishDoctorUpdateResult>[0]["updateResult"];
   },
 ): Promise<void> {
   try {
-    await measureGatewayBootstrapStep("doctor.maintenance.release", () =>
-      params.resources.disposeAsync(),
-    );
+    await params.release();
   } finally {
     if (params.updateResult) {
       await publishDoctorUpdateResult({ ...params, updateResult: params.updateResult });

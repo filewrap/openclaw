@@ -1,4 +1,5 @@
 import { measureGatewayBootstrapStep } from "../cli/startup-trace.js";
+import { withDoctorProgress } from "../flows/doctor-health-startup.js";
 import type { HealthFinding } from "../flows/health-checks.js";
 import { DoctorMaintenanceRefusalError } from "../infra/update-doctor-result.js";
 import { resolveUpdateRehearsalRoot } from "../infra/update-rehearsal-paths.js";
@@ -60,18 +61,21 @@ export function createDoctorOriginalCaptureHook(
         );
       }
     }
-    const { findings, warnings } = await measureGatewayBootstrapStep(
-      "doctor.maintenance.preserve-original-state",
+    const { findings, warnings } = await withDoctorProgress(
+      "Preserve original state",
       () =>
-        preserveDoctorOriginalState({
-          root: params.root,
-          env,
-          runtime: params.runtime,
-          signal,
-          assertCurrent: () => scope.assertOwnerCurrent(),
-          writeAuthority: params.writeAuthority,
-          fullIntegrityCheck: params.fullIntegrityCheck,
-        }),
+        measureGatewayBootstrapStep("doctor.maintenance.preserve-original-state", () =>
+          preserveDoctorOriginalState({
+            root: params.root,
+            env,
+            runtime: params.runtime,
+            signal,
+            assertCurrent: () => scope.assertOwnerCurrent(),
+            writeAuthority: params.writeAuthority,
+            fullIntegrityCheck: params.fullIntegrityCheck,
+          }),
+        ),
+      params.json !== true,
     );
     params.reportFindings(findings, warnings);
   };

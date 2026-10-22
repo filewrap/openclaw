@@ -90,13 +90,12 @@ import {
 } from "./doctor-auth-legacy-paths.js";
 import {
   acquireAuthProfileMigrationSourceLocks,
-  archiveAuthProfileMigrationSource,
+  archivePreviouslyMigratedAuthProfileSource,
   prepareAuthProfileSourceReceipt,
   parseAuthProfileMigrationSource,
   assertAuthProfileMigrationSourcesUnchanged,
   digestAuthProfileMigrationValue,
   finalizeAuthProfileMigrationSource,
-  hasTerminalAuthProfileMigrationReceipt,
   resumePendingAuthProfileMigrationArchives,
   type AuthProfileMigrationSourceReceipt,
 } from "./doctor-auth-migration-receipts.js";
@@ -331,20 +330,6 @@ function formatMissingAuthProfileSqliteVerification(params: {
 
 function hasImportableAuthProfileStore(store: AuthProfileStore | null): store is AuthProfileStore {
   return Boolean(store && (Object.keys(store.profiles).length > 0 || hasAuthProfileState(store)));
-}
-
-function archivePreviouslyMigratedAuthProfileSource(
-  receipt: AuthProfileMigrationSourceReceipt,
-  result: LegacyFlatAuthProfileRepairResult,
-): boolean {
-  if (!hasTerminalAuthProfileMigrationReceipt(receipt.sourceKey, receipt.env)) {
-    return false;
-  }
-  archiveAuthProfileMigrationSource(receipt);
-  result.changes.push(
-    `Archived a previously migrated legacy auth source without replaying credentials (${shortenHomePath(receipt.archivePath)}).`,
-  );
-  return true;
 }
 
 function loadAuthProfileMigrationTargetStore(
@@ -605,9 +590,16 @@ export async function maybeMigrateAuthProfileJsonStoresToSqlite(params: {
           env,
         }),
       );
-      sourceReceipts = sourceReceipts.filter(
-        (receipt) => !archivePreviouslyMigratedAuthProfileSource(receipt, result),
-      );
+      sourceReceipts = sourceReceipts.filter((receipt) => {
+        const archivePath = archivePreviouslyMigratedAuthProfileSource(receipt);
+        if (!archivePath) {
+          return true;
+        }
+        result.changes.push(
+          `Preserved a previously migrated legacy auth source without replaying credentials (${shortenHomePath(archivePath)}).`,
+        );
+        return false;
+      });
       assertAuthProfileMigrationSourcesUnchanged(candidateSourcePaths, sourceReceipts);
       if (sourceReceipts.length === 0 && !configStore) {
         continue;

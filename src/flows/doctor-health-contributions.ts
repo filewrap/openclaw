@@ -40,6 +40,7 @@ import {
 } from "./doctor-health-contribution.js";
 import { resolveFinalDoctorHealthContributions } from "./doctor-health-contributions-final.js";
 import { resolveInitialDoctorHealthContributions } from "./doctor-health-contributions-initial.js";
+import { withDoctorProgress } from "./doctor-health-startup.js";
 import { admitDoctorUpdateInspection, resolveDoctorUpdateBudget } from "./doctor-update-budget.js";
 import { normalizeHealthCheck } from "./health-check-adapter.js";
 import type { DoctorHealthCheck } from "./health-check-runner-types.js";
@@ -617,14 +618,19 @@ async function runDoctorHealthContributionList(
             await reportDeferredLegacyState(ctx);
           }
         };
-        await measureGatewayBootstrapStep(`doctor.contribution.${contribution.id}`, async () => {
-          if (!runWithPluginMetadataSnapshot) {
-            await run();
-          } else {
-            const workspaceDir = resolveDoctorWorkspaceDir(ctx.cfg, ctx.env);
-            await runWithPluginMetadataSnapshot({ config: ctx.cfg, workspaceDir }, run);
-          }
-        });
+        await withDoctorProgress(
+          contribution.label,
+          () =>
+            measureGatewayBootstrapStep(`doctor.contribution.${contribution.id}`, async () => {
+              if (!runWithPluginMetadataSnapshot) {
+                await run();
+              } else {
+                const workspaceDir = resolveDoctorWorkspaceDir(ctx.cfg, ctx.env);
+                await runWithPluginMetadataSnapshot({ config: ctx.cfg, workspaceDir }, run);
+              }
+            }),
+          ctx.options.json !== true,
+        );
         signal?.throwIfAborted();
         if (ctx.configWriteRefusal) {
           // Later repairs consume the candidate. Stop before they persist state

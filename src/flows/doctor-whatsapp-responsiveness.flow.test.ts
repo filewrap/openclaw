@@ -110,11 +110,9 @@ describe("Doctor responsiveness contribution flow", () => {
               "Inspect Gateway diagnostics with openclaw gateway diagnostics export before deciding whether to close clients.",
           }),
         ]);
-        expect(output).toContain("Recommended improvements:");
-        expect(output).toContain("This snapshot does not identify the source of the pressure.");
-        expect(output).toContain(
-          "openclaw gateway diagnostics export before deciding whether to close clients.",
-        );
+        expect(output).not.toContain("Recommended improvements:");
+        expect(output).not.toContain("This snapshot does not identify the source of the pressure.");
+        expect(output).not.toContain("Gateway reports pressure");
       }
       expect(kill).not.toHaveBeenCalled();
       expect(mocks.note.mock.calls.filter(([, title]) => title === "Doctor warnings")).toEqual([]);
