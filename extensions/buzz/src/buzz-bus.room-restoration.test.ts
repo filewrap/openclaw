@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
-import type { BuzzBus } from "./buzz-bus.js";
 import { createBuzzRelayFixture, useBuzzRelayTestHarness } from "./buzz-relay.test-harness.js";
 
 type BuzzRelayFixture = Awaited<ReturnType<typeof createBuzzRelayFixture>>;
