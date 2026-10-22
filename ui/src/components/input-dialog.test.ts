@@ -4,6 +4,7 @@ import { flush } from "solid-js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGatewayHarness } from "../app/overlays-access.test-support.ts";
 import { getRenderedModalDialog, installDialogPolyfill } from "../test-helpers/modal-dialog.ts";
+import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import { showInputDialog } from "./input-dialog.ts";
 
 let restoreDialogPolyfill: () => void;
@@ -168,8 +169,7 @@ describe("showInputDialog", () => {
     submitForm();
     submitForm();
     expect(submit).toHaveBeenCalledOnce();
-    flush();
-    expect(dialogInput().disabled).toBe(true);
+    await waitForSolid(() => expect(dialogInput().disabled).toBe(true));
 
     const cancelEvent = new CustomEvent("modal-cancel", { cancelable: true });
     modal.dispatchEvent(cancelEvent);
@@ -179,6 +179,37 @@ describe("showInputDialog", () => {
     settle(null);
     await closed;
     expect(document.body.querySelector("openclaw-modal-dialog")).toBeNull();
+  });
+
+  it("retires a pending presentation on owner abort and consumes its late failure", async () => {
+    const controller = new AbortController();
+    let reject!: (error: Error) => void;
+    const submit = vi.fn(
+      () =>
+        new Promise<string | null>((_resolve, rejectPromise) => {
+          reject = rejectPromise;
+        }),
+    );
+    const closed = showInputDialog({ ...REQUIRED, signal: controller.signal, submit });
+    await getRenderedModalDialog(document.body);
+    await type("Client work");
+    submitForm();
+    await waitForSolid(() => expect(dialogInput().disabled).toBe(true));
+
+    controller.abort();
+    await expect(closed).resolves.toBeNull();
+    const successor = showInputDialog({ title: "Next prompt" });
+    await getRenderedModalDialog(document.body);
+    await type("Still editable");
+    reject(new Error("retired operation failed"));
+    await waitForSolid(() => {
+      expect(dialogInput().value).toBe("Still editable");
+      expect(dialogInput().disabled).toBe(false);
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+    });
+    expect(submit).toHaveBeenCalledExactlyOnceWith("Client work");
+    findButton("Save").click();
+    await expect(successor).resolves.toBe("Still editable");
   });
 
   it.each(["synchronous", "asynchronous"])(
@@ -198,10 +229,9 @@ describe("showInputDialog", () => {
 
       await type("Client work");
       submitForm();
-      await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
-      await Promise.resolve();
+      await waitForSolid(() => expect(document.body.textContent).toContain("gateway exploded"));
 
-      expect(document.body.textContent).toContain("gateway exploded");
+      expect(submit).toHaveBeenCalledOnce();
       expect(dialogInput().disabled).toBe(false);
       expect(dialogInput().value).toBe("Client work");
       expect(findButton("Create group").disabled).toBe(false);
