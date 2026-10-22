@@ -174,7 +174,9 @@ it("defers HTML controls, retries imports, and retains the frame across source t
   flush();
   expect(canReload()).toBe(false);
   probe.resolve(new Response(null, { status: 200 }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
   expect(persist).not.toHaveBeenCalledWith(
     "openclaw.controlUi.staleChunkReloadBuildId",
     expect.any(String),
