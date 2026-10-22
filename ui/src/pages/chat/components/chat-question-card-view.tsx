@@ -1,12 +1,12 @@
-import { createMemo, lazy, Loading, onSettled, Show } from "solid-js";
+import { createMemo, createSignal, Errored, lazy, Loading, onSettled, Show } from "solid-js";
 import {
-  isOptionalElementDefined,
-  createLazyCustomElementRequests,
-} from "../../../app/lazy-custom-element.ts";
+  cancelStaleChunkRecovery,
+  isStaleChunkImportError,
+  retryStaleChunkReloadWhenReachable,
+} from "../../../app/stale-chunk-reload.ts";
 import { LazyViewError } from "../../../components/solid/lazy-view-error.tsx";
 import { LoadingState } from "../../../components/solid/loading-state.tsx";
 import { t } from "../../../lib/reactive/i18n.ts";
-import { projectOwner } from "../../../lib/reactive/projection.ts";
 import { defineSolidBridge, type SolidBridgeElement } from "../../../lib/solid-bridge.ts";
 import type { QuestionPanelProps } from "./chat-question-types.ts";
 
@@ -17,51 +17,77 @@ export type ChatQuestionCard = SolidBridgeElement<CardProps>;
 const QuestionPanel = lazy(() => import("./chat-question-panel.tsx"), {
   export: "ChatQuestionPanel",
 });
-const questionPanelElement = {
-  tagName: "openclaw-chat-question-panel",
-  get label() {
-    return t("chat.questions.eyebrow");
-  },
-  loadModule: QuestionPanel.preload,
-};
 
 export const ChatQuestionCard = defineSolidBridge<CardProps>(
   "openclaw-chat-question-card",
   (props, host) => {
     host.style.display = "contents";
-    return <Show when={props.props}>{(panel) => <QuestionCardContents panel={panel()} />}</Show>;
+    return (
+      <Show when={props.props}>
+        {(panel) => <QuestionCardContents panel={panel()} host={host} />}
+      </Show>
+    );
   },
   { properties: { props: { default: undefined, attribute: false } } },
 );
 
-function QuestionCardContents(props: { panel: QuestionPanelProps }) {
-  const loader = createLazyCustomElementRequests();
-  const loadState = projectOwner(loader, (owner) => owner.visibleState);
-  onSettled(() => {
-    loader.requestWhileActive(questionPanelElement, true);
-    return () => loader.requestWhileActive(questionPanelElement, false);
-  });
-  const view = createMemo(() => {
-    const value = loadState.read();
-    return {
-      loaded: isOptionalElementDefined(questionPanelElement),
-      failure: value?.status === "error" ? value : undefined,
-    };
-  });
+function QuestionCardContents(props: { panel: QuestionPanelProps; host: HTMLElement }) {
+  const [attempt, setAttempt] = createSignal(0);
   return (
-    <Loading fallback={<LoadingState />}>
-      {view().loaded ? (
+    <Loading on={attempt()} fallback={<LoadingState />}>
+      <Errored
+        fallback={(error, reset) => {
+          const failure = error();
+          const stale = isStaleChunkImportError(failure);
+          const [recovery, setRecovery] = createSignal<Promise<boolean>>();
+          const recovered = createMemo(() => recovery());
+          let active = true;
+          onSettled(() => () => {
+            active = false;
+            if (stale) {
+              cancelStaleChunkRecovery();
+            }
+          });
+          const retry = () => {
+            if (!active || !props.host.isConnected) {
+              return;
+            }
+            if (!stale) {
+              setAttempt((value) => value + 1);
+              reset();
+              return;
+            }
+            const requestKey = props.panel.model.requestKey;
+            const isCurrent = () =>
+              active &&
+              props.host.isConnected &&
+              error() === failure &&
+              props.panel.model.requestKey === requestKey;
+            setRecovery(
+              retryStaleChunkReloadWhenReachable({ canReload: isCurrent }).then((reloading) => {
+                if (!reloading && isCurrent()) {
+                  setAttempt((value) => value + 1);
+                  reset();
+                }
+                return reloading;
+              }),
+            );
+          };
+          return (
+            <Loading on={recovery()} fallback={<LoadingState />}>
+              {recovered()}
+              <LazyViewError
+                error={error()}
+                stale={stale}
+                subtitle={t("chat.questions.eyebrow")}
+                onRetry={retry}
+              />
+            </Loading>
+          );
+        }}
+      >
         <QuestionPanel props={props.panel} />
-      ) : view().failure ? (
-        <LazyViewError
-          error={view().failure?.error}
-          stale={view().failure?.stale}
-          subtitle={questionPanelElement.label}
-          onRetry={() => loader.retry()}
-        />
-      ) : (
-        <LoadingState />
-      )}
+      </Errored>
     </Loading>
   );
 }
