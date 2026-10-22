@@ -66,9 +66,9 @@ function createRecordWithBuildVersion(openclawVersion: unknown) {
     source: manifestRecord.source,
     rootDir: manifestRecord.rootDir,
     origin: manifestRecord.origin,
-    packageManifest: {
-      build: { openclawVersion },
-    } as unknown as NonNullable<PluginCandidate["packageManifest"]>,
+    packageManifest: { build: { openclawVersion } } as unknown as NonNullable<
+      PluginCandidate["packageManifest"]
+    >,
   } satisfies PluginCandidate;
 
   const cfg = { plugins: { entries: { example: { enabled: true } } } };
@@ -107,10 +107,7 @@ it("createPluginCandidatesFromManifestRegistry preserves child identity and owne
     plugins: [childRecord],
     diagnostics: [],
   })[0];
-  expect(candidate).toMatchObject({
-    idHint: "example/child",
-    effectivePluginId: "example/child",
-  });
+  expect(candidate).toMatchObject({ idHint: "example/child", effectivePluginId: "example/child" });
   expect(resolvePluginCandidateInstallOwner(candidate!)).toBe("example");
   expect(
     Object.getOwnPropertyDescriptor(childRecord, Symbol.for("openclaw.pluginManifestInstallOwner")),
@@ -147,9 +144,7 @@ it("validates pattern properties instead of requiring empty config", () => {
     ok: true,
     value: { S_SETTING: "configured" },
   });
-  expect(validatePluginConfig({ schema, value: { S_SETTING: 42 } })).toMatchObject({
-    ok: false,
-  });
+  expect(validatePluginConfig({ schema, value: { S_SETTING: 42 } })).toMatchObject({ ok: false });
 });
 
 afterAll(cleanupPluginLoaderFixturesForTest);
@@ -244,12 +239,10 @@ module.exports = { id: "source-fixture", register(api) {
                 },
               },
             };
-            const load = (overrides: PluginLoadOptions) =>
+            const load = (overrides: PluginLoadOptions = {}) =>
               loadOpenClawPlugins({ ...options, ...overrides });
             const registry =
-              surface === "runtime"
-                ? loadOpenClawPlugins(options)
-                : await loadOpenClawPluginCliRegistry(options);
+              surface === "runtime" ? load() : await loadOpenClawPluginCliRegistry(options);
             expect(registry.plugins.find((plugin) => plugin.id === id)?.status).toBe(
               accepted ? "loaded" : "error",
             );
