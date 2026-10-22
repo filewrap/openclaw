@@ -1,6 +1,8 @@
 import type { SessionsListResult } from "../../api/types.ts";
+import type { ApplicationContext } from "../../app/context.ts";
 import type { SessionsGroupBy } from "../../lib/sessions/grouping.ts";
 import type { SessionArchivedFilter } from "../../lib/sessions/index.ts";
+import type { buildSessionsListQuery } from "./list-query.ts";
 import type { SessionDeleteRow } from "./selection.ts";
 import type { SessionsPageMenuProps } from "./session-menu.tsx";
 import type { TranscriptSearchProps } from "./transcript-search-view.tsx";
@@ -9,6 +11,13 @@ export type SessionsPageMutationResult =
   | "completed"
   | "stale"
   | { status: "failed"; error: unknown };
+
+export type SessionsPageListBinding = {
+  sessions: ApplicationContext["sessions"];
+  query: ReturnType<typeof buildSessionsListQuery>;
+  key: string;
+  transcriptKey: string;
+};
 
 export type SessionsPageState = {
   sortColumn: "key" | "updated";

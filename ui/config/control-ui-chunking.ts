@@ -62,12 +62,8 @@ export function controlUiStableChunkName(id: string): string | undefined {
     case "node_modules/@solidjs/signals/dist/prod/deferred.js":
       // Only lazy resource consumers need this scheduler hook.
       return "solid-deferred-runtime";
-    case "node_modules/@solidjs/signals/dist/prod/core/action.js":
-    case "node_modules/@solidjs/signals/dist/dev/core/action.js":
-    case "node_modules/@solidjs/signals/dist/prod/core/verdict.js":
-    case "node_modules/@solidjs/signals/dist/prod/core/lanes.js":
-      // Solid's eager initializers must not pull the route boot groups into startup.
-      return "solid-actions-runtime";
+    case "ui/src/lib/nodes/device-signing.runtime.ts":
+      return "device-signing-runtime";
     case "ui/src/lib/device-pair-setup.ts":
       // Pairing loads on interaction; the earlier boot capture must not pull it into either route.
       return "device-pair-setup-runtime";
@@ -115,15 +111,20 @@ export function controlUiStableChunkName(id: string): string | undefined {
       return "session-snapshot-database";
   }
 
+  if (
+    moduleIdIncludesPackage(id, "solid-js") ||
+    moduleIdIncludesPackage(id, "@solidjs/signals") ||
+    moduleIdIncludesPackage(id, "@solidjs/web")
+  ) {
+    // Keep Solid's eager initializers out of route groups, with one compression dictionary.
+    return "solid-runtime";
+  }
+
   if (normalized.startsWith(resolvedLocaleConfigHintsModulePrefix)) {
     return `${controlUiLocaleConfigHintsChunkPrefix}${normalized.slice(resolvedLocaleConfigHintsModulePrefix.length)}`;
   }
   if (normalized.startsWith(resolvedLocaleNamespaceModulePrefix)) {
     return `locale-namespace-${normalized.slice(resolvedLocaleNamespaceModulePrefix.length).replace("/", "-")}`;
-  }
-
-  if (normalized.endsWith("/ui/src/lib/gateway-methods.ts")) {
-    return "gateway-runtime";
   }
 
   if (
@@ -155,10 +156,9 @@ export function controlUiStableChunkName(id: string): string | undefined {
     return "phone-runtime";
   }
 
-  // @noble/hashes stays out of this startup chunk deliberately: it is only
-  // dynamically imported as the insecure-context fallback digest provider.
-  if (moduleIdIncludesPackage(id, "@noble/ed25519") || moduleIdIncludesPackage(id, "ipaddr.js")) {
-    return "gateway-runtime";
+  // Keep fallback digests separate so secure contexts only download the signer.
+  if (moduleIdIncludesPackage(id, "@noble/ed25519")) {
+    return "device-signing-runtime";
   }
 
   return undefined;
@@ -175,18 +175,18 @@ export function createControlUiCodeSplitting(options: { includeBootGroups?: bool
       },
       {
         name: "control-ui-core",
-        test: (id: string) => normalizeModuleId(id).includes("/ui/src/"),
+        test: () => true,
         tags: ["$initial"] as ["$initial"],
         priority: 10,
         maxSize: 1024 * 1024,
       },
       {
-        name: "control-ui-foundation",
-        test: (id: string) => !normalizeModuleId(id).includes("/ui/src/"),
+        name: "control-ui-lib",
+        test: (id: string) => normalizeModuleId(id).includes("/ui/src/lib/"),
         tags: ["$initial"] as ["$initial"],
-        priority: 10,
-        // Already-initial dependencies compress well; the UI source-size cap
-        // fragmented them into tiny requests. The asset gzip budget bounds them.
+        priority: 11,
+        // Keep initial state owners and utilities together across core entry points.
+        maxSize: 1024 * 1024,
       },
       ...(options.includeBootGroups === false
         ? []

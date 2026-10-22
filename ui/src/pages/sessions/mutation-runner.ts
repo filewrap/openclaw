@@ -3,6 +3,7 @@ import type { SessionsPageMutationResult } from "./sessions-page-state.types.ts"
 
 export function createSessionsMutationRunner(host: {
   isCurrent: (scope: SessionsPageRequestScope) => boolean;
+  started: () => void;
   settled: (outcome: SessionsPageMutationResult | void) => void;
 }) {
   let pending = false;
@@ -17,6 +18,7 @@ export function createSessionsMutationRunner(host: {
       scope: SessionsPageRequestScope,
       mutate: () => Promise<SessionsPageMutationResult | void>,
     ): Promise<SessionsPageMutationResult | void> {
+      host.started();
       pending = true;
       let outcome: SessionsPageMutationResult | void = undefined;
       try {
