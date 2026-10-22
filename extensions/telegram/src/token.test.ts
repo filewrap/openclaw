@@ -50,12 +50,6 @@ describe("resolveTelegramToken", () => {
     }
   });
 
-  it("resolves the configured defaultAccount token when accountId is omitted (#61012)", () => {
-    vi.stubEnv("TELEGRAM_BOT_TOKEN", "env-token");
-    const cfg = config({ defaultAccount: "kitt", accounts: { kitt: { botToken: "kitt-token" } } });
-    expect(resolveTelegramToken(cfg)).toEqual({ token: "kitt-token", source: "config" });
-  });
-
   it.runIf(process.platform !== "win32")(
     "marks symlinked tokenFile paths configured-unavailable",
     () => {

@@ -54,42 +54,42 @@ function buildMultiAccountTelegramConfig(params: {
   sessionStorePath?: string;
   opsOverrides?: Partial<TelegramAccountConfig>;
 }): OpenClawConfig {
+  const account = (botToken: string, overrides: Partial<TelegramAccountConfig> = {}) => ({
+    botToken,
+    ...overrides,
+    execApprovals: { enabled: true, approvers: ["123"] },
+  });
   return {
-    ...(params.sessionStorePath ? { session: { store: params.sessionStorePath } } : {}),
     channels: {
       telegram: {
         accounts: {
-          default: {
-            botToken: "tok-default",
-            execApprovals: { enabled: true, approvers: ["123"] },
-          },
-          ops: {
-            botToken: "tok-ops",
-            ...params.opsOverrides,
-            execApprovals: { enabled: true, approvers: ["123"] },
-          },
+          default: account("tok-default"),
+          ops: account("tok-ops", params.opsOverrides),
         },
       },
     },
-  } as OpenClawConfig;
+    ...(params.sessionStorePath ? { session: { store: params.sessionStorePath } } : {}),
+  };
 }
 
-function makeChannelApprovalRequest(params: {
-  id: string;
-  sessionKey?: string;
-  turnSourceChannel?: string;
-}): TelegramExecApprovalRequest {
+function makeChannelApprovalRequest(
+  id: string,
+  turnSourceChannel = "telegram",
+  sessionKey = "agent:ops:missing",
+): TelegramExecApprovalRequest {
   return {
-    id: params.id,
-    request: {
-      command: "echo hi",
-      sessionKey: params.sessionKey ?? "agent:ops:missing",
-      turnSourceChannel: params.turnSourceChannel ?? "slack",
-      turnSourceTo: "channel:C123",
-    },
+    id,
+    request: { command: "echo hi", sessionKey, turnSourceChannel, turnSourceTo: "channel:C123" },
     createdAtMs: 0,
     expiresAtMs: 1000,
   };
+}
+async function eligibleAccounts(cfg: OpenClawConfig, request: TelegramExecApprovalRequest) {
+  const results = [];
+  for (const accountId of ["default", "ops"]) {
+    results.push(await shouldHandleTelegramExecApprovalRequest({ cfg, accountId, request }));
+  }
+  return results;
 }
 
 describe("telegram exec approvals", () => {
@@ -115,10 +115,7 @@ describe("telegram exec approvals", () => {
     expect(
       await shouldHandleTelegramExecApprovalRequest({
         cfg,
-        request: makeChannelApprovalRequest({
-          id: "command-owner-inference",
-          turnSourceChannel: "telegram",
-        }),
+        request: makeChannelApprovalRequest("command-owner-inference"),
       }),
     ).toBe(true);
   });
@@ -139,44 +136,19 @@ describe("telegram exec approvals", () => {
   });
 
   it("routes non-telegram turn sources using the current stored telegram account", async () => {
-    const tmpDir = sessionDirs.make();
-    const storePath = path.join(tmpDir, "sessions.json");
+    const storePath = path.join(sessionDirs.make(), "sessions.json");
     await storeDelivery(storePath, "ops", 1);
     const cfg = buildMultiAccountTelegramConfig({ sessionStorePath: storePath });
-    const request = makeChannelApprovalRequest({
-      id: "req-2",
-      sessionKey: "agent:ops:telegram:direct:123",
-    });
-
-    expect(
-      await shouldHandleTelegramExecApprovalRequest({ cfg, accountId: "default", request }),
-    ).toBe(false);
-    expect(await shouldHandleTelegramExecApprovalRequest({ cfg, accountId: "ops", request })).toBe(
-      true,
-    );
+    const request = makeChannelApprovalRequest("req-2", "slack", "agent:ops:telegram:direct:123");
+    expect(await eligibleAccounts(cfg, request)).toEqual([false, true]);
 
     await storeDelivery(storePath, "default", 2);
-    expect(
-      await shouldHandleTelegramExecApprovalRequest({ cfg, accountId: "default", request }),
-    ).toBe(true);
-    expect(await shouldHandleTelegramExecApprovalRequest({ cfg, accountId: "ops", request })).toBe(
-      false,
-    );
+    expect(await eligibleAccounts(cfg, request)).toEqual([true, false]);
   });
 
   it("ignores disabled telegram accounts when checking unbound account eligibility", async () => {
     const cfg = buildMultiAccountTelegramConfig({ opsOverrides: { enabled: false } });
-    const request = makeChannelApprovalRequest({
-      id: "req-6",
-      turnSourceChannel: "telegram",
-    });
-
-    expect(
-      await shouldHandleTelegramExecApprovalRequest({ cfg, accountId: "default", request }),
-    ).toBe(true);
-    expect(await shouldHandleTelegramExecApprovalRequest({ cfg, accountId: "ops", request })).toBe(
-      false,
-    );
+    expect(await eligibleAccounts(cfg, makeChannelApprovalRequest("req-6"))).toEqual([true, false]);
   });
 
   it("only injects approval buttons on eligible telegram targets", () => {
