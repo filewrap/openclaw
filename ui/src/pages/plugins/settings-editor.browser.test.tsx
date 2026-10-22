@@ -57,6 +57,8 @@ async function mount(overrides: Partial<PluginSettingsEditorModel> = {}) {
     canEditConfig: true,
     configBusy: false,
     configSchemaLoading: false,
+    configRead: undefined,
+    configSchemaRead: undefined,
     configError: null,
     onConfigPatch: vi.fn(),
     onConfigRemove: vi.fn(),

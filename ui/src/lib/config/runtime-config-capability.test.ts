@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createDeferred as deferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient, GatewayHelloOk } from "../../api/gateway.ts";
 import type { ConfigSnapshot } from "../../api/types.ts";
+import { currentConfigSchemaRead } from "./config-state-model.ts";
 import {
   CONFIG_FORM_AUTO_SAVE_DEBOUNCE_MS,
   createGatewayHarness,
@@ -18,6 +19,33 @@ import {
 import { createRuntimeConfigCapability } from "./runtime-config-capability.ts";
 
 describe("runtime config capability", () => {
+  it("publishes schema completion and retires a held schema read on disconnect", async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    let attempts = 0;
+    const { runtimeConfig, state, client, publish } = await loadHarness(
+      mockRequest({
+        "config.schema": () => (++attempts === 1 ? first.promise : second.promise),
+      }),
+    );
+    const initialLoad = runtimeConfig.ensureSchemaLoaded();
+    const initial = currentConfigSchemaRead(state)!;
+    first.reject(new Error("Schema unavailable"));
+    await initialLoad;
+    expect(await initial.completion.promise).toEqual({ ok: false, error: "Schema unavailable" });
+
+    const retry = runtimeConfig.ensureSchemaLoaded();
+    const pending = currentConfigSchemaRead(state)!;
+    expect(pending).not.toBe(initial);
+    publish(false, client);
+    expect(await pending.invalidated.promise).toMatchObject({ ok: false });
+    expect(currentConfigSchemaRead(state)).toBeUndefined();
+    second.resolve({ schema: { type: "object" }, uiHints: {}, version: "retired" });
+    await retry;
+    expect(state.configSchema).toBeNull();
+    runtimeConfig.dispose();
+  });
+
   it("does not load configuration for session-only connections, including reconnect refresh", async () => {
     const request = vi.fn(async () => ({ config: {}, hash: "ready", valid: true, issues: [] }));
     let auth: GatewayHelloOk["auth"] = { role: "operator", scopes: ["operator.sessions.read"] };

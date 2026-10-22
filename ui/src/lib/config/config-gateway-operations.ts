@@ -27,6 +27,7 @@ import {
 } from "./config-mutation-error.ts";
 import {
   beginConfigRead,
+  beginConfigSchemaRead,
   currentConfigRead,
   currentConfigConnectionEpoch,
   isCurrentConfigConnection,
@@ -410,6 +411,8 @@ export async function loadConfigSchema(state: RuntimeConfigState) {
   }
   const connectionEpoch = currentConfigConnectionEpoch(state);
   state.configSchemaLoading = true;
+  const read = beginConfigSchemaRead(state);
+  let result: Result<void, string> = ok(undefined);
   try {
     const res = await client.request<ConfigSchemaResponse>("config.schema", {});
     if (!isCurrentConfigConnection(state, client, connectionEpoch)) {
@@ -421,6 +424,7 @@ export async function loadConfigSchema(state: RuntimeConfigState) {
   } catch (err) {
     if (isCurrentConfigConnection(state, client, connectionEpoch)) {
       state.lastError = formatUiError(err);
+      result = failure(state.lastError);
       if (state.configAutoSaveStatus === "rejected") {
         state.configAutoSaveStatus = "error";
       }
@@ -429,6 +433,7 @@ export async function loadConfigSchema(state: RuntimeConfigState) {
     if (isCurrentConfigConnection(state, client, connectionEpoch)) {
       state.configSchemaLoading = false;
     }
+    read.completion.resolve(result);
   }
 }
 

@@ -1,6 +1,7 @@
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import type { ConfigUiHints } from "../../api/types.ts";
 import type { JsonSchema } from "../../lib/config-form-utils.ts";
+import type { ConfigRead, ConfigSchemaRead } from "../../lib/config/config-state-model.ts";
 import type { PluginListResult } from "../../lib/plugins/index.ts";
 export const PLUGIN_SETTINGS_VISIBLE_KEYS = ["enabled", "allow", "deny", "load", "slots"] as const;
 
@@ -16,6 +17,8 @@ export type PluginSettingsEditorModel = {
   configBusy: boolean;
   configSchemaLoading: boolean;
   configError: string | null;
+  configRead: ConfigRead | undefined;
+  configSchemaRead: ConfigSchemaRead | undefined;
   onConfigPatch: (path: Array<string | number>, value: unknown) => boolean | void;
   onConfigRemove: (path: Array<string | number>) => boolean | void;
   onConfigReadRetry: () => void;
