@@ -359,6 +359,7 @@ export function createModelProviderLogin(options: LoginOptions) {
     view.read();
     const current = wizard.viewProps({
       mode: loginMode === "access" ? "auth" : loginMode,
+      busy: mutationActive,
       refreshWarning,
       doneMessage: runner.state.authLabel
         ? t("modelSetup.providerConnected", { provider: runner.state.authLabel })
