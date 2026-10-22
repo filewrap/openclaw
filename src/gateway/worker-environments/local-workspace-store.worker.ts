@@ -5,7 +5,6 @@ import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.
 import { assertOpenClawStateLeasesWorkerOwnedInTransaction } from "../../state/openclaw-state-lease-worker.js";
 import type { OpenClawStateLeaseIdentity } from "../../state/openclaw-state-lease.types.js";
 import type { WorkerOperationContext } from "../../state/worker-operation-registry.js";
-import { boundLocalWorkspaceCommit } from "./local-workspace-publication.js";
 import {
   mutateLocalWorkspaceProjection,
   type LocalWorkspaceMutation,
@@ -30,14 +29,11 @@ export const localWorkspaceOperations = {
     }
     return runOpenClawStateWriteTransaction(
       ({ db }) => {
-        const row = mutateLocalWorkspaceProjection(db, input.id, input.mutation);
+        const committed = mutateLocalWorkspaceProjection(db, input.id, input.mutation) ?? null;
         assertOpenClawStateLeasesWorkerOwnedInTransaction(db, input.leases, "commit");
         assertWorktreeRegistryPredicates(db, input.predicates);
-        deferSqliteWorkerCommitReceipt(
-          db,
-          boundLocalWorkspaceCommit(input.mutation.kind === "delete" ? null : row),
-        );
-        return row;
+        deferSqliteWorkerCommitReceipt(db, committed);
+        return committed;
       },
       { database: open() },
     );
