@@ -11,6 +11,11 @@ const BOT_PUBLIC_KEY = "a".repeat(64);
 const ALICE_PUBLIC_KEY = "b".repeat(64);
 const BOB_PUBLIC_KEY = "c".repeat(64);
 const ROOM_ID = "7c4a6d2a-2ed9-4b4e-a5e2-4d705ee9b34c";
+const ALICE = {
+  name: "Alice",
+  avatarUrl: "https://example.com/alice.png",
+  handle: "alice@example.com",
+};
 
 function event(params: Partial<Event> & Pick<Event, "kind" | "pubkey">): Event {
   return {
@@ -72,27 +77,6 @@ function room(name: string, archived?: boolean, overrides: Partial<Event> = {}) 
 
 describe("Buzz directory state", () => {
   it("parses Buzz profile precedence without trusting malformed content", () => {
-    const preferred = profileState();
-    expect(
-      preferred.applyProfileEvent(
-        profile({
-          display_name: "Alice",
-          name: "ignored",
-          picture: "https://example.com/alice.png",
-          image: "https://example.com/ignored.png",
-          nip05: "alice@example.com",
-        }),
-      ),
-    ).toBe(true);
-    expect(preferred.listPeers({})).toMatchObject([
-      {
-        id: ALICE_PUBLIC_KEY,
-        name: "Alice",
-        handle: "alice@example.com",
-        avatarUrl: "https://example.com/alice.png",
-      },
-    ]);
-
     const fallback = profileState();
     fallback.applyProfileEvent(
       profile({ name: "Fallback", image: "https://example.com/fallback.png" }),
@@ -113,20 +97,23 @@ describe("Buzz directory state", () => {
 
   it("keeps stable public-key ids while applying current profiles and room metadata", () => {
     const state = profileState([BOT_PUBLIC_KEY, ALICE_PUBLIC_KEY, BOB_PUBLIC_KEY]);
-    state.applyProfileEvent(
-      profile({ display_name: "Alice", picture: "https://example.com/alice.png" }),
-    );
+    expect(
+      state.applyProfileEvent(
+        profile({
+          display_name: ALICE.name,
+          name: "ignored",
+          picture: ALICE.avatarUrl,
+          image: "https://example.com/ignored.png",
+          nip05: ALICE.handle,
+        }),
+      ),
+    ).toBe(true);
     state.applyRoomEvent(room("Engineering"));
 
     expect(state.resolveSenderName(ALICE_PUBLIC_KEY)).toBe("Alice");
     expect(state.resolveSenderName(BOB_PUBLIC_KEY)).toBe("cccccccc...cccccc");
     expect(state.listPeers({ query: "ali" })).toMatchObject([
-      {
-        kind: "user",
-        id: ALICE_PUBLIC_KEY,
-        name: "Alice",
-        avatarUrl: "https://example.com/alice.png",
-      },
+      { kind: "user", id: ALICE_PUBLIC_KEY, ...ALICE },
     ]);
     expect(state.listGroups({})).toMatchObject([
       {
@@ -162,20 +149,13 @@ describe("Buzz directory state", () => {
 
   it("uses deterministic latest-event ordering and bounded profile selection", () => {
     const state = profileState([BOT_PUBLIC_KEY, BOB_PUBLIC_KEY, ALICE_PUBLIC_KEY], 2);
-
+    const apply = (name: string, overrides: Partial<Event>) =>
+      state.applyProfileEvent(profile({ display_name: name }, overrides));
     expect(state.profilePublicKeys()).toEqual([BOT_PUBLIC_KEY, ALICE_PUBLIC_KEY]);
-    expect(
-      state.applyProfileEvent(profile({ display_name: "First" }, { id: "2".repeat(64) })),
-    ).toBe(true);
-    expect(
-      state.applyProfileEvent(profile({ display_name: "Older tie" }, { id: "3".repeat(64) })),
-    ).toBe(false);
-    expect(
-      state.applyProfileEvent(profile({ display_name: "Winning tie" }, { id: "1".repeat(64) })),
-    ).toBe(true);
-    expect(
-      state.applyProfileEvent(profile({ display_name: "Outside cap" }, { pubkey: BOB_PUBLIC_KEY })),
-    ).toBe(false);
+    expect(apply("First", { id: "2".repeat(64) })).toBe(true);
+    expect(apply("Older tie", { id: "3".repeat(64) })).toBe(false);
+    expect(apply("Winning tie", { id: "1".repeat(64) })).toBe(true);
+    expect(apply("Outside cap", { pubkey: BOB_PUBLIC_KEY })).toBe(false);
     expect(state.resolveSenderName(ALICE_PUBLIC_KEY)).toBe("Winning tie");
     expect(state.resolveSenderName(BOB_PUBLIC_KEY)).toBe("cccccccc...cccccc");
   });

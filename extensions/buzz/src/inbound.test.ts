@@ -33,11 +33,12 @@ const SENDER_PUBLIC_KEY = "b".repeat(64);
 const OTHER_PUBLIC_KEY = "c".repeat(64);
 
 function receive(
-  message: Partial<BuzzInboundMessage>,
+  message: Partial<BuzzInboundMessage> = {},
   params: Partial<Parameters<typeof handleBuzzInboundWithHistory>[0]> = {},
+  config: Partial<ResolvedBuzzAccount["config"]> = {},
 ) {
   return handleBuzzInboundWithHistory({
-    account: params.account ?? createAccount(),
+    account: params.account ?? createAccount(config),
     cfg: params.cfg ?? {},
     bus: params.bus ?? createBus(),
     ...createLifecycle(),
@@ -109,6 +110,10 @@ function firstDispatch(
     throw new Error("expected Buzz inbound dispatch");
   }
   return call[0];
+}
+
+function trigger(id: string, text: string, senderPubkey = SENDER_PUBLIC_KEY) {
+  return { id, text, senderPubkey, mentionedPubkeys: [BOT_PUBLIC_KEY] };
 }
 
 let runtime: ReturnType<typeof createPluginRuntimeMock>;
@@ -228,20 +233,12 @@ it("preserves passive arrivals while an earlier reply is in flight", async () =>
     return original(plan);
   });
   await params.receive({ text: "earlier context" });
-  const reply = params.receive({
-    id: "trigger",
-    text: "first",
-    mentionedPubkeys: [BOT_PUBLIC_KEY],
-  });
+  const reply = params.receive(trigger("trigger", "first"));
   await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1));
   await params.receive({ id: "later", text: "arrived during reply" });
   finished.resolve();
   await reply;
-  await params.receive({
-    id: "next-trigger",
-    text: "next",
-    mentionedPubkeys: [BOT_PUBLIC_KEY],
-  });
+  await params.receive(trigger("next-trigger", "next"));
   const nextBody = dispatch.mock.calls[1]?.[0].ctxPayload.BodyForAgent;
   expect(nextBody).toContain("arrived during reply");
   expect(nextBody).not.toContain("earlier context");
@@ -251,7 +248,7 @@ it("retains human context across a loop-suppressed bot turn until a human dispat
   const { runDispatch, recordInboundSession } = createPreparedInboundRuntime();
   const params = createHistoryParams(2, new Map([[SENDER_PUBLIC_KEY, "bot"]]));
   params.account.relayUrl = "wss://passive-bot-loop.example.test/";
-  const cfg = {
+  params.cfg = {
     channels: {
       defaults: {
         botLoopProtection: {
@@ -263,7 +260,6 @@ it("retains human context across a loop-suppressed bot turn until a human dispat
       },
     },
   } satisfies OpenClawConfig;
-  params.cfg = cfg;
   await params.receive({ id: "bot-seed", mentionedPubkeys: [BOT_PUBLIC_KEY] });
   await params.receive({
     id: "human-context",
@@ -279,12 +275,7 @@ it("retains human context across a loop-suppressed bot turn until a human dispat
     admission: { kind: "drop", reason: "bot-loop-protection" },
     dispatched: false,
   });
-  await params.receive({
-    id: "human-accepted",
-    senderPubkey: OTHER_PUBLIC_KEY,
-    text: "Which context?",
-    mentionedPubkeys: [BOT_PUBLIC_KEY],
-  });
+  await params.receive(trigger("human-accepted", "Which context?", OTHER_PUBLIC_KEY));
   expect(runDispatch).toHaveBeenCalledTimes(2);
   expect(recordInboundSession).toHaveBeenCalledTimes(2);
   expect(dispatch.mock.calls[2]?.[0].ctxPayload.BodyForAgent).toContain("Keep this human context.");
@@ -295,10 +286,8 @@ it.each(["off", "all"] as const)("routes replies and typing with replyToMode=%s"
   const bus = createBus();
   await receive(
     { id: "event-reply", threadId: "event-root", mentionedPubkeys: [BOT_PUBLIC_KEY] },
-    {
-      bus,
-      account: createAccount({ replyToMode: mode }),
-    },
+    { bus },
+    { replyToMode: mode },
   );
   const dispatch = firstDispatch(runtime);
   expect(dispatch.ctxPayload).toMatchObject({
@@ -357,13 +346,11 @@ it("uses current Buzz labels without changing the stable sender identity", async
 
   await receive(
     {},
+    { bus },
     {
-      account: createAccount({
-        groupPolicy: "allowlist",
-        groupAllowFrom: [SENDER_PUBLIC_KEY],
-        groups: { [ROOM_ID]: { requireMention: false } },
-      }),
-      bus,
+      groupPolicy: "allowlist",
+      groupAllowFrom: [SENDER_PUBLIC_KEY],
+      groups: { [ROOM_ID]: { requireMention: false } },
     },
   );
 
@@ -463,11 +450,10 @@ it.each([
 it("drops mentioned room messages from senders outside the allowlist", async () => {
   await receive(
     { mentionedPubkeys: [BOT_PUBLIC_KEY] },
+    {},
     {
-      account: createAccount({
-        groupPolicy: "allowlist",
-        groupAllowFrom: [OTHER_PUBLIC_KEY],
-      }),
+      groupPolicy: "allowlist",
+      groupAllowFrom: [OTHER_PUBLIC_KEY],
     },
   );
 
@@ -491,18 +477,17 @@ it.each([
   const group = { groupAllowFrom: undefined, ...room };
   await receive(
     {},
+    {},
     {
-      account: createAccount({
-        groupPolicy: accountPolicy,
-        groupAllowFrom: accountAllowFrom ? [...accountAllowFrom] : undefined,
-        groups: {
-          [ROOM_ID]: {
-            requireMention: false,
-            ...group,
-            groupAllowFrom: group.groupAllowFrom ? [...group.groupAllowFrom] : undefined,
-          },
+      groupPolicy: accountPolicy,
+      groupAllowFrom: accountAllowFrom ? [...accountAllowFrom] : undefined,
+      groups: {
+        [ROOM_ID]: {
+          requireMention: false,
+          ...group,
+          groupAllowFrom: group.groupAllowFrom ? [...group.groupAllowFrom] : undefined,
         },
-      }),
+      },
     },
   );
 
@@ -549,7 +534,8 @@ it.each([false, true])(
           truncated: true,
         },
       },
-      { account: createAccount({ groups: { [ROOM_ID]: { requireMention } } }) },
+      {},
+      { groups: { [ROOM_ID]: { requireMention } } },
     );
     expect(runtime.channel.commands.shouldComputeCommandAuthorized).not.toHaveBeenCalled();
     expect(runtime.channel.mentions.matchesMentionPatterns).not.toHaveBeenCalled();

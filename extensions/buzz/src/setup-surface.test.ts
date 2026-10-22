@@ -215,7 +215,6 @@ it.each([false, true])(
       named ? { ...root, accounts: { ada: expected } } : expected,
     );
     expect(discoverRooms).toHaveBeenCalledWith({ relayUrl, privateKey: PRIVATE_KEY });
-    expect(result.cfg.channels?.buzz?.authTag).toBeUndefined();
     expect(
       vi.mocked(prompter.note).mock.calls.some(([message]) => message.includes(PRIVATE_KEY)),
     ).toBe(false);
@@ -251,10 +250,6 @@ it("keeps generated identities stable per account across wizard replay", async (
   expect(root).toEqual(cfg.channels!.buzz);
   expect(ada.cfg.channels?.buzz?.accounts?.ada?.groups).toEqual({
     [ROOM_B]: { enabled: true, requireMention: false },
-  });
-  expect(discoverRooms).toHaveBeenCalledWith({
-    relayUrl: "wss://buzz.example.com",
-    privateKey: PRIVATE_KEY,
   });
 });
 

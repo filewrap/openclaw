@@ -5,6 +5,7 @@ import { buzzSetupContract as setup } from "./setup-core.js";
 
 const RELAY_URL = "wss://buzz.example.com";
 const AUTH_TAG = '["auth","owner","kind=9","signature"]';
+const ORIGINAL = { enabled: false, relayUrl: "wss://original.example.com", authTag: AUTH_TAG };
 const envInput = { relayUrl: RELAY_URL, useEnv: true };
 type SetupInput = Parameters<typeof setup.applyAccountConfig>[0]["input"];
 
@@ -29,10 +30,8 @@ describe("buzzSetupContract", () => {
 
   it("adds a named account without changing the existing private-key SecretRef", () => {
     const buzz = {
-      enabled: false,
-      relayUrl: "wss://original.example.com",
+      ...ORIGINAL,
       privateKey: { source: "env" as const, provider: "default", id: "BUZZ_EXISTING_KEY" },
-      authTag: AUTH_TAG,
     };
     const cfg = config(buzz);
     const input = { relayUrl: "wss://new.example.com", privateKey: "22".repeat(32) };
@@ -51,11 +50,7 @@ describe("buzzSetupContract", () => {
   it("rejects named environment-backed setup without changing the existing bot identity", () => {
     const existingPrivateKey = "11".repeat(32);
     vi.stubEnv("BUZZ_PRIVATE_KEY", existingPrivateKey);
-    const buzz = {
-      enabled: false,
-      relayUrl: "wss://original.example.com",
-      authTag: AUTH_TAG,
-    };
+    const buzz = ORIGINAL;
     const cfg = config(buzz);
     const input = { relayUrl: "wss://new.example.com", useEnv: true };
     const accountId = resolveAccount(cfg, input);
