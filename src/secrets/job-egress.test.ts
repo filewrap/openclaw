@@ -94,15 +94,6 @@ function options(
   };
 }
 
-async function expectRejectedSecret(id: string, message: string) {
-  const run = vi.fn();
-  await expect(withSetupSecretEgress(options(undefined, { TOKEN: id }), run)).rejects.toThrow(
-    message,
-  );
-  expect(startProxy).not.toHaveBeenCalled();
-  expect(run).not.toHaveBeenCalled();
-}
-
 it("returns only selected POSIX sentinel env and public trust with host proxy credentials separate", async () => {
   const result = await withSetupSecretEgress(options(), async (egress) => {
     expect(Object.keys(egress.remoteEnv).toSorted()).toEqual(["GIT_PASSWORD", "npm_token"]);
@@ -132,7 +123,14 @@ it.each([
   ["MISSING_TOKEN", "protected shared-store entry"],
   ["READABLE_TOKEN", "protected shared-store entry"],
   ["UNBOUND_TOKEN", "--allow-host <host>"],
-])("rejects %s without a proxy or partial environment", expectRejectedSecret);
+])("rejects %s without a proxy or partial environment", async (id, message) => {
+  const run = vi.fn();
+  await expect(withSetupSecretEgress(options(undefined, { TOKEN: id }), run)).rejects.toThrow(
+    message,
+  );
+  expect(startProxy).not.toHaveBeenCalled();
+  expect(run).not.toHaveBeenCalled();
+});
 
 it("revokes cancellation before the job's termination listener and cleans up on failure", async () => {
   const controller = new AbortController();
@@ -152,6 +150,9 @@ it("revokes cancellation before the job's termination listener and cleans up on 
   finished.resolve();
   await expect(running).rejects.toThrow("synthetic command failed");
   expect(stop).toHaveBeenCalledOnce();
+  await expect(fs.stat(startProxy.mock.calls[0]![0].caDir)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 });
 
 it("does not publish a grant if cancelled while registration is awaiting acknowledgement", async () => {

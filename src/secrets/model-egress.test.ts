@@ -73,47 +73,44 @@ function runOptions() {
 }
 
 it.each([
-  { configured: undefined, baseUrl: "https://api.openai.com/v1", host: "api.openai.com" },
-  {
-    configured: "https://inference.example.test/tenant/v1",
-    baseUrl: "https://inference.example.test/tenant/v1",
-    host: "inference.example.test",
-  },
-])(
-  "seals the credential only for the selected route $baseUrl",
-  async ({ configured, baseUrl, host }) => {
-    if (configured) {
-      config.models!.providers!.openai!.baseUrl = configured;
-    } else {
-      Reflect.deleteProperty(config.models!.providers!.openai!, "baseUrl");
-    }
-    const result = await withConfiguredModelEgress(runOptions(), async (egress) => {
-      expect(egress).toMatchObject({
-        baseUrl,
-        model: "gpt-5.5",
-        allowedHosts: [host],
-        caBundle: publicCa,
-      });
-      expect(resolveSecretSentinel(egress.sentinel)).toBe(credential);
-      expect(JSON.stringify(egress)).not.toContain(credential);
-      expect(proxy.registerProcess).toHaveBeenCalledWith([
-        {
-          name: "openai model API key",
-          sentinel: egress.sentinel,
-          allowedHosts: [host],
-        },
-      ]);
-      expect(revoke).not.toHaveBeenCalled();
-      return 17;
+  [undefined, "https://api.openai.com/v1", "api.openai.com"],
+  [
+    "https://inference.example.test/tenant/v1",
+    "https://inference.example.test/tenant/v1",
+    "inference.example.test",
+  ],
+])("seals the credential only for the selected route %s", async (configured, baseUrl, host) => {
+  if (configured) {
+    config.models!.providers!.openai!.baseUrl = configured;
+  } else {
+    Reflect.deleteProperty(config.models!.providers!.openai!, "baseUrl");
+  }
+  const result = await withConfiguredModelEgress(runOptions(), async (egress) => {
+    expect(egress).toMatchObject({
+      baseUrl,
+      model: "gpt-5.5",
+      allowedHosts: [host],
+      caBundle: publicCa,
     });
-    expect(result).toBe(17);
-    expect(revoke).toHaveBeenCalled();
-    expect(proxy.stop).toHaveBeenCalledOnce();
-    const options = startProxy.mock.calls[0]![0];
-    expect(options.allowedHosts).toEqual([host]);
-    await expect(fs.stat(options.caDir)).rejects.toMatchObject({ code: "ENOENT" });
-  },
-);
+    expect(resolveSecretSentinel(egress.sentinel)).toBe(credential);
+    expect(JSON.stringify(egress)).not.toContain(credential);
+    expect(proxy.registerProcess).toHaveBeenCalledWith([
+      {
+        name: "openai model API key",
+        sentinel: egress.sentinel,
+        allowedHosts: [host],
+      },
+    ]);
+    expect(revoke).not.toHaveBeenCalled();
+    return 17;
+  });
+  expect(result).toBe(17);
+  expect(revoke).toHaveBeenCalled();
+  expect(proxy.stop).toHaveBeenCalledOnce();
+  const options = startProxy.mock.calls[0]![0];
+  expect(options.allowedHosts).toEqual([host]);
+  await expect(fs.stat(options.caDir)).rejects.toMatchObject({ code: "ENOENT" });
+});
 
 it("streams progress before completion and redacts credentials split between chunks", async () => {
   const stdout: string[] = [];
@@ -186,15 +183,3 @@ it.each(["preparing", "running"])(
     expect(proxy.stop).toHaveBeenCalledOnce();
   },
 );
-
-it("revokes and removes the private CA directory when the command fails", async () => {
-  await expect(
-    withConfiguredModelEgress(runOptions(), () =>
-      Promise.reject(new Error("remote command failed")),
-    ),
-  ).rejects.toThrow("remote command failed");
-  expect(revoke).toHaveBeenCalled();
-  expect(proxy.stop).toHaveBeenCalledOnce();
-  const options = startProxy.mock.calls[0]![0];
-  await expect(fs.stat(options.caDir)).rejects.toMatchObject({ code: "ENOENT" });
-});

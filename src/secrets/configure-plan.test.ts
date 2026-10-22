@@ -32,10 +32,13 @@ describe("secrets configure plan helpers", () => {
     } as OpenClawConfig;
 
     const candidates = buildConfigureCandidatesForScope({ config });
-    const paths = candidates.map((entry) => entry.path);
-    expect(paths).toContain(TALK_TEST_PROVIDER_API_KEY_PATH);
-    expect(paths).toContain("channels.telegram.botToken");
-    expect(paths).toContain("channels.nostr.privateKey");
+    expect(candidates.map((entry) => entry.path)).toEqual(
+      expect.arrayContaining([
+        TALK_TEST_PROVIDER_API_KEY_PATH,
+        "channels.telegram.botToken",
+        "channels.nostr.privateKey",
+      ]),
+    );
     expect(resolveConfigSecretTargetByPath(["channels", "nostr", "privateKey"])).toMatchObject({
       entry: {
         id: "channels.nostr.privateKey",
@@ -78,15 +81,12 @@ describe("secrets configure plan helpers", () => {
       },
     });
 
-    const talkCandidate = candidates.find(
-      (entry) => entry.path === TALK_TEST_PROVIDER_API_KEY_PATH,
+    expect(candidates.map(({ path, existingRef }) => [path, existingRef])).toStrictEqual(
+      expect.arrayContaining([
+        ["profiles.openai:default.key", envRef("OPENAI_API_KEY")],
+        [TALK_TEST_PROVIDER_API_KEY_PATH, envRef("TALK_API_KEY")],
+      ]),
     );
-    expect(talkCandidate?.existingRef).toStrictEqual(envRef("TALK_API_KEY"));
-
-    const openaiCandidate = candidates.find(
-      (entry) => entry.path === "profiles.openai:default.key",
-    );
-    expect(openaiCandidate?.existingRef).toStrictEqual(envRef("OPENAI_API_KEY"));
   });
 
   it("reports configure change presence and builds deterministic plan shape", () => {
@@ -109,14 +109,14 @@ describe("secrets configure plan helpers", () => {
       providerChanges,
       generatedAt: "2026-02-28T00:00:00.000Z",
     });
-    expect(plan.targets.map((entry) => entry.path)).toEqual([TALK_TEST_PROVIDER_API_KEY_PATH]);
-    expect(plan.providerUpserts).toEqual({
-      default: { source: "env" },
-    });
-    expect(plan.options).toEqual({
-      scrubEnv: true,
-      scrubAuthProfilesForProviderTargets: true,
-      scrubLegacyAuthJson: false,
-    });
+    expect([plan.targets.map((entry) => entry.path), plan.providerUpserts, plan.options]).toEqual([
+      [TALK_TEST_PROVIDER_API_KEY_PATH],
+      { default: { source: "env" } },
+      {
+        scrubEnv: true,
+        scrubAuthProfilesForProviderTargets: true,
+        scrubLegacyAuthJson: false,
+      },
+    ]);
   });
 });

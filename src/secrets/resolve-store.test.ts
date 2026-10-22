@@ -38,19 +38,15 @@ afterEach(async () => {
 });
 
 describe("store SecretRef resolution", () => {
-  it("resolves the store default when an env provider uses the same alias", async () => {
-    const env = await createStateEnv(true);
-    await expect(
-      resolveSecretRefString(storedRef, { config: providerConfig("default", "env"), env }),
-    ).resolves.toBe("resolved-store-secret");
-  });
-
-  it("resolves an explicitly configured store provider alias", async () => {
+  it.each([
+    ["default", "env"],
+    ["teamstore", "store"],
+  ] as const)("resolves store alias %s configured as %s", async (provider, source) => {
     const env = await createStateEnv(true);
     await expect(
       resolveSecretRefString(
-        { ...storedRef, provider: "teamstore" },
-        { config: providerConfig("teamstore", "store"), env },
+        { ...storedRef, provider },
+        { config: providerConfig(provider, source), env },
       ),
     ).resolves.toBe("resolved-store-secret");
   });

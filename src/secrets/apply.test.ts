@@ -128,18 +128,15 @@ function createAuthTarget(
   };
 }
 
-function createOpenAiProviderTarget(params?: {
-  path?: string;
-  pathSegments?: string[];
-  providerId?: string;
-  ref?: SecretsApplyPlan["targets"][number]["ref"];
-}): SecretsApplyPlan["targets"][number] {
+function createOpenAiProviderTarget(
+  overrides: Partial<SecretsApplyPlan["targets"][number]> = {},
+): SecretsApplyPlan["targets"][number] {
   return {
     type: "models.providers.apiKey",
-    path: params?.path ?? "models.providers.openai.apiKey",
-    ...(params?.pathSegments ? { pathSegments: params.pathSegments } : {}),
-    providerId: params?.providerId ?? "openai",
-    ref: params?.ref ?? OPENAI_API_KEY_ENV_REF,
+    path: "models.providers.openai.apiKey",
+    providerId: "openai",
+    ref: OPENAI_API_KEY_ENV_REF,
+    ...overrides,
   };
 }
 
@@ -166,28 +163,25 @@ function createPluginProviderPlan(): SecretsApplyPlan {
   });
 }
 
-async function writeOpenAiExecResolverConfig(params: {
-  fixture: ApplyFixture;
-  execScriptPath: string;
-  execLogPath?: string;
-}): Promise<void> {
+async function writeOpenAiExecResolverConfig(fixture: ApplyFixture, execLogPath: string) {
+  const execScriptPath = path.join(fixture.rootDir, "resolver.sh");
   await fs.writeFile(
-    params.execScriptPath,
+    execScriptPath,
     [
       "#!/bin/sh",
-      ...(params.execLogPath ? [`printf 'x\\n' >> ${JSON.stringify(params.execLogPath)}`] : []),
+      `printf 'x\\n' >> ${JSON.stringify(execLogPath)}`,
       "cat >/dev/null",
       'printf \'{"protocolVersion":1,"values":{"providers/openai/apiKey":"sk-openai-exec"}}\'', // pragma: allowlist secret
     ].join("\n"),
     { encoding: "utf8", mode: 0o700 },
   );
 
-  await writeJsonFile(params.fixture.configPath, {
+  await writeJsonFile(fixture.configPath, {
     secrets: {
       providers: {
         execmain: {
           source: "exec",
-          command: params.execScriptPath,
+          command: execScriptPath,
           jsonOnly: true,
           timeoutMs: 20_000,
           noOutputTimeoutMs: 10_000,
@@ -222,7 +216,22 @@ describe("secrets apply", () => {
     writeStore(createAuthProfileStoreFixture(profiles));
   const readJsonFile = async (filePath: string) =>
     JSON.parse(await fs.readFile(filePath, "utf8")) as Record<string, unknown>;
+  const readText = (filePath: string) => fs.readFile(filePath, "utf8");
   const apiKey = (key: string) => ({ type: "api_key" as const, provider: "openai", key });
+  const persisted = (agentDir = fixture.agentDir) => ({
+    credentials: readPersistedAuthProfileStoreRaw(agentDir),
+    state: readPersistedAuthProfileStateRaw(agentDir),
+  });
+  const fileSnapshot = async () => ({
+    config: await readText(fixture.configPath),
+    authJson: await readText(fixture.authJsonPath),
+    env: await readText(fixture.envPath),
+  });
+  const snapshot = async () => ({ ...persisted(), ...(await fileSnapshot()) });
+  const publishStore = (agentDir: string) =>
+    replaceRuntimeAuthProfileStoreSnapshots([
+      { agentDir, store: loadAuthProfileStoreWithoutExternalProfiles(agentDir) },
+    ]);
 
   async function configureAgents(firstAgentDir: string, secondAgentDir: string) {
     const entries = { first: { agentDir: firstAgentDir }, second: { agentDir: secondAgentDir } };
@@ -287,11 +296,7 @@ describe("secrets apply", () => {
       ],
       options: SCRUB_OPTIONS,
     });
-    const configBefore = await fs.readFile(fixture.configPath, "utf8");
-    const credentialsBefore = readPersistedAuthProfileStoreRaw(fixture.agentDir);
-    const stateBefore = readPersistedAuthProfileStateRaw(fixture.agentDir);
-    const authJsonBefore = await fs.readFile(fixture.authJsonPath, "utf8");
-    const envBefore = await fs.readFile(fixture.envPath, "utf8");
+    const before = await snapshot();
     const authority = captureCredentialAuthority(fixture.agentDir, fixture.env);
 
     const dryRun = await apply(plan, false);
@@ -301,11 +306,7 @@ describe("secrets apply", () => {
       skippedExecRefs: 0,
       checks: { resolvabilityComplete: true },
     });
-    expect(await fs.readFile(fixture.configPath, "utf8")).toBe(configBefore);
-    expect(readPersistedAuthProfileStoreRaw(fixture.agentDir)).toEqual(credentialsBefore);
-    expect(readPersistedAuthProfileStateRaw(fixture.agentDir)).toEqual(stateBefore);
-    expect(await fs.readFile(fixture.authJsonPath, "utf8")).toBe(authJsonBefore);
-    expect(await fs.readFile(fixture.envPath, "utf8")).toBe(envBefore);
+    expect(await snapshot()).toEqual(before);
 
     prepareSecretsRuntimeSnapshotMock.mockImplementationOnce(async ({ loadAuthStore }) => {
       const store = await expectDefined(
@@ -329,19 +330,17 @@ describe("secrets apply", () => {
       OPENAI_API_KEY_ENV_REF,
     );
 
-    const nextAuthStore = (await readAuthStore(fixture)) as unknown as {
-      profiles: { "openai:default": { key?: string; keyRef?: unknown } };
-    };
-    expect(nextAuthStore.profiles["openai:default"].key).toBeUndefined();
-    expect(nextAuthStore.profiles["openai:default"].keyRef).toEqual({
-      ...OPENAI_API_KEY_ENV_REF,
-      id: "OPENAI_KEY_NEXT",
+    const profile = (await readAuthStore(fixture)).profiles["openai:default"];
+    expect(profile).toEqual({
+      type: "api_key",
+      provider: "openai",
+      keyRef: { ...OPENAI_API_KEY_ENV_REF, id: "OPENAI_KEY_NEXT" },
     });
-    expect(authority.readCurrentCredential()).toEqual(nextAuthStore.profiles["openai:default"]);
+    expect(authority.readCurrentCredential()).toEqual(profile);
 
     expect((await readJsonFile(fixture.authJsonPath)).openai).toBeDefined();
 
-    const nextEnv = await fs.readFile(fixture.envPath, "utf8");
+    const nextEnv = await readText(fixture.envPath);
     expect(nextEnv).not.toContain("sk-openai-plaintext");
     expect(nextEnv).toContain("UNRELATED=value");
     expect(nextEnv).toContain("GITHUB_TOKEN=unmigrated-github-token");
@@ -358,11 +357,11 @@ describe("secrets apply", () => {
     });
     await apply(scrubPlan());
 
-    const nextAuthStore = (await readAuthStore(fixture)) as unknown as {
-      profiles: { "openai:bot": { token?: string; tokenRef?: unknown } };
-    };
-    expect(nextAuthStore.profiles["openai:bot"].token).toBeUndefined();
-    expect(nextAuthStore.profiles["openai:bot"].tokenRef).toEqual(OPENAI_API_KEY_ENV_REF);
+    expect((await readAuthStore(fixture)).profiles["openai:bot"]).toEqual({
+      type: "token",
+      provider: "openai",
+      tokenRef: OPENAI_API_KEY_ENV_REF,
+    });
   });
 
   it("scrubs malformed auth-profile ref residue during provider scrub", async () => {
@@ -376,11 +375,10 @@ describe("secrets apply", () => {
     });
     await apply(scrubPlan());
 
-    const nextAuthStore = (await readAuthStore(fixture)) as unknown as {
-      profiles: { "openai:default": { key?: string; keyRef?: unknown } };
-    };
-    expect(nextAuthStore.profiles["openai:default"].key).toBeUndefined();
-    expect(nextAuthStore.profiles["openai:default"].keyRef).toBeUndefined();
+    expect((await readAuthStore(fixture)).profiles["openai:default"]).toEqual({
+      type: "api_key",
+      provider: "openai",
+    });
   });
 
   it("keeps shared and implicit agent writes inside the explicitly routed state root", async () => {
@@ -388,43 +386,33 @@ describe("secrets apply", () => {
     const ambientMainDir = path.join(ambientStateDir, "agents", "main", "agent");
     const ambientOpsDir = path.join(ambientStateDir, "agents", "ops", "agent");
     vi.stubEnv("OPENCLAW_STATE_DIR", ambientStateDir);
-    saveAuthProfileStore(
-      createAuthProfileStoreFixture({
-        "openai:ambient-shared": apiKey("sk-ambient-shared"),
-      }),
-      ambientMainDir,
-      { filterExternalAuthProfiles: false, syncExternalCli: false },
-    );
-    saveAuthProfileStore(
-      createAuthProfileStoreFixture({
-        "openai:ambient-ops": apiKey("sk-ambient-ops"),
-      }),
-      ambientOpsDir,
-      { filterExternalAuthProfiles: false, syncExternalCli: false },
-    );
+    for (const [agentDir, suffix] of [
+      [ambientMainDir, "shared"],
+      [ambientOpsDir, "ops"],
+    ] as const) {
+      await writeJsonFile(
+        resolveAuthProfileDatabasePath(agentDir),
+        createAuthProfileStoreFixture({
+          [`openai:ambient-${suffix}`]: apiKey(`sk-ambient-${suffix}`),
+        }),
+      );
+    }
     await writeConfig({
       agents: { entries: { ops: {} } },
       models: { providers: { openai: createOpenAiProviderConfig() } },
     });
-    const stateDatabase = openOpenClawStateDatabase({ env: fixture.env }).db;
-    stateDatabase
-      .prepare(
-        `INSERT INTO config_machine_state (state_key, value_json, updated_at_ms)
-         VALUES ('auth.sharedStore', ?, 1)`,
-      )
-      .run(JSON.stringify({ location: "state-db" }));
-    stateDatabase
-      .prepare(
-        "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, 1)",
-      )
-      .run(
-        "authProfiles.store",
-        JSON.stringify(
-          createAuthProfileStoreFixture({
-            "openai:target-shared": apiKey("sk-target-shared"),
-          }),
-        ),
-      );
+    const insertState = openOpenClawStateDatabase({ env: fixture.env }).db.prepare(
+      "INSERT INTO config_machine_state (state_key, value_json, updated_at_ms) VALUES (?, ?, 1)",
+    );
+    insertState.run("auth.sharedStore", JSON.stringify({ location: "state-db" }));
+    insertState.run(
+      "authProfiles.store",
+      JSON.stringify(
+        createAuthProfileStoreFixture({
+          "openai:target-shared": apiKey("sk-target-shared"),
+        }),
+      ),
+    );
     noteCommittedSharedAuthStoreOwnership({ location: "state-db" }, fixture.env);
 
     await apply(scrubPlan());
@@ -451,8 +439,7 @@ describe("secrets apply", () => {
       return;
     }
     const execLogPath = path.join(fixture.rootDir, "exec-calls.log");
-    const execScriptPath = path.join(fixture.rootDir, "resolver.sh");
-    await writeOpenAiExecResolverConfig({ fixture, execScriptPath, execLogPath });
+    await writeOpenAiExecResolverConfig(fixture, execLogPath);
 
     const plan = createOpenAiExecProviderPlan();
     const dryRunSkipped = await apply(plan, false);
@@ -464,27 +451,22 @@ describe("secrets apply", () => {
     await expect(fs.stat(execLogPath)).rejects.toMatchObject({ code: "ENOENT" });
 
     const dryRunAllowed = await apply(plan, false, true);
-    expect(dryRunAllowed.mode).toBe("dry-run");
-    expect(dryRunAllowed.skippedExecRefs).toBe(0);
-    const callLog = await fs.readFile(execLogPath, "utf8");
+    expect(dryRunAllowed).toMatchObject({ mode: "dry-run", skippedExecRefs: 0 });
+    const callLog = await readText(execLogPath);
     expect(callLog.split("\n").some((line) => line.trim().length > 0)).toBe(true);
   });
 
-  it("rejects write mode for exec plans unless allowExec is set", async () => {
-    await expect(apply(createOpenAiExecProviderPlan())).rejects.toThrow(
-      "Plan contains exec SecretRefs/providers. Re-run with --allow-exec.",
-    );
-  });
-
-  it("rejects write mode for plans with exec provider upserts unless allowExec is set", async () => {
-    const plan = createPlan({
-      targets: [createOpenAiProviderTarget()],
-      providerUpserts: {
-        execmain: { source: "exec", command: "/bin/echo", args: ["ok"] },
-      },
-      options: NO_SCRUB,
-    });
-
+  it.each([
+    ["refs", createOpenAiExecProviderPlan()],
+    [
+      "provider upserts",
+      createPlan({
+        targets: [createOpenAiProviderTarget()],
+        providerUpserts: { execmain: { source: "exec", command: "/bin/echo", args: ["ok"] } },
+        options: NO_SCRUB,
+      }),
+    ],
+  ] as const)("rejects write mode with exec %s unless allowExec is set", async (_kind, plan) => {
     await expect(apply(plan)).rejects.toThrow(
       "Plan contains exec SecretRefs/providers. Re-run with --allow-exec.",
     );
@@ -507,9 +489,7 @@ describe("secrets apply", () => {
     await writeJsonFile(resolveAuthProfileDatabasePath(sharedDir), shared);
     await writeJsonFile(resolveAuthProfileDatabasePath(agentDir), local);
     await writeConfig({ agents: { entries: { ops: { agentDir } } } });
-    replaceRuntimeAuthProfileStoreSnapshots([
-      { agentDir, store: loadAuthProfileStoreWithoutExternalProfiles(agentDir) },
-    ]);
+    publishStore(agentDir);
     expect(getRuntimeAuthProfileStoreSnapshot(agentDir)?.profiles["openai:inherited"]).toEqual(
       shared.profiles["openai:inherited"],
     );
@@ -527,26 +507,19 @@ describe("secrets apply", () => {
 
   it("rolls back committed auth rows when runtime publication fails", async () => {
     await writeProfiles({ "openai:default": apiKey("fake") });
-    const credentialsBefore = readPersistedAuthProfileStoreRaw(fixture.agentDir);
-    const stateBefore = readPersistedAuthProfileStateRaw(fixture.agentDir);
+    const before = persisted();
     const plan = createPlan({
       targets: [createAuthTarget("main", "openai:default", "openai")],
       options: NO_SCRUB,
     });
-    replaceRuntimeAuthProfileStoreSnapshots([
-      {
-        agentDir: fixture.agentDir,
-        store: loadAuthProfileStoreWithoutExternalProfiles(fixture.agentDir),
-      },
-    ]);
+    publishStore(fixture.agentDir);
     const publicationFailure = failNextRuntimeAuthSnapshotPublication();
     const authority = captureCredentialAuthority(fixture.agentDir, fixture.env);
 
     await expect(apply(plan)).rejects.toThrow("auth profile runtime publication failed");
 
     expect(publicationFailure).toHaveBeenCalledOnce();
-    expect(readPersistedAuthProfileStoreRaw(fixture.agentDir)).toEqual(credentialsBefore);
-    expect(readPersistedAuthProfileStateRaw(fixture.agentDir)).toEqual(stateBefore);
+    expect(persisted()).toEqual(before);
     expect(authority.readCurrentCredential()).toEqual(apiKey("fake"));
   });
 
@@ -618,9 +591,9 @@ describe("secrets apply", () => {
 
       await expect(apply(plan)).rejects.toThrow("injected concurrent second auth store failure");
 
-      const persisted = await readAuthStore({ ...fixture, agentDir: firstAgentDir });
+      const persistedStore = await readAuthStore({ ...fixture, agentDir: firstAgentDir });
       const runtime = getRuntimeAuthProfileStoreSnapshot(firstAgentDir);
-      for (const store of [persisted, runtime]) {
+      for (const store of [persistedStore, runtime]) {
         if (concurrentMutation === "credentials") {
           expect(store?.profiles["openai:oauth"]).toMatchObject({
             access: "oauth-concurrent",
@@ -662,32 +635,20 @@ describe("secrets apply", () => {
     });
 
     expect((await apply(plan)).changed).toBe(true);
-    const nextAuthStore = await readAuthStore(fixture);
-    expect(Object.keys(nextAuthStore.profiles).toSorted()).toEqual([
-      "anthropic:claude-cli",
-      "openai:sidecar",
-      "openai:static",
-    ]);
-    const staticProfile = expectDefined(
-      nextAuthStore.profiles["openai:static"],
-      "static API key profile",
-    );
-    if (staticProfile.type !== "api_key") {
-      throw new Error("expected static API key profile");
-    }
-    expect(staticProfile.key).toBeUndefined();
-    expect(staticProfile.keyRef).toEqual(OPENAI_API_KEY_ENV_REF);
-    expect(nextAuthStore.profiles["openai:sidecar"]).toMatchObject({
-      type: "oauth",
-      provider: "openai",
-      email: "codex@example.invalid",
+    const store = await readAuthStore(fixture);
+    expect(store).toMatchObject({
+      order: { openai: ["openai:sidecar", "openai:static"] },
+      lastGood: { "claude-cli": "anthropic:claude-cli" },
     });
-    expect(nextAuthStore.profiles["anthropic:claude-cli"]).toEqual({
-      provider: "claude-cli",
-      type: "oauth",
+    expect(store.profiles).toEqual({
+      "openai:static": { type: "api_key", provider: "openai", keyRef: OPENAI_API_KEY_ENV_REF },
+      "openai:sidecar": expect.objectContaining({
+        type: "oauth",
+        provider: "openai",
+        email: "codex@example.invalid",
+      }),
+      "anthropic:claude-cli": { provider: "claude-cli", type: "oauth" },
     });
-    expect(nextAuthStore.order?.["openai"]).toEqual(["openai:sidecar", "openai:static"]);
-    expect(nextAuthStore.lastGood?.["claude-cli"]).toBe("anthropic:claude-cli");
   });
 
   it("is idempotent on repeated write applies", async () => {
@@ -695,22 +656,16 @@ describe("secrets apply", () => {
 
     const first = await apply(plan);
     expect(first.changed).toBe(true);
-    const configAfterFirst = await fs.readFile(fixture.configPath, "utf8");
-    const authStoreAfterFirst = JSON.stringify(await readAuthStore(fixture));
-    const authJsonAfterFirst = await fs.readFile(fixture.authJsonPath, "utf8");
-    const envAfterFirst = await fs.readFile(fixture.envPath, "utf8");
-
+    const before = await fileSnapshot();
+    const storeBefore = JSON.stringify(await readAuthStore(fixture));
     await fs.chmod(fixture.configPath, 0o400);
-
-    const second = await apply(plan);
-    expect(second.mode).toBe("write");
-    const configAfterSecond = await fs.readFile(fixture.configPath, "utf8");
-    expect(stripVolatileConfigMeta(configAfterSecond)).toEqual(
-      stripVolatileConfigMeta(configAfterFirst),
-    );
-    expect(JSON.stringify(await readAuthStore(fixture))).toBe(authStoreAfterFirst);
-    await expect(fs.readFile(fixture.authJsonPath, "utf8")).resolves.toBe(authJsonAfterFirst);
-    await expect(fs.readFile(fixture.envPath, "utf8")).resolves.toBe(envAfterFirst);
+    expect((await apply(plan)).mode).toBe("write");
+    const after = await fileSnapshot();
+    expect({ ...after, config: stripVolatileConfigMeta(after.config) }).toEqual({
+      ...before,
+      config: stripVolatileConfigMeta(before.config),
+    });
+    expect(JSON.stringify(await readAuthStore(fixture))).toBe(storeBefore);
   });
 
   it("applies targets safely when map keys contain dots", async () => {
@@ -732,35 +687,34 @@ describe("secrets apply", () => {
     expect(nextConfig.models?.providers?.openai).toBeUndefined();
   });
 
-  it("rejects plan targets that do not match allowed secret-bearing paths", async () => {
-    const plan = createPlan({
-      targets: [
-        createOpenAiProviderTarget({
-          path: "models.providers.openai.baseUrl",
-          pathSegments: ["models", "providers", "openai", "baseUrl"],
-        }),
-      ],
-    });
-
-    await expect(apply(plan, false)).rejects.toThrow("Invalid plan target path");
-  });
-
-  it("rejects plan targets with forbidden prototype-like path segments", async () => {
-    const plan = createPlan({
-      targets: [
-        {
-          type: "skills.entries.apiKey",
-          path: "skills.entries.__proto__.apiKey",
-          pathSegments: ["skills", "entries", "__proto__", "apiKey"],
-          ref: OPENAI_API_KEY_ENV_REF,
-        },
-      ],
-    });
-
-    await expect(apply(plan, false)).rejects.toThrow("Invalid plan target path");
-  });
+  it.each([
+    [
+      "non-secret",
+      createOpenAiProviderTarget({
+        path: "models.providers.openai.baseUrl",
+        pathSegments: ["models", "providers", "openai", "baseUrl"],
+      }),
+    ],
+    [
+      "prototype-like",
+      {
+        type: "skills.entries.apiKey",
+        path: "skills.entries.__proto__.apiKey",
+        pathSegments: ["skills", "entries", "__proto__", "apiKey"],
+        ref: OPENAI_API_KEY_ENV_REF,
+      },
+    ],
+  ] satisfies [string, SecretsApplyPlan["targets"][number]][])(
+    "rejects %s plan target paths",
+    async (_kind, target) => {
+      await expect(apply(createPlan({ targets: [target] }), false)).rejects.toThrow(
+        "Invalid plan target path",
+      );
+    },
+  );
 
   it("applies provider upserts and deletes from plan", async () => {
+    const { apiKey: _key, ...openai } = createOpenAiProviderConfig();
     await writeConfig({
       secrets: {
         providers: {
@@ -768,15 +722,7 @@ describe("secrets apply", () => {
           fileold: { source: "file", path: "/tmp/old-secrets.json", mode: "json" },
         },
       },
-      models: {
-        providers: {
-          openai: {
-            baseUrl: "https://api.openai.com/v1",
-            api: "openai-completions",
-            models: [{ id: "gpt-5", name: "gpt-5" }],
-          },
-        },
-      },
+      models: { providers: { openai } },
     });
 
     const plan = createPlan({
@@ -833,28 +779,21 @@ describe("secrets apply", () => {
 
   it("scrubs canonical state without touching an existing legacy directory", async () => {
     const homeDir = tempDirs.make("openclaw-secrets-apply-root-");
-    const openclawDir = path.join(homeDir, ".openclaw");
+    const canonical = await createApplyFixture(homeDir);
     const clawdbotDir = path.join(homeDir, ".clawdbot");
-    const configPath = path.join(openclawDir, "openclaw.json");
-    const agentDir = path.join(openclawDir, "agents", "main", "agent");
-    const openclawEnvPath = path.join(openclawDir, ".env");
     const clawdbotEnvPath = path.join(clawdbotDir, ".env");
-    const authStorePath = resolveAuthProfileDatabasePath(agentDir);
-
-    await fs.mkdir(agentDir, { recursive: true });
     await fs.mkdir(clawdbotDir, { recursive: true });
-
     const env = {
       HOME: homeDir,
       OPENAI_API_KEY: "sk-openai-plaintext", // pragma: allowlist secret
     };
 
-    await writeJsonFile(configPath, {
+    await writeJsonFile(canonical.configPath, {
       models: { providers: { openai: createOpenAiProviderConfig() } },
     });
-    await writeJsonFile(authStorePath, createAuthProfileStoreFixture({}));
+    await writeJsonFile(canonical.authStorePath, createAuthProfileStoreFixture({}));
     await fs.writeFile(
-      openclawEnvPath,
+      canonical.envPath,
       "OPENAI_API_KEY=sk-openai-plaintext\nUNRELATED=value\n", // pragma: allowlist secret
       "utf8",
     );
@@ -870,11 +809,11 @@ describe("secrets apply", () => {
       changed: true,
     });
 
-    const nextOpenclawEnv = await fs.readFile(openclawEnvPath, "utf8");
+    const nextOpenclawEnv = await readText(canonical.envPath);
     expect(nextOpenclawEnv).not.toContain("sk-openai-plaintext");
     expect(nextOpenclawEnv).toContain("UNRELATED=value");
 
-    const nextClawdbotEnv = await fs.readFile(clawdbotEnvPath, "utf8");
+    const nextClawdbotEnv = await readText(clawdbotEnvPath);
     expect(nextClawdbotEnv).toContain("sk-should-not-touch");
     expect(nextClawdbotEnv).toContain("UNRELATED=legacy");
   });

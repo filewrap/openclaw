@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../config/config.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { createPluginManifestRecordFixture } from "../plugins/plugin-metadata.test-support.js";
 import type { SecretTargetRegistryEntry } from "./target-registry-types.js";
@@ -111,6 +112,9 @@ describe("secret target path ownership", () => {
     ["agents", "defaults", "workspace"],
     ["plugins", "enabled"],
     ["plugins", "entries", "example.plugin", "enabled"],
+    ["gateway", "auth", "mode"],
+    ["memory", "search", "remote", "headers", "Authorization"],
+    ["agents", "entries", "main", "memory", "search", "remote", "headers", "Authorization"],
   ])("rejects non-secret path %j without plugin metadata", (...segments) => {
     expect(resolvePath(segments)).toBeNull();
     expect(resolvePlan("unknown", segments)).toBeNull();
@@ -124,9 +128,63 @@ describe("secret target path ownership", () => {
       query.resolveSecretPlanTargetByPathCore({
         configFile: "auth-profile-store",
         pathSegments: ["profiles", "example", "key"],
-      })?.entry.id,
-    ).toBe("auth-profiles.api_key.key");
+      })?.entry,
+    ).toMatchObject({ id: "auth-profiles.api_key.key", targetType: "auth-profiles.api_key.key" });
     expectUndiscovered(mocks.metadata, mocks.channel);
+    expect(
+      query.resolveSecretPlanTargetByPathCore({
+        configFile: "openclaw.json",
+        pathSegments: ["models", "providers", "openai", "apiKey"],
+      }),
+    ).toMatchObject({ entry: { targetType: "models.providers.apiKey" }, providerId: "openai" });
+  });
+
+  it("discovers PostgreSQL connection refs for configure, apply, and audit", () => {
+    const connection = { source: "env" as const, provider: "default", id: "DATABASE_DSN" };
+    expect(
+      query.discoverConfigSecretTargetsByIds(
+        { database: { engine: "postgres", postgres: { connection } } },
+        new Set(["database.postgres.connection"]),
+      ),
+    ).toMatchObject([
+      {
+        path: "database.postgres.connection",
+        value: connection,
+        entry: { includeInPlan: true, includeInConfigure: true, includeInAudit: true },
+      },
+    ]);
+    expect(
+      query.resolveSecretPlanTargetByPathCore({
+        configFile: "openclaw.json",
+        pathSegments: ["database", "postgres", "connection"],
+      })?.entry.id,
+    ).toBe("database.postgres.connection");
+  });
+
+  it("preserves dotted provider header keys during discovery", () => {
+    const envRef = (id: string) => ({ source: "env" as const, provider: "default", id });
+    const config = {
+      models: {
+        providers: {
+          openai: {
+            headers: { "X.Trace": envRef("TRACE_HEADER") },
+            request: { headers: { "X.Request.Trace": envRef("REQUEST_TRACE_HEADER") } },
+          },
+        },
+      },
+    } as unknown as OpenClawConfig;
+    expect(
+      query
+        .discoverConfigSecretTargetsByIds(
+          config,
+          new Set(["models.providers.*.headers.*", "models.providers.*.request.headers.*"]),
+        )
+        .map(({ path }) => path)
+        .toSorted(),
+    ).toEqual([
+      'models.providers.openai.headers["X.Trace"]',
+      'models.providers.openai.request.headers["X.Request.Trace"]',
+    ]);
   });
 
   it("loads only the selected plugin's manifest targets, preserving literal IDs", () => {

@@ -6936,7 +6936,6 @@
 ["src/secrets/runtime.test-support.ts","../plugins/installed-plugin-index-records.js","afb2b4a588159d57df8f5038c979f1f9b79ba4922c881e627fa1aa25d5658cba",1]
 ["src/secrets/runtime.test-support.ts","../plugins/web-search-providers.runtime.js","516f5a2f31da44e0571dfa28090680ef1136b59d8536cc79d9bae5c896d28829",1]
 ["src/secrets/target-registry-data.current-snapshot.test.ts","../plugins/bundled-plugin-metadata.js","e593a212c7eeea4f23c7b08767f77e39d57157e718425774c1f6addbf01f1ba2",1]
-["src/secrets/target-registry.test.ts","../plugins/plugin-metadata-snapshot.js","5017613f430c5cc497c96083418fedc93b012a2299a8c9a6d4ab4bf228951d8c",1]
 ["src/security/audit-channel-entry-authentication.test.ts","../channels/message-access/store-allow-from.js","6c2947b6d926e663c302fe5625de6d036307066d2fc1865e249267d52f701058",1]
 ["src/security/audit-channel-readonly-setup-fallback.test.ts","./audit.nondeep.runtime.js","50d85fc5d5df17d53696af6c71a1e806b64ba818866b8f2f3edfa1b6ef0e6a77",1]
 ["src/security/audit-extra.sync.test.ts","../plugins/web-search-credential-presence.js","0ecbddbe68e68cdca6e035423338f247c6f880bb2565b20d0398e40e09494dd8",1]

@@ -47,26 +47,22 @@ function loadContract(options: Partial<Parameters<typeof loadChannelSecretContra
   });
 }
 
+const contractIds = (api: ReturnType<typeof loadChannelSecretContractApi>) =>
+  api?.secretTargetRegistryEntries?.map(({ id }) => id);
+const usePlugins = (...plugins: ReturnType<typeof writeExternalChannelPlugin>[]) =>
+  loadPluginMetadataSnapshotMock.mockReturnValue({ plugins });
+
 function expectOfficialFallback() {
   const api = loadContract({
     channelId: "qqbot",
     config: { channels: { qqbot: { appId: "app" } } },
     loadablePluginOrigins: undefined,
   });
-  expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
+  expect(contractIds(api)).toEqual([
     "channels.qqbot.accounts.*.clientSecret",
     "channels.qqbot.clientSecret",
   ]);
   return api;
-}
-
-function channelSecretContractModuleSource(channelId: string) {
-  return `
-module.exports = {
-  secretTargetRegistryEntries: [{ id: "channels.${channelId}.token" }],
-  collectRuntimeConfigAssignments() {}
-};
-`;
 }
 
 function writeExternalChannelPlugin(params: {
@@ -79,7 +75,10 @@ function writeExternalChannelPlugin(params: {
   fs.mkdirSync(contractDir, { recursive: true });
   fs.writeFileSync(
     path.join(contractDir, "secret-contract-api.cjs"),
-    channelSecretContractModuleSource(params.channelId ?? "discord"),
+    `module.exports = {
+  secretTargetRegistryEntries: [{ id: "channels.${params.channelId ?? "discord"}.token" }],
+  collectRuntimeConfigAssignments() {}
+};`,
     "utf8",
   );
   return {
@@ -107,22 +106,18 @@ describe("external channel secret contract api", () => {
       path.join(broken.rootDir, "secret-contract-api.cjs"),
       'throw new Error("contract dependency unavailable");\n',
     );
-    loadPluginMetadataSnapshotMock.mockReturnValue({ plugins: [broken, healthy] });
+    usePlugins(broken, healthy);
 
     const api = loadChannelSecretContractApi({ channelId: "custom", config: {}, env: {} });
 
-    expect(api?.secretTargetRegistryEntries?.map((entry) => entry.id)).toEqual([
-      "channels.custom.token",
-    ]);
+    expect(contractIds(api)).toEqual(["channels.custom.token"]);
   });
 
   it("loads dist/ secret-contract-api sidecars for compiled npm-published external channel plugins", () => {
     const record = writeExternalChannelPlugin({ directory: "dist" });
-    loadPluginMetadataSnapshotMock.mockReturnValue({ plugins: [record] });
+    usePlugins(record);
     const contractApi = loadContract();
-    expect(contractApi?.secretTargetRegistryEntries?.map(({ id }) => id)).toContain(
-      "channels.discord.token",
-    );
+    expect(contractIds(contractApi)).toContain("channels.discord.token");
     expect(contractApi?.collectRuntimeConfigAssignments).toBeTypeOf("function");
   });
 
@@ -140,7 +135,7 @@ describe("external channel secret contract api", () => {
       );
       shouldRejectHardlinkedPluginFilesMock.mockReturnValue(false);
       const env = { OPENCLAW_NIX_MODE: "1" };
-      loadPluginMetadataSnapshotMock.mockReturnValue({ plugins: [record] });
+      usePlugins(record);
       const api = loadContract({ env });
 
       expect(shouldRejectHardlinkedPluginFilesMock).toHaveBeenCalledWith({
@@ -148,22 +143,20 @@ describe("external channel secret contract api", () => {
         rootDir: record.rootDir,
         env,
       });
-      expect(api?.secretTargetRegistryEntries?.map(({ id }) => id)).toContain(
-        "channels.discord.token",
-      );
+      expect(contractIds(api)).toContain("channels.discord.token");
     },
   );
 
   it("skips external channel records outside the loadable plugin origin set", () => {
     const record = writeExternalChannelPlugin({});
-    loadPluginMetadataSnapshotMock.mockReturnValue({ plugins: [record] });
+    usePlugins(record);
     const api = loadContract({ loadablePluginOrigins: new Map([["other", "global"]]) });
 
     expect(api).toBeUndefined();
   });
 
   it("falls back to official host secret metadata when an external plugin has no artifact", () => {
-    loadPluginMetadataSnapshotMock.mockReturnValue({ plugins: [] });
+    usePlugins();
 
     const api = expectOfficialFallback();
     expect(api?.collectRuntimeConfigAssignments).toBeTypeOf("function");
