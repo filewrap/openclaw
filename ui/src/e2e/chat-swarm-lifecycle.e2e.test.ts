@@ -186,10 +186,11 @@ suite.define(() => {
           await expectVisible(
             widget.getByText("Child runs finished. Check the conversation for the final response."),
           );
-        } finally {
+        } catch (error) {
           await logSwarmDiagnostic(page, gateway, sessionKey).catch(() => {
             console.info("[swarm-final-diagnostic] unavailable");
           });
+          throw error;
         }
         await capture(page, proofDir, "settled-details");
         await page.keyboard.press("Space");
