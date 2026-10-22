@@ -6,6 +6,7 @@ import type { CronScratchGetResult } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { cleanupSolid, mountSolid } from "../../test-helpers/mount-solid.ts";
+import { waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { createGateway, operatorHello } from "./cron-page.test-support.tsx";
 import { CronScratchEditor } from "./scratch-editor.tsx";
 
@@ -74,10 +75,46 @@ describe("ordinary automation scratch editor", () => {
     load.click();
     load.click();
     expect(request).toHaveBeenCalledOnce();
+    await settle();
+    expect(load.disabled).toBe(true);
     pending.resolve(snapshot("Saved notes", 1));
     await pending.promise;
     await settle();
     expect(editor.querySelector("textarea")?.value).toBe("Saved notes");
+    await waitForSolid(() => expect(load.disabled).toBe(false));
+  });
+
+  it("keeps the draft on a failed reload and allows another read", async () => {
+    const reload = createDeferred<CronScratchGetResult>();
+    const request = vi
+      .fn<GatewayBrowserClient["request"]>()
+      .mockResolvedValueOnce(snapshot("Saved notes", 1))
+      .mockImplementationOnce(() => reload.promise)
+      .mockResolvedValueOnce(snapshot("Updated notes", 2));
+    const { editor } = await mount(request);
+    await click(editor, "Load scratch");
+    const textarea = editor.querySelector("textarea")!;
+    textarea.value = "Unsaved draft";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle();
+    const button = getButtonByText(editor, "Reload scratch");
+    button.click();
+    await waitForSolid(() => expect(button.disabled).toBe(true));
+    expect(textarea.value).toBe("Unsaved draft");
+    reload.reject(new Error("Synthetic read unavailable"));
+    await waitForSolid(() => {
+      expect(editor.querySelector('[role="status"]')?.textContent).toBe(
+        "Synthetic read unavailable",
+      );
+      expect(button.disabled).toBe(false);
+    });
+    expect(editor.querySelector("textarea")).toBe(textarea);
+    expect(textarea.value).toBe("Unsaved draft");
+    button.click();
+    await waitForSolid(() => {
+      expect(textarea.value).toBe("Updated notes");
+      expect(editor.querySelector('[role="status"]')).toBeNull();
+    });
   });
 
   it("preserves a conflicting draft until reload and distinguishes empty scratch from removal", async () => {
