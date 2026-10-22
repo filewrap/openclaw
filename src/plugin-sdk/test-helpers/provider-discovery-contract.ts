@@ -158,9 +158,7 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
 
 function expectProviderFields(result: unknown, fields: Record<string, unknown>) {
   const provider = requireRecord(requireRecord(result, "catalog result").provider, "provider");
-  for (const [key, expected] of Object.entries(fields)) {
-    expect(provider[key]).toEqual(expected);
-  }
+  expect(provider).toEqual(expect.objectContaining(fields));
   return provider;
 }
 
@@ -180,29 +178,15 @@ function installDiscoveryHooks(options: DiscoveryContractOptions) {
         ...actual,
         DEFAULT_COPILOT_API_BASE_URL: "https://api.individual.githubcopilot.com",
         MINIMAX_OAUTH_MARKER: "minimax-oauth",
-        applyAuthProfileConfig: (config: OpenClawConfig) => config,
-        buildApiKeyCredential: (
-          provider: string,
-          key: unknown,
-          metadata?: Record<string, unknown>,
-        ) => ({
-          type: "api_key",
-          provider,
-          ...(typeof key === "string" ? { key } : {}),
-          ...(metadata ? { metadata } : {}),
-        }),
-        buildOauthProviderAuthResult: vi.fn(),
         buildCopilotIdeHeaders: vi.fn(() => ({
           "Editor-Version": "vscode/1.96.2",
           "User-Agent": "GitHubCopilotChat/0.26.7",
         })),
         coerceSecretRef: asNullableRecord,
-        ensureApiKeyFromOptionEnvOrPrompt: vi.fn(),
         ensureAuthProfileStore: ensureAuthProfileStoreMock,
         ensureAuthProfileStoreAsync: async (...args: unknown[]) =>
           ensureAuthProfileStoreMock(...args),
         listProfilesForProvider: listProfilesForProviderMock,
-        normalizeApiKeyInput: (value: unknown) => (typeof value === "string" ? value.trim() : ""),
         normalizeGithubCopilotDomain: (raw: unknown) => {
           const trimmed = typeof raw === "string" ? raw.trim().toLowerCase() : "";
           return trimmed === "github.com" || /^[a-z0-9-]+\.ghe\.com$/.test(trimmed)
@@ -212,8 +196,6 @@ function installDiscoveryHooks(options: DiscoveryContractOptions) {
         normalizeOptionalSecretInput: normalizeOptionalString,
         resolveNonEnvSecretRefApiKeyMarker: (source: unknown) =>
           typeof source === "string" ? source : "",
-        upsertAuthProfile: vi.fn(),
-        validateApiKeyInput: () => undefined,
       };
     });
     vi.doMock("../../plugins/provider-self-hosted-discovery.js", async (importOriginal) => {

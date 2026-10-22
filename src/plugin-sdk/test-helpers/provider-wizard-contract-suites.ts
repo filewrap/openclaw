@@ -25,21 +25,8 @@ const TEST_PROVIDERS: ProviderPlugin[] = [
     id: "alpha",
     label: "Alpha",
     auth: [
-      createAuthMethod("api-key", "API key", {
-        choiceLabel: "Alpha key",
-        choiceHint: "Use an API key",
-        groupId: "alpha",
-        groupLabel: "Alpha",
-        onboardingScopes: ["text-inference"],
-        modelTarget: "utility",
-      }),
-      createAuthMethod("oauth", "OAuth", {
-        choiceId: "alpha-oauth",
-        choiceLabel: "Alpha OAuth",
-        groupId: "alpha",
-        groupLabel: "Alpha",
-        groupHint: "Recommended",
-      }),
+      createAuthMethod("api-key", "API key", {}),
+      createAuthMethod("oauth", "OAuth", { choiceId: "alpha-oauth" }),
     ],
     wizard: {
       modelPicker: {
@@ -54,11 +41,7 @@ const TEST_PROVIDERS: ProviderPlugin[] = [
     label: "Beta",
     auth: [createAuthMethod("token", "Token")],
     wizard: {
-      setup: {
-        choiceLabel: "Beta setup",
-        groupId: "beta",
-        groupLabel: "Beta",
-      },
+      setup: {},
       modelPicker: {
         label: "Beta custom",
       },
@@ -72,9 +55,6 @@ const TEST_PROVIDERS: ProviderPlugin[] = [
       setup: {
         methodId: "alt",
         choiceId: "gamma-alt",
-        choiceLabel: "Gamma alt",
-        groupId: "gamma",
-        groupLabel: "Gamma",
       },
     },
   },
