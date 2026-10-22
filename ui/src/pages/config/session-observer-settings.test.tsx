@@ -61,8 +61,8 @@ describe("session observer settings patches", () => {
           sessionObserverModels: [{ id: "gpt-mini", name: "GPT Mini", provider: "openai" }],
           sessionObserverModelsUnavailable: true,
           sessionObserverDisabled: false,
-          setSessionObserverEnabled: () => undefined,
-          setSessionObserverUtilityModel: () => undefined,
+          setSessionObserverEnabled: async () => true,
+          setSessionObserverUtilityModel: async () => true,
         }),
       { container },
     );
@@ -126,8 +126,8 @@ describe("session observer settings patches", () => {
           sessionObserverModels: [],
           sessionObserverModelsUnavailable: false,
           sessionObserverDisabled: false,
-          setSessionObserverEnabled: () => undefined,
-          setSessionObserverUtilityModel: () => undefined,
+          setSessionObserverEnabled: async () => true,
+          setSessionObserverUtilityModel: async () => true,
         }),
       { container },
     );
