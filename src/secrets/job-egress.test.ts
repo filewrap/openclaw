@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
-import path from "node:path";
-import { afterAll, assert, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { withSetupSecretEgress } from "../plugin-sdk/secret-egress-runtime.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { closeOpenClawStateDatabaseAsync } from "../state/openclaw-state-db.js";
@@ -8,24 +7,14 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
-import type { SecretEgressSentinelBinding } from "./egress-proxy/proxy-server.js";
+import { hostProxy, publicCa, startProxy, useEgressProxyMock } from "./egress.test-support.js";
 import { resolveSecretSentinel } from "./sentinel.js";
 import { inspectSetupSecretMigration } from "./setup-secret-migration.js";
 import { writeSecretStoreEntries } from "./store/secret-store.js";
 
-const startProxy = vi.hoisted(() =>
-  vi.fn<typeof import("./egress-proxy/proxy-worker.js").startSecretEgressProxyWorker>(),
-);
-vi.mock("./egress-proxy/proxy-worker.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./egress-proxy/proxy-worker.js")>()),
-  startSecretEgressProxyWorker: startProxy,
-}));
-const revoke = vi.fn();
-const stop = vi.fn(async () => {});
+const { proxy, revoke } = useEgressProxyMock();
+const stop = proxy.stop;
 let state: OpenClawTestState;
-let registered: readonly SecretEgressSentinelBinding[];
-let beforeRegister: (() => Promise<void>) | undefined;
-const hostProxy = "http://openclaw:synthetic-job-proxy-token@127.0.0.1:12345";
 const protectedEntry = (name: string, value: string, ...allowedHosts: string[]) => ({
   name,
   value,
@@ -51,33 +40,6 @@ afterAll(async () => {
   await closeOpenClawStateDatabaseAsync();
   await state.cleanup();
 });
-beforeEach(() => {
-  vi.clearAllMocks();
-  registered = [];
-  beforeRegister = undefined;
-  startProxy.mockImplementation(async ({ caDir }) => {
-    const caPath = path.join(caDir, "trust-bundle.pem");
-    await fs.writeFile(caPath, "synthetic-public-job-ca");
-    return {
-      caCertPath: caPath,
-      proxyOrigin: "http://127.0.0.1:12345",
-      getCertificateStatus: async () => ({
-        state: "ready",
-        caExpiresAt: "2030-01-01",
-        failedCertificates: 0,
-      }),
-      registerProcess: async (bindings) => {
-        if (beforeRegister) {
-          await beforeRegister();
-        }
-        assert.isDefined(bindings);
-        registered = bindings;
-        return { env: { HTTPS_PROXY: hostProxy, NODE_EXTRA_CA_CERTS: caPath }, revoke };
-      },
-      stop,
-    };
-  });
-});
 
 function options(
   signal = new AbortController().signal,
@@ -99,7 +61,12 @@ it("returns only selected POSIX sentinel env and public trust with host proxy cr
     expect(Object.keys(egress.remoteEnv).toSorted()).toEqual(["GIT_PASSWORD", "npm_token"]);
     expect(resolveSecretSentinel(egress.remoteEnv.npm_token!)).toBe("synthetic-job-token");
     expect(resolveSecretSentinel(egress.remoteEnv.GIT_PASSWORD!)).toBe("synthetic-job-password");
-    expect(registered.map(({ name, allowedHosts }) => ({ name, allowedHosts }))).toEqual([
+    expect(
+      proxy.registerProcess.mock.calls[0]![0]?.map(({ name, allowedHosts }) => ({
+        name,
+        allowedHosts,
+      })),
+    ).toEqual([
       { name: "JOB_TOKEN", allowedHosts: ["registry.example.test"] },
       { name: "JOB_PASSWORD", allowedHosts: ["git.example.test"] },
     ]);
@@ -107,7 +74,7 @@ it("returns only selected POSIX sentinel env and public trust with host proxy cr
       expect(JSON.stringify(egress.remoteEnv)).not.toContain(privateValue);
     }
     expect(egress.hostEnv.HTTPS_PROXY).toBe(hostProxy);
-    expect(egress.caBundle).toBe("synthetic-public-job-ca");
+    expect(egress.caBundle).toBe(publicCa);
     egress.revoke();
     expect(revoke).toHaveBeenCalledOnce();
     return 23;
@@ -159,10 +126,12 @@ it("does not publish a grant if cancelled while registration is awaiting acknowl
   const controller = new AbortController();
   const entered = createDeferredCore();
   const acknowledge = createDeferredCore();
-  beforeRegister = () => {
+  const register = proxy.registerProcess.getMockImplementation()!;
+  proxy.registerProcess.mockImplementationOnce(async (...args) => {
     entered.resolve();
-    return acknowledge.promise;
-  };
+    await acknowledge.promise;
+    return register(...args);
+  });
   const run = vi.fn();
   const running = withSetupSecretEgress(options(controller.signal), run);
   await entered.promise;

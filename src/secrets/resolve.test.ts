@@ -28,6 +28,7 @@ import {
   withMockedWindowsAclVerificationUnavailable,
   withMockedWindowsPlatform,
 } from "../test-utils/vitest-spies.js";
+import { assertSecureExecCommandPath } from "./exec-provider-path-validation.js";
 import {
   describeSecretResolutionError,
   describeSecretResolutionOperatorDiagnostic,
@@ -42,18 +43,11 @@ import {
 } from "./resolve.js";
 
 async function writeSecureFile(filePath: string, content: string, mode = 0o600): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}-${Math.random()
-    .toString(16)
-    .slice(2)}`;
-  try {
-    await fs.writeFile(tempPath, content, "utf8");
-    await fs.chmod(tempPath, mode);
-    await fs.rename(tempPath, filePath);
-  } catch (err) {
-    await fs.rm(tempPath, { force: true }).catch(() => {});
-    throw err;
-  }
+  // Case-owned paths make a fixed staging name safe; rename must replace hardlinks.
+  const tempPath = `${filePath}.tmp`;
+  await fs.writeFile(tempPath, content, "utf8");
+  await fs.chmod(tempPath, mode);
+  await fs.rename(tempPath, filePath);
 }
 
 describe("secret ref resolver", () => {
@@ -170,6 +164,58 @@ describe("secret ref resolver", () => {
       return;
     }
     await fs.rm(fixtureRoot, { recursive: true, force: true });
+  });
+
+  describe("command path preflight", () => {
+    const check = (command: string, trustedDirs?: string[]) =>
+      assertSecureExecCommandPath({
+        command,
+        trustedDirs,
+        label: "secrets.providers.execmain.command",
+      });
+
+    describe.each([
+      ["executable", 0o755, false],
+      ["non-executable (startup parity)", 0o600, false],
+      ["trusted executable", 0o755, true],
+    ] as const)("regular %s", (_label, mode, trusted) => {
+      it.skipIf(isWindows && (mode === 0o600 || trusted))("accepts without executing", async () => {
+        const root = await fs.realpath(await createCaseDir("preflight"));
+        const command = path.join(root, "resolver");
+        const marker = path.join(root, "executed");
+        await writeSecureFile(
+          command,
+          `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, "executed");\n`,
+          mode,
+        );
+        await expect(check(command, trusted ? [root] : undefined)).resolves.toBe(command);
+        await expect(fs.access(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      });
+    });
+
+    it.skipIf(isWindows).each(["missing", "directory", "writable", "untrusted"] as const)(
+      "rejects a %s command path",
+      async (kind) => {
+        const root = await createCaseDir("preflight-invalid");
+        const command = kind === "directory" ? root : path.join(root, "resolver");
+        if (kind === "writable" || kind === "untrusted") {
+          await writeSecureFile(
+            command,
+            "#!/bin/sh\nexit 0\n",
+            kind === "writable" ? 0o666 : 0o755,
+          );
+        }
+        const errors = {
+          missing: "is not readable",
+          directory: "must be a file",
+          writable: "permissions are too open",
+          untrusted: "is outside trustedDirs",
+        };
+        await expect(
+          check(command, kind === "untrusted" ? [path.join(root, "trusted")] : undefined),
+        ).rejects.toThrow(errors[kind]);
+      },
+    );
   });
 
   it("does not rewrite an explicit default provider to a configured alias", async () => {
@@ -492,6 +538,14 @@ describe("secret ref resolver", () => {
           );
           expectWindowsProviderError(error, kind);
           if (kind === "exec") {
+            expect(error).toMatchObject({
+              cause: {
+                code: "permission-unverified",
+                message: expect.stringMatching(
+                  /ACL verification unavailable on Windows.*no provider-level bypass/,
+                ),
+              },
+            });
             await expect(fs.access(markerPath)).rejects.toThrow();
           }
         },

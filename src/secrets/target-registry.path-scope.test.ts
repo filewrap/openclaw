@@ -29,6 +29,7 @@ function target(id: string): SecretTargetRegistryEntry {
     includeInAudit: true,
   };
 }
+const contract = (...ids: string[]) => ({ secretTargetRegistryEntries: ids.map(target) });
 
 function plugin(id: string, channels: string[] = []): PluginManifestRecord {
   return createPluginManifestRecordFixture({
@@ -85,23 +86,23 @@ beforeEach(async () => {
       return {};
     }
     if (channelId === "bundled") {
-      return { secretTargetRegistryEntries: [target("channels.bundled.token")] };
+      return contract("channels.bundled.token");
     }
     if (channelId === "external" && !bundledOnly) {
-      return { secretTargetRegistryEntries: [target("channels.external.primary")] };
+      return contract("channels.external.primary");
     }
     return undefined;
   });
-  mocks.channelRecord.mockReset().mockImplementation((record: PluginManifestRecord) => ({
-    secretTargetRegistryEntries:
-      record.id === "owner"
-        ? [target("channels.external.primary"), target("plugins.entries.owner.config.extraToken")]
-        : record.id === "other"
-          ? [target("channels.external.secondary")]
-          : record.id === "extension"
-            ? [target("channels.bundled.extraToken"), target("channels.empty.extraToken")]
-            : [],
-  }));
+  const contracts: Record<string, string[]> = {
+    owner: ["channels.external.primary", "plugins.entries.owner.config.extraToken"],
+    other: ["channels.external.secondary"],
+    extension: ["channels.bundled.extraToken", "channels.empty.extraToken"],
+  };
+  mocks.channelRecord
+    .mockReset()
+    .mockImplementation((record: PluginManifestRecord) =>
+      contract(...(contracts[record.id] ?? [])),
+    );
   query = await import("./target-registry-query.js");
 });
 
@@ -266,6 +267,24 @@ describe("secret target path ownership", () => {
 
   it("resolves bundled channel hits without metadata discovery", () => {
     expectPath(["channels", "bundled", "token"], "channels.bundled.token");
+    expect(resolvePath(["channels", "bundled", "token"])?.refPathSegments).toBeUndefined();
+    expectUndiscovered(mocks.metadata, mocks.channelRecord);
+  });
+
+  it("discovers selected configured channel targets without plugin metadata", () => {
+    expect(
+      discoverSelected({ channels: { bundled: { token: "test-token" } } }, [
+        "channels.bundled.token",
+      ]),
+    ).toEqual(["channels.bundled.token"]);
+    expectUndiscovered(mocks.metadata, mocks.channelRecord);
+  });
+
+  it.each([
+    ["channels.bundled.token", ["channels", "bundled", "token"]],
+    ["auth-profiles.api_key.key", ["profiles", "openai:default", "key"]],
+  ] as const)("resolves %s plan targets without plugin metadata", (type, segments) => {
+    expect(resolvePlan(type, [...segments])?.entry.id).toBe(type);
     expectUndiscovered(mocks.metadata, mocks.channelRecord);
   });
 
@@ -307,14 +326,27 @@ describe("secret target path ownership", () => {
     expectUndiscovered(mocks.metadata, mocks.channel, mocks.channelRecord);
   });
 
-  it("discovers every configured external channel owner", () => {
-    expect(
-      discover({
-        channels: {
-          external: { primary: "synthetic-primary", secondary: "synthetic-secondary" },
-        },
-      }),
-    ).toEqual(["channels.external.primary", "channels.external.secondary"]);
+  it("discovers every external owner without reusing another config's registry", () => {
+    const env = { HOME: "/audit-home" };
+    const external = {
+      channels: {
+        external: { primary: "synthetic-primary", secondary: "synthetic-secondary" },
+      },
+      plugins: { load: { paths: ["/plugins/first"] }, entries: {} },
+    };
+    const changed = {
+      channels: { external: { secondary: "synthetic-next" } },
+      plugins: { load: { paths: ["/plugins/changed"] }, entries: {} },
+    };
+    expect(discover(external, { env })).toEqual([
+      "channels.external.primary",
+      "channels.external.secondary",
+    ]);
+    expect(discover(changed, { env })).toEqual(["channels.external.secondary"]);
+    expect(mocks.metadata).toHaveBeenCalledTimes(2);
+    expect(mocks.metadata).toHaveBeenLastCalledWith(
+      expect.objectContaining({ config: changed, env }),
+    );
   });
 
   it("uses prepared manifests without loading contracts for absent channel subtrees", () => {

@@ -4,34 +4,21 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import type { SecretEgressProxyWorkerHandle } from "./egress-proxy/proxy-worker.js";
+import { publicCa, startProxy, useEgressProxyMock } from "./egress.test-support.js";
 import { withConfiguredModelEgress } from "./model-egress.js";
 import { resolveSecretSentinel } from "./sentinel.js";
 
-const startProxy = vi.hoisted(() =>
-  vi.fn<typeof import("./egress-proxy/proxy-worker.js").startSecretEgressProxyWorker>(),
-);
-vi.mock("./egress-proxy/proxy-worker.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("./egress-proxy/proxy-worker.js")>()),
-  startSecretEgressProxyWorker: startProxy,
-}));
-
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 const credential = "synthetic-model-egress-api-key";
-const publicCa = "synthetic-public-ca-bundle";
 let config: OpenClawConfig;
-let proxy: SecretEgressProxyWorkerHandle;
-const revoke = vi.fn();
+const { proxy, revoke } = useEgressProxyMock();
 
 beforeEach(async () => {
-  vi.clearAllMocks();
   vi.stubEnv("OPENAI_BASE_URL", undefined);
   vi.stubEnv("OPENCLAW_SECRET_SENTINELS", "off");
   const dir = tempDirs.make("model-egress-test-");
   const secretPath = path.join(dir, "key.txt");
-  const caPath = path.join(dir, "ca.pem");
   await fs.writeFile(secretPath, credential, { mode: 0o600 });
-  await fs.writeFile(caPath, publicCa);
   config = {
     secrets: {
       providers: { model_key: { source: "file", path: secretPath, mode: "singleValue" } },
@@ -46,24 +33,6 @@ beforeEach(async () => {
       },
     },
   };
-  proxy = {
-    caCertPath: caPath,
-    proxyOrigin: "http://127.0.0.1:12345",
-    getCertificateStatus: async () => ({
-      state: "ready",
-      caExpiresAt: "2030-01-01",
-      failedCertificates: 0,
-    }),
-    registerProcess: vi.fn(async () => ({
-      env: {
-        HTTPS_PROXY: "http://openclaw:synthetic-proxy-token@127.0.0.1:12345",
-        NODE_EXTRA_CA_CERTS: caPath,
-      },
-      revoke,
-    })),
-    stop: vi.fn(async () => {}),
-  };
-  startProxy.mockResolvedValue(proxy);
 });
 
 afterEach(() => vi.unstubAllEnvs());

@@ -17,26 +17,24 @@ import {
   closeOpenClawStateDatabaseAsync,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
+import {
+  createApplyFixture,
+  createOpenAiProviderConfig,
+  OPENAI_API_KEY_ENV_REF as ENV_REF,
+  writeJsonFile,
+} from "./apply.test-support.js";
 import { runSecretsAudit } from "./audit.js";
+import { describeSecretResolutionError } from "./resolve-errors.js";
+import { resolveSecretRefString } from "./resolve.js";
+import { isRetryableSecretDegradationReason } from "./runtime-degraded-state.js";
 import { writeSecretStoreEntry } from "./store/secret-store.js";
 
 type AuditFixture = Awaited<ReturnType<typeof createAuditFixture>>;
 
-const OPENAI_API_KEY_MARKER = "OPENAI_API_KEY"; // pragma: allowlist secret
-const ENV_REF = { source: "env", provider: "default", id: OPENAI_API_KEY_MARKER };
+const OPENAI_API_KEY_MARKER = ENV_REF.id;
 
 function modelProvider(apiKey: unknown = ENV_REF, extra: Record<string, unknown> = {}) {
-  return {
-    baseUrl: "https://api.openai.com/v1",
-    api: "openai-completions",
-    apiKey,
-    models: [{ id: "gpt-5", name: "gpt-5" }],
-    ...extra,
-  };
-}
-
-async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  return { ...createOpenAiProviderConfig(apiKey), ...extra };
 }
 
 function writeAuthStore(fixture: AuditFixture, value: unknown): void {
@@ -54,11 +52,6 @@ const modelsConfig = (openai: ReturnType<typeof modelProvider>) => ({
   models: { providers: { openai } },
 });
 
-function resolveRuntimePathEnv(): string {
-  const value = process.env.PATH;
-  return value?.trim() ? value : "/usr/bin:/bin";
-}
-
 function expectFinding(
   report: Awaited<ReturnType<typeof runSecretsAudit>>,
   match: { code?: string; file?: string; jsonPath?: string },
@@ -74,28 +67,16 @@ const expectPathMissing = (filePath: string) =>
   expect(fs.stat(filePath)).rejects.toMatchObject({ code: "ENOENT" });
 
 async function createAuditFixture() {
-  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-secrets-audit-"));
-  const stateDir = path.join(rootDir, ".openclaw");
-  const configPath = path.join(stateDir, "openclaw.json");
-  const agentDir = path.join(stateDir, "agents", "main", "agent");
-
-  await fs.mkdir(path.dirname(configPath), { recursive: true });
-  await fs.mkdir(agentDir, { recursive: true });
-
+  const fixture = await createApplyFixture(
+    await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-secrets-audit-")),
+  );
   return {
-    rootDir,
-    stateDir,
-    configPath,
-    agentDir,
-    authStorePath: resolveAuthProfileDatabasePath(agentDir),
-    authJsonPath: path.join(agentDir, "auth.json"),
-    modelsPath: path.join(agentDir, "models.json"),
-    envPath: path.join(stateDir, ".env"),
+    ...fixture,
+    modelsPath: path.join(fixture.agentDir, "models.json"),
     env: {
-      OPENCLAW_STATE_DIR: stateDir,
-      OPENCLAW_CONFIG_PATH: configPath,
+      ...fixture.env,
       OPENAI_API_KEY: "env-openai-key", // pragma: allowlist secret
-      PATH: resolveRuntimePathEnv(),
+      PATH: process.env.PATH?.trim() ? process.env.PATH : "/usr/bin:/bin",
     },
   };
 }
@@ -203,6 +184,64 @@ describe("secrets audit", () => {
     closeOpenClawAgentDatabasesForTest();
     await closeOpenClawStateDatabaseAsync();
     await fs.rm(fixture.rootDir, { recursive: true, force: true });
+  });
+
+  describe("store SecretRef resolution", () => {
+    const ref = { source: "store", provider: "default", id: "STORED_API_KEY" } as const;
+    const config = (alias: string, source: "env" | "store") => ({
+      secrets: { providers: { [alias]: { source } } },
+    });
+    const resolve = (provider = "default", configuredSource: "env" | "store" = "store") =>
+      resolveSecretRefString(
+        { ...ref, provider },
+        { config: config(provider, configuredSource), env: fixture.env },
+      );
+
+    it.each([
+      ["default", "env"],
+      ["teamstore", "store"],
+    ] as const)("resolves store alias %s configured as %s", async (provider, source) => {
+      await writeSecretStoreEntry({
+        scope: { kind: "team" },
+        name: ref.id,
+        value: "resolved-store-secret",
+        kind: "secret",
+        updatedBy: "test",
+        database: { env: fixture.env },
+      });
+      await expect(resolve(provider, source)).resolves.toBe("resolved-store-secret");
+    });
+    it("rejects a non-default store alias configured for another source", async () => {
+      await expect(resolve("envmain", "env")).rejects.toMatchObject({
+        code: "SECRET_PROVIDER_INVALID",
+        source: "store",
+        provider: "envmain",
+      });
+    });
+    it("resolves the env default when a store provider uses the same alias", async () => {
+      await expect(
+        resolveSecretRefString(ENV_REF, { config: config("default", "store"), env: fixture.env }),
+      ).resolves.toBe("env-openai-key");
+    });
+    it("maps a missing name to a retryable not-found degradation", async () => {
+      const error = await resolveSecretRefString(
+        { ...ref, id: "MISSING_API_KEY" },
+        { config: {}, env: fixture.env },
+      ).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ code: "SECRET_REF_NOT_FOUND", source: "store" });
+      const reason = describeSecretResolutionError(error);
+      expect(reason).toBe("secret reference was not found");
+      expect(isRetryableSecretDegradationReason(reason ?? "")).toBe(true);
+    });
+    it("maps database access failures to provider unavailable", async () => {
+      fixture.env.OPENCLAW_STATE_DIR = path.join(fixture.rootDir, "not-a-directory");
+      await fs.writeFile(fixture.env.OPENCLAW_STATE_DIR, "not a directory", "utf8");
+      const error = await resolveSecretRefString(ref, { config: {}, env: fixture.env }).catch(
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({ code: "SECRET_PROVIDER_UNAVAILABLE", source: "store" });
+      expect(describeSecretResolutionError(error)).toBe("secret provider failed");
+    });
   });
 
   it("reports plaintext + shadowing findings", async () => {

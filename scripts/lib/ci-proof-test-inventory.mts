@@ -3497,7 +3497,6 @@ export const PR_PROTECTED_RUNTIME_TEST_FILES: readonly string[] = [
   "src/secrets/audit.test.ts",
   "src/secrets/configure.output.test.ts",
   "src/secrets/provider-integrations.test.ts",
-  "src/secrets/resolve-store.test.ts",
   "src/secrets/resolve.test.ts",
   "src/secrets/runtime-command-secrets.test.ts",
   "src/secrets/runtime-provider-and-media-surfaces.test.ts",

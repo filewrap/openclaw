@@ -507,7 +507,6 @@ export const databaseWorkerCoreTestFiles = [
   "src/secrets/store/secret-store.redaction.test.ts",
   "src/secrets/store/secret-store.test.ts",
   "src/secrets/audit.test.ts",
-  "src/secrets/resolve-store.test.ts",
   "src/agents/bash-tools.exec.store-env.test.ts",
   "src/cli/secrets-store-cli.kind-inheritance.test.ts",
   "src/commands/doctor-gateway-services.writer-order.test.ts",
