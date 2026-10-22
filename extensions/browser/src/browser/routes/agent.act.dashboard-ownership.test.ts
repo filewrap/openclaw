@@ -131,11 +131,11 @@ function heldOperation(targetId: string) {
   return {
     ready,
     closing,
-    async complete(
+    complete: async (
       { response, completion }: ReturnType<typeof startRoute>,
       revoke: string,
       verify: () => void | Promise<void>,
-    ) {
+    ) => {
       let retirement: Promise<unknown> | undefined;
       try {
         await atBarrier(ready.entered, completion, "Operation ended before preparation", response);

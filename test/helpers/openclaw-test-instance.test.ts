@@ -1819,10 +1819,11 @@ describe("openclaw test instance", () => {
     const exitedLeader = scenario.label === "unverified exited leader" || forceWindowsTree;
     const heldPipe = scenario.label === "held pipe";
     const processState = createGatewayProcessState({ exitCode: exitedLeader ? 7 : null });
+    const kill = vi.fn(() => true);
     // SAFETY: The stub supplies every process and pipe member consumed by the stopper.
     const child = Object.assign(processState, {
       pid: process.pid,
-      kill: vi.fn(() => true),
+      kill,
       stdout,
       stderr,
     }) as unknown as Parameters<typeof testing.stopWindowsGatewayProcess>[0];
@@ -1881,7 +1882,7 @@ describe("openclaw test instance", () => {
         await expect(stop).rejects.toBeInstanceOf(Error);
         if (exitedLeader) {
           await expect(stop).rejects.toMatchObject({ processTreeState: "indeterminate" });
-          expect(child.kill).not.toHaveBeenCalled();
+          expect(kill).not.toHaveBeenCalled();
           expect([stdout.closed, stderr.closed]).toEqual([preclosed, preclosed]);
         }
       } else {

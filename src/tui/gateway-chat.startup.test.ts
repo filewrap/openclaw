@@ -51,20 +51,23 @@ function createFixture(delayWrites = false) {
           writes.push(req);
         }
       }
-      if (req.method === "sessions.create") {
-        assert(typeof params.key === "string");
-      }
-      const payloads: Record<string, unknown> = {
-        "sessions.create": { ok: true, key: `agent:main:${params.key}` },
-        "chat.send": { runId: params.idempotencyKey },
-        "chat.abort": { ok: true, aborted: false },
-        "sessions.describe": {
-          session: { key: params.key, sessionId: "fixture-session" },
-          defaults: {},
-        },
-        "sessions.list": { ts: 0, path: "", count: 0, sessions: [], defaults: {} },
-      };
-      const payload = payloads[req.method] ?? {
+      const payloads = new Map<string, () => unknown>([
+        [
+          "sessions.create",
+          () => {
+            assert(typeof params.key === "string");
+            return { ok: true, key: `agent:main:${params.key}` };
+          },
+        ],
+        ["chat.send", () => ({ runId: params.idempotencyKey })],
+        ["chat.abort", () => ({ ok: true, aborted: false })],
+        [
+          "sessions.describe",
+          () => ({ session: { key: params.key, sessionId: "fixture-session" }, defaults: {} }),
+        ],
+        ["sessions.list", () => ({ ts: 0, path: "", count: 0, sessions: [], defaults: {} })],
+      ]);
+      const payload = payloads.get(req.method)?.() ?? {
         messages: [],
         sessionInfo: { hasActiveRun: false },
       };
@@ -124,7 +127,6 @@ function createFixture(delayWrites = false) {
     },
     attempts,
     writes,
-    systemMessages: () => chatLog.addSystem.mock.calls.flat().join("\n"),
     actions,
     commands,
     submit: (action: "new" | "send") =>
@@ -160,7 +162,9 @@ it.each([
     await vi.advanceTimersByTimeAsync(0);
     expect(settled).not.toHaveBeenCalled();
     expect(f.state.activityStatus).not.toBe("aborted");
-    expect(f.systemMessages()).not.toContain("session change in progress");
+    expect(f.chatLog.addSystem.mock.calls.flat().join("\n")).not.toContain(
+      "session change in progress",
+    );
     await submit();
     expect(f.writes).toEqual([firstWrite]);
     f.finishWrite();
@@ -174,7 +178,9 @@ it.each([
         runId: params.idempotencyKey,
       });
     }
-    expect(f.systemMessages()).not.toMatch(/(?:new session|send) (?:canceled|failed)/);
+    expect(f.chatLog.addSystem.mock.calls.flat().join("\n")).not.toMatch(
+      /(?:new session|send) (?:canceled|failed)/,
+    );
     await vi.advanceTimersByTimeAsync(GATEWAY_STARTUP_ADMISSION_WAIT_MS);
     expect(f.writes).toEqual([firstWrite]);
   },

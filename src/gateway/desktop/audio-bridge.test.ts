@@ -258,7 +258,7 @@ describe("screen-owned desktop audio", () => {
       });
       expect(native.captureAdmitted).toHaveBeenCalledTimes(allowed ? 1 : 0);
       expect(requesterAbort.signal.aborted).toBe(false);
-      expect(f.peer.sent.filter(Buffer.isBuffer)).toEqual(
+      expect(f.peer.sent.filter((frame) => Buffer.isBuffer(frame))).toEqual(
         allowed ? [Buffer.from([0, 128, 255, 127])] : [],
       );
       expect(f.peer.sent.filter((frame) => typeof frame === "string")).toEqual(
